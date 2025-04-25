@@ -8,11 +8,73 @@ import xgboost as xgb
 from sklearn.impute import SimpleImputer
 
 class DataLoader:
-    def __init__(self, fda_path, stock_path, window_days=100):
+    def __init__(self, fda_path, stock_paths, window_days=100):
+        """
+        Initialize DataLoader with Event data path and a list of stock data paths.
+        
+        Parameters:
+        fda_path (str): Path to Event data CSV
+        stock_paths (list): List of paths to stock data CSV files
+        window_days (int): Number of days to look before and after event date
+        """
         self.fda_path = fda_path
-        self.stock_path = stock_path
+        self.stock_paths = stock_paths if isinstance(stock_paths, list) else [stock_paths]
         self.window_days = window_days
         
+    def _load_single_stock_file(self, stock_path):
+        """Load and process a single stock data file"""
+        try:
+            # Read just the header row to check column names
+            headers = pd.read_csv(stock_path, nrows=0).columns
+            
+            # Check for various possible date column names (case-insensitive)
+            date_col = None
+            for col in headers:
+                if col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt']:
+                    date_col = col
+                    break
+            
+            # If we found a date column, load with parse_dates
+            if date_col:
+                stock_data = pd.read_csv(stock_path, parse_dates=[date_col])
+                # Rename the date column to 'date' for consistency
+                stock_data = stock_data.rename(columns={date_col: 'date'})
+            else:
+                # No obvious date column found, load without parsing dates
+                stock_data = pd.read_csv(stock_path)
+                print(f"Warning: No date column identified in stock data file {stock_path}. Please check the file format.")
+                
+            # Rename sym_root to ticker for consistency
+            if 'sym_root' in stock_data.columns and 'ticker' not in stock_data.columns:
+                stock_data = stock_data.rename(columns={'sym_root': 'ticker'})
+                
+            # Ensure a date column exists
+            if 'date' not in stock_data.columns:
+                # Check for other possible date columns
+                date_columns = [col for col in stock_data.columns if 
+                               col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt', 'time', 'timestamp', 'date_time']]
+                
+                if date_columns:
+                    # Use the first matching date column
+                    original_date_col = date_columns[0]
+                    stock_data = stock_data.rename(columns={original_date_col: 'date'})
+                    print(f"Renamed column '{original_date_col}' to 'date'")
+                else:
+                    raise ValueError(f"No date column found in stock data file {stock_path}. Please ensure your CSV has a date column.")
+            
+            # Ensure date column is datetime format
+            if not pd.api.types.is_datetime64_any_dtype(stock_data['date']):
+                stock_data['date'] = pd.to_datetime(stock_data['date'], errors='coerce')
+                # Check if conversion was successful
+                if stock_data['date'].isna().all():
+                    raise ValueError(f"Could not convert date column to datetime format in file {stock_path}. Check the date values in your CSV.")
+                
+            return stock_data
+            
+        except Exception as e:
+            print(f"Error loading stock data from {stock_path}: {e}")
+            raise ValueError(f"Failed to load stock data from {stock_path}. Please check the file exists and is properly formatted.")
+    
     def load_data(self):
         """Load FDA approval data and stock data, then merge them"""
         # Load FDA approval data - always use CSV now
@@ -32,57 +94,18 @@ class DataLoader:
         approval_events = fda_data[['ticker', 'Approval Date', 'Drug Name']].drop_duplicates()
         print(f"Found {len(approval_events)} unique FDA approval events")
         
-        # Load stock data - always use CSV now
-        # First peek at the headers to find the date column
-        try:
-            # Read just the header row to check column names
-            headers = pd.read_csv(self.stock_path, nrows=0).columns
+        # Load and merge all stock data files
+        stock_data_list = []
+        for stock_path in self.stock_paths:
+            stock_data = self._load_single_stock_file(stock_path)
+            stock_data_list.append(stock_data)
             
-            # Check for various possible date column names (case-insensitive)
-            date_col = None
-            for col in headers:
-                if col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt']:
-                    date_col = col
-                    break
+        # Concatenate all stock data files
+        if not stock_data_list:
+            raise ValueError("No stock data files were successfully loaded")
             
-            # If we found a date column, load with parse_dates
-            if date_col:
-                stock_data = pd.read_csv(self.stock_path, parse_dates=[date_col])
-                # Rename the date column to 'date' for consistency
-                stock_data = stock_data.rename(columns={date_col: 'date'})
-            else:
-                # No obvious date column found, load without parsing dates
-                stock_data = pd.read_csv(self.stock_path)
-                print("Warning: No date column identified in stock data. Please check the file format.")
-        except Exception as e:
-            print(f"Error loading stock data: {e}")
-            raise ValueError(f"Failed to load stock data from {self.stock_path}. Please check the file exists and is properly formatted.")
+        stock_data = pd.concat(stock_data_list, ignore_index=True)
         
-        # Rename sym_root to ticker for consistency
-        if 'sym_root' in stock_data.columns and 'ticker' not in stock_data.columns:
-            stock_data = stock_data.rename(columns={'sym_root': 'ticker'})
-            
-        # Ensure a date column exists
-        if 'date' not in stock_data.columns:
-            # Check for other possible date columns
-            date_columns = [col for col in stock_data.columns if 
-                           col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt', 'time', 'timestamp', 'date_time']]
-            
-            if date_columns:
-                # Use the first matching date column
-                original_date_col = date_columns[0]
-                stock_data = stock_data.rename(columns={original_date_col: 'date'})
-                print(f"Renamed column '{original_date_col}' to 'date'")
-            else:
-                raise ValueError("No date column found in stock data. Please ensure your CSV has a date column.")
-        
-        # Ensure date column is datetime format
-        if not pd.api.types.is_datetime64_any_dtype(stock_data['date']):
-            stock_data['date'] = pd.to_datetime(stock_data['date'], errors='coerce')
-            # Check if conversion was successful
-            if stock_data['date'].isna().all():
-                raise ValueError("Could not convert date column to datetime format. Check the date values in your CSV.")
-            
         # Remove duplicates in stock data
         stock_data = stock_data.drop_duplicates(subset=['date', 'ticker'])
         
