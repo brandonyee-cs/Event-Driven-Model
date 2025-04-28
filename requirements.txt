@@ -1,17 +1,17 @@
 # Core data manipulation and analysis
-pandas>=1.3.0
-numpy>=1.20.0
+pandas
+numpy
 
 # Visualization
-matplotlib>=3.4.0
-seaborn>=0.11.0
+matplotlib
+seaborn
 
 # Machine learning
-scikit-learn>=1.0.0
-xgboost>=1.5.0
+scikit-learn
+xgboost
 
 # Data reading/processing
-pyarrow>=7.0.0  # For Parquet file support
+pyarrow
 
 # Warnings and system utilities
 warnings
