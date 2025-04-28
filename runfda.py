@@ -11,17 +11,26 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 try:
-    from src.fda_processor import DataLoader, FeatureEngineer, Analysis
+    from fda_processor import DataLoader, FeatureEngineer, Analysis
     print("Successfully imported FDA processor classes.")
 except ImportError as e:
     print(f"Error importing from fda_processor: {e}"); sys.exit(1)
 
 # --- File Paths and Parameters ---
 # <<< --- UPDATE THESE PATHS --- >>>
-FDA_FILE = 'path/to/your/fda_approvals.csv'
+FDA_FILE = '/home/d87016661/fda_ticker_list_2000_to_2024.csv/'
 STOCK_FILES = [
-    'path/to/stock_data_part1.csv',
-    'path/to/stock_data_part2.csv'
+    '/home/d87016661/crsp_dsf-2000-2001.parquet/',   
+    '/home/d87016661/crsp_dsf-2002-2003.parquet/',
+    '/home/d87016661/crsp_dsf-2004-2005.parquet/',
+    '/home/d87016661/crsp_dsf-2006-2007.parquet/',
+    '/home/d87016661/crsp_dsf-2008-2009.parquet/',
+    '/home/d87016661/crsp_dsf-2010-2011.parquet/',
+    '/home/d87016661/crsp_dsf-2016-2017.parquet/',
+    '/home/d87016661/crsp_dsf-2018-2019.parquet/',
+    '/home/d87016661/crsp_dsf-2020-2021.parquet/',
+    '/home/d87016661/crsp_dsf-2022-2023.parquet/',
+    '/home/d87016661/crsp_dsf-2024-2025.parquet/'
 ]
 # <<< -------------------------- >>>
 

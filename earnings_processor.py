@@ -8,7 +8,7 @@ import xgboost as xgb
 import warnings
 
 # Import shared models
-from src.models import TimeSeriesRidge, XGBoostDecileModel
+from models import TimeSeriesRidge, XGBoostDecileModel
 
 # Suppress SettingWithCopyWarning for cleaner output
 warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
