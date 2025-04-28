@@ -1,24 +1,14 @@
 # Core data manipulation and analysis
-pandas
-numpy
+pandas>=1.0.0,<2.0.0
+numpy>=1.18.0,<1.21.0  # Using a version compatible with older Python versions
 
 # Visualization
-matplotlib
-seaborn
+matplotlib>=3.0.0,<3.5.0
+seaborn>=0.11.0,<0.12.0
 
 # Machine learning
-scikit-learn
-xgboost
+scikit-learn>=0.24.0,<1.0.0
+xgboost>=1.3.0,<1.5.0
 
 # Data reading/processing
-pyarrow
-
-# Warnings and system utilities
-warnings
-os
-sys
-traceback
-
-# Optional: Jupyter for interactive development
-# jupyter>=1.0.0
-# notebook>=6.4.0
+pyarrow>=4.0.0  # For Parquet file support
