@@ -18,19 +18,19 @@ except ImportError as e:
 
 # --- File Paths and Parameters ---
 # <<< --- UPDATE THESE PATHS --- >>>
-FDA_FILE = '/home/d87016661/fda_ticker_list_2000_to_2024.csv/'
+FDA_FILE = '/home/d87016661/fda_ticker_list_2000_to_2024.csv'
 STOCK_FILES = [
-    '/home/d87016661/crsp_dsf-2000-2001.parquet/',   
-    '/home/d87016661/crsp_dsf-2002-2003.parquet/',
-    '/home/d87016661/crsp_dsf-2004-2005.parquet/',
-    '/home/d87016661/crsp_dsf-2006-2007.parquet/',
-    '/home/d87016661/crsp_dsf-2008-2009.parquet/',
-    '/home/d87016661/crsp_dsf-2010-2011.parquet/',
-    '/home/d87016661/crsp_dsf-2016-2017.parquet/',
-    '/home/d87016661/crsp_dsf-2018-2019.parquet/',
-    '/home/d87016661/crsp_dsf-2020-2021.parquet/',
-    '/home/d87016661/crsp_dsf-2022-2023.parquet/',
-    '/home/d87016661/crsp_dsf-2024-2025.parquet/'
+    '/home/d87016661/crsp_dsf-2000-2001.parquet',   
+    '/home/d87016661/crsp_dsf-2002-2003.parquet',
+    '/home/d87016661/crsp_dsf-2004-2005.parquet',
+    '/home/d87016661/crsp_dsf-2006-2007.parquet',
+    '/home/d87016661/crsp_dsf-2008-2009.parquet',
+    '/home/d87016661/crsp_dsf-2010-2011.parquet',
+    '/home/d87016661/crsp_dsf-2016-2017.parquet',
+    '/home/d87016661/crsp_dsf-2018-2019.parquet',
+    '/home/d87016661/crsp_dsf-2020-2021.parquet',
+    '/home/d87016661/crsp_dsf-2022-2023.parquet',
+    '/home/d87016661/crsp_dsf-2024-2025.parquet'
 ]
 # <<< -------------------------- >>>
 
