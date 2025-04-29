@@ -15,15 +15,15 @@ warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
 # Suppress FutureWarnings from seaborn/matplotlib
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-
 class DataLoader:
     def __init__(self, earnings_path, stock_paths, window_days=30):
         """
         Initialize DataLoader for Earnings events.
 
         Parameters:
-        earnings_path (str): Path to earnings announcement data CSV.
-        stock_paths (list or str): List/single path to stock data CSV files.
+        earnings_path (str): Path to the event data CSV (e.g., IBES Summary or Actuals).
+                             *Must contain ticker and the actual announcement date*.
+        stock_paths (list or str): List/single path to stock price/return data CSV files.
         window_days (int): Number of days before/after event date.
         """
         self.earnings_path = earnings_path
@@ -33,15 +33,12 @@ class DataLoader:
         self.window_days = window_days
 
     def _load_single_stock_file(self, stock_path):
-        """Load and process a single stock data file."""
-        # This is very similar to fda_processor, maybe abstract later
+        """Load and process a single stock data file. (Identical to previous version)"""
         try:
             headers = pd.read_csv(stock_path, nrows=0).columns
             date_col = next((col for col in headers if col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt']), None)
-
             if date_col:
-                stock_data = pd.read_csv(stock_path, parse_dates=[date_col])
-                stock_data = stock_data.rename(columns={date_col: 'date'})
+                stock_data = pd.read_csv(stock_path, parse_dates=[date_col]).rename(columns={date_col: 'date'})
             else:
                 stock_data = pd.read_csv(stock_path)
                 print(f"Warning: No standard date column in {stock_path}. Attempting conversion.")
@@ -61,7 +58,6 @@ class DataLoader:
                      if stock_data['date'].isna().all(): raise ValueError("All dates failed parse.")
                  except Exception as e: raise ValueError(f"Date conversion failed in {stock_path}: {e}")
 
-            # Earnings features might need volume
             required_cols = ['date', 'ticker', 'prc', 'ret', 'vol']
             missing_cols = [col for col in required_cols if col not in stock_data.columns]
             if missing_cols:
@@ -73,59 +69,64 @@ class DataLoader:
             numeric_cols = ['prc', 'ret', 'vol', 'openprc', 'askhi', 'bidlo', 'shrout']
             for col in numeric_cols:
                 if col in stock_data.columns: stock_data[col] = pd.to_numeric(stock_data[col], errors='coerce')
-
             return stock_data
         except FileNotFoundError: raise ValueError(f"Stock file not found: {stock_path}")
         except Exception as e: raise ValueError(f"Error processing {stock_path}: {e}")
 
     def load_data(self):
-        """Load earnings announcement data and stock data, then merge them"""
+        """
+        Load earnings event dates (from IBES summary/actuals) and stock data,
+        then merge them. Focuses only on Ticker and Date from the event file.
+        """
+        # --- Load Earnings Event Dates ---
         try:
-            print(f"Loading earnings event data from: {self.earnings_path}")
-            earnings_data = pd.read_csv(self.earnings_path)
+            print(f"Loading earnings event dates from: {self.earnings_path}")
+            # Load only necessary columns if possible, otherwise load all and select
+            # --> Determine necessary cols first
+            event_df_peek = pd.read_csv(self.earnings_path, nrows=5) # Peek at header
 
-            date_col = next((c for c in ['Announcement Date', 'date', 'report_date', 'rdq'] if c in earnings_data.columns), None)
-            if not date_col: raise ValueError("Missing Announcement Date column.")
-            if date_col != 'Announcement Date': earnings_data = earnings_data.rename(columns={date_col: 'Announcement Date'})
-            earnings_data['Announcement Date'] = pd.to_datetime(earnings_data['Announcement Date'], errors='coerce')
-            earnings_data.dropna(subset=['Announcement Date'], inplace=True)
+            # Find Ticker Column
+            ticker_col = next((c for c in ['TICKER', 'ticker', 'Ticker', 'symbol', 'tic'] if c in event_df_peek.columns), None)
+            if not ticker_col: raise ValueError("Missing Ticker column (or recognized alternative) in event file.")
 
-            ticker_col = next((c for c in ['ticker', 'Ticker', 'symbol', 'tic'] if c in earnings_data.columns), None)
-            if not ticker_col: raise ValueError("Missing ticker column.")
-            if ticker_col != 'ticker': earnings_data = earnings_data.rename(columns={ticker_col: 'ticker'})
-            earnings_data['ticker'] = earnings_data['ticker'].astype(str).str.upper()
+            # Find Announcement Date Column (MUST be actual announcement date)
+            # Add ANNDATS based on OCR
+            date_col = next((c for c in ['ANNDATS', 'Announcement Date', 'date', 'report_date', 'rdq'] if c in event_df_peek.columns), None)
+            if not date_col: raise ValueError("Missing Announcement Date column (e.g., ANNDATS, Announcement Date, date) in event file.")
 
-            # Standardize optional column names
-            rename_map = {}
-            optional_mapping = { # Standard Name: [Possible Original Names]
-                 'Quarter': ['Quarter', 'Fiscal Quarter', 'fqtr'], 'Surprise': ['Surprise', 'surprise', 'eps_surprise_pct'],
-                 'Expected EPS': ['Expected EPS', 'eps_expected', 'eps_cons'], 'Actual EPS': ['Actual EPS', 'eps_actual', 'eps'],
-                 'Time': ['Time', 'Announcement Time', 'announcement_time'], 'Sector': ['Sector', 'sector', 'gsector'],
-                 'Industry': ['Industry', 'industry', 'gsubind']}
-            final_event_cols = ['ticker', 'Announcement Date']
-            for std_name, poss_names in optional_mapping.items():
-                 orig_name = next((name for name in poss_names if name in earnings_data.columns), None)
-                 if orig_name:
-                     if orig_name != std_name: rename_map[orig_name] = std_name
-                     final_event_cols.append(orig_name) # Keep original temporarily
+            print(f"Using columns '{ticker_col}' and '{date_col}' from event file.")
 
-            earnings_events_raw = earnings_data[final_event_cols].copy()
-            earnings_events_raw.rename(columns=rename_map, inplace=True)
-            final_event_cols_std = list(rename_map.values()) + ['ticker', 'Announcement Date'] # Standard names present
-            final_event_cols_std = [c for c in final_event_cols_std if c in earnings_events_raw.columns] # Filter available
+            # Load only these two columns for efficiency
+            cols_to_load = [ticker_col, date_col]
+            event_data_raw = pd.read_csv(self.earnings_path, usecols=cols_to_load)
 
-            # Convert relevant optional cols to numeric
-            for col in ['Surprise', 'Expected EPS', 'Actual EPS']:
-                if col in earnings_events_raw.columns:
-                     earnings_events_raw[col] = pd.to_numeric(earnings_events_raw[col], errors='coerce')
+            # Rename to standard names
+            event_data_renamed = event_data_raw.rename(columns={
+                ticker_col: 'ticker',
+                date_col: 'Announcement Date'
+            })
 
-            earnings_events = earnings_events_raw.drop_duplicates(subset=['ticker', 'Announcement Date'], keep='first')
-            earnings_events = earnings_events[final_event_cols_std].reset_index(drop=True) # Keep only needed std cols
+            # Convert date and handle errors
+            event_data_renamed['Announcement Date'] = pd.to_datetime(event_data_renamed['Announcement Date'], errors='coerce')
+            initial_event_count = len(event_data_renamed)
+            event_data_renamed.dropna(subset=['Announcement Date'], inplace=True)
+            if len(event_data_renamed) < initial_event_count:
+                 print(f"Warning: Dropped {initial_event_count - len(event_data_renamed)} rows from event file due to invalid dates.")
 
-            print(f"Found {len(earnings_events)} unique earnings events.")
-            if len(earnings_events) == 0: raise ValueError("No valid earnings events found.")
-        except Exception as e: raise ValueError(f"Error loading earnings data: {e}")
+            # Convert ticker to uppercase
+            event_data_renamed['ticker'] = event_data_renamed['ticker'].astype(str).str.upper()
 
+            # Get unique ticker-date pairs
+            earnings_events = event_data_renamed[['ticker', 'Announcement Date']].drop_duplicates().reset_index(drop=True)
+
+            print(f"Found {len(earnings_events)} unique earnings events (Ticker-Date pairs).")
+            if len(earnings_events) == 0: raise ValueError("No valid earnings events found after processing.")
+
+        except FileNotFoundError: raise ValueError(f"Earnings event file not found: {self.earnings_path}")
+        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}")
+
+        # --- Load Stock Data (from potentially multiple files) ---
+        # (This section remains unchanged)
         stock_data_list, failed_files = [], []
         for stock_path in self.stock_paths:
             try:
@@ -146,24 +147,52 @@ class DataLoader:
         print(f"Combined stock data rows after deduplication: {len(stock_data_combined)}")
         if len(stock_data_combined) == 0: raise ValueError("Stock data empty after deduplication.")
 
+        # --- Merge Event Dates and Stock Data ---
         tickers_with_earnings = earnings_events['ticker'].unique()
         stock_data_filtered = stock_data_combined[stock_data_combined['ticker'].isin(tickers_with_earnings)].copy()
         print(f"Filtered stock data for {len(tickers_with_earnings)} tickers. Rows: {len(stock_data_filtered)}")
         if len(stock_data_filtered) == 0: raise ValueError("No stock data for relevant tickers.")
 
-        merged_data = pd.merge(stock_data_filtered, earnings_events, on='ticker', how='inner')
-        merged_data['days_to_announcement'] = (merged_data['date'] - merged_data['Announcement Date']).dt.days
-        event_window_data = merged_data[(merged_data['days_to_announcement'] >= -self.window_days) & (merged_data['days_to_announcement'] <= self.window_days)].copy()
-        if event_window_data.empty: raise ValueError("No stock data within event windows.")
+        # Merge based only on ticker (event date comes from earnings_events)
+        # We need to be careful if a ticker has multiple events
+        merged_data = pd.merge(
+            stock_data_filtered,
+            earnings_events, # Contains only ticker, Announcement Date
+            on='ticker',
+            how='inner'
+        )
 
+        # Calculate date difference relative to *each specific event date* for that ticker
+        merged_data['days_to_announcement'] = (merged_data['date'] - merged_data['Announcement Date']).dt.days
+
+        # Filter for the window around each specific event
+        event_window_data = merged_data[
+            (merged_data['days_to_announcement'] >= -self.window_days) &
+            (merged_data['days_to_announcement'] <= self.window_days)
+        ].copy()
+
+        if event_window_data.empty: raise ValueError("No stock data found within the specified window for any earnings events.")
+
+        # Add derived columns
         event_window_data['is_announcement_date'] = (event_window_data['days_to_announcement'] == 0).astype(int)
         event_window_data['event_id'] = event_window_data['ticker'] + "_" + event_window_data['Announcement Date'].dt.strftime('%Y%m%d')
-        print(f"Created windows for {event_window_data['event_id'].nunique()} earnings events.")
+
+        # **Crucially, remove columns from the event file we don't need downstream**
+        # Keep only columns originating from stock data + the ones we just created/standardized
+        stock_cols = list(stock_data_filtered.columns)
+        derived_cols = ['Announcement Date', 'days_to_announcement', 'is_announcement_date', 'event_id']
+        final_cols = [col for col in event_window_data.columns if col in stock_cols or col in derived_cols]
+        event_window_data = event_window_data[final_cols]
+
+        print(f"Created windows for {event_window_data['event_id'].nunique()} unique earnings events.")
         combined_data = event_window_data.sort_values(by=['ticker', 'Announcement Date', 'date']).reset_index(drop=True)
         print(f"Final Earnings dataset shape: {combined_data.shape}")
+        # print(f"Final columns: {combined_data.columns.tolist()}") # Optional: check columns
         return combined_data
 
 
+# --- FeatureEngineer Class ---
+# (Modified to be robust to missing optional columns like Surprise, Time, Quarter, Sector, Industry)
 class FeatureEngineer:
     def __init__(self, prediction_window=3):
         self.windows = [5, 10, 20]
@@ -177,7 +206,7 @@ class FeatureEngineer:
         self.top_industries = None
 
     def create_target(self, df, price_col='prc'):
-        """Create target variable for Earnings analysis."""
+        """Create target variable for Earnings analysis. (Unchanged)"""
         print(f"Creating target 'future_ret' (window: {self.prediction_window} days)...")
         df = df.copy()
         if 'event_id' not in df.columns: raise ValueError("'event_id' required.")
@@ -190,42 +219,38 @@ class FeatureEngineer:
         return df
 
     def calculate_features(self, df, price_col='prc', return_col='ret', volume_col='vol', fit_categorical=False):
-        """Calculate features for Earnings analysis."""
+        """Calculate features for Earnings analysis. Robust to missing optional columns."""
         print("Calculating Earnings features...")
         df = df.copy()
-        required = ['event_id', price_col, return_col, 'Announcement Date', 'date']
+        required = ['event_id', price_col, return_col, 'Announcement Date', 'date'] # Base requirements
         if not all(c in df.columns for c in required): raise ValueError(f"Missing required columns: {required}")
         has_volume = volume_col in df.columns
-        if not has_volume: print(f"Warning: Volume column '{volume_col}' not found. Volume features skipped.")
+        if not has_volume: print(f"Info: Volume column '{volume_col}' not found. Volume features skipped.")
 
         df = df.sort_values(by=['event_id', 'date'])
         grouped = df.groupby('event_id')
         current_features = []
-        self.categorical_features = [] # Reset categorical list for this run
+        self.categorical_features = [] # Reset
 
-        # --- Technical Features ---
-        for window in self.windows:
-            col = f'momentum_{window}'; df[col] = grouped[price_col].transform(lambda x: x.pct_change(periods=window)); current_features.append(col)
+        # --- Technical Features (Should always be calculable) ---
+        for window in self.windows: col = f'momentum_{window}'; df[col] = grouped[price_col].transform(lambda x: x.pct_change(periods=window)); current_features.append(col)
         df['delta_momentum_5_10'] = df['momentum_5'] - df['momentum_10']; current_features.append('delta_momentum_5_10')
         df['delta_momentum_10_20'] = df['momentum_10'] - df['momentum_20']; current_features.append('delta_momentum_10_20')
-
-        for window in self.windows:
-            col = f'volatility_{window}'; min_p = max(2, min(window, 5)); df[col] = grouped[return_col].transform(lambda x: x.rolling(window, min_periods=min_p).std()); current_features.append(col)
+        for window in self.windows: col = f'volatility_{window}'; min_p = max(2, min(window, 5)); df[col] = grouped[return_col].transform(lambda x: x.rolling(window, min_periods=min_p).std()); current_features.append(col)
         df['delta_volatility_5_10'] = df['volatility_5'] - df['volatility_10']; current_features.append('delta_volatility_5_10')
         df['delta_volatility_10_20'] = df['volatility_10'] - df['volatility_20']; current_features.append('delta_volatility_10_20')
-
         df['log_ret'] = grouped[price_col].transform(lambda x: np.log(x / x.shift(1))); current_features.append('log_ret')
         if 'days_to_announcement' in df.columns: current_features.append('days_to_announcement')
         for lag in range(1, 4): col = f'ret_lag_{lag}'; df[col] = grouped[return_col].shift(lag); current_features.append(col)
 
-        # --- Volume Features ---
+        # --- Volume Features (Conditional) ---
         if has_volume:
             df['norm_vol'] = grouped[volume_col].transform(lambda x: x / x.rolling(20, min_periods=5).mean()); current_features.append('norm_vol')
             for window in [5, 10]: col = f'vol_momentum_{window}'; df[col] = grouped[volume_col].transform(lambda x: x.pct_change(periods=window)); current_features.append(col)
-        else: # Create NaN placeholders
-            for col in ['norm_vol', 'vol_momentum_5', 'vol_momentum_10']: df[col] = np.nan; current_features.append(col)
+        else: # Add placeholders if volume missing
+             for col in ['norm_vol', 'vol_momentum_5', 'vol_momentum_10']: df[col] = np.nan; current_features.append(col)
 
-        # --- Pre-announcement Return ---
+        # --- Pre-announcement Return (Should always be calculable) ---
         pre_announce_rets = {}
         for event_id, group in grouped:
             announce_date = group['Announcement Date'].iloc[0]
@@ -233,122 +258,109 @@ class FeatureEngineer:
             pre_announce_rets[event_id] = pre_data[return_col].sum() if not pre_data.empty else 0
         df['pre_announce_ret_30d'] = df['event_id'].map(pre_announce_rets); current_features.append('pre_announce_ret_30d')
 
-        # --- Earnings Surprise Features ---
+        # --- Earnings Surprise Features (Conditional) ---
+        # Check for 'Surprise' column loaded *by the DataLoader*
         if 'Surprise' in df.columns:
-            df['surprise_val'] = pd.to_numeric(df['Surprise'], errors='coerce').fillna(0) # Fill NaNs with 0 surprise
+            df['surprise_val'] = pd.to_numeric(df['Surprise'], errors='coerce').fillna(0)
             df['pos_surprise'] = (df['surprise_val'] > 0).astype(int); current_features.append('pos_surprise')
             df['neg_surprise'] = (df['surprise_val'] < 0).astype(int); current_features.append('neg_surprise')
             df['surprise_magnitude'] = df['surprise_val'].abs(); current_features.append('surprise_magnitude')
-            current_features.append('surprise_val')
+            current_features.append('surprise_val') # Keep the numeric value itself
 
-            # Previous quarter interaction (simple shift based on event sequence for ticker)
-            df['prev_surprise'] = df.groupby('ticker')['surprise_val'].shift(1)
-            df['prev_surprise'].fillna(0, inplace=True) # Fill first event's prev surprise with 0
+            # Previous surprise calculation (remains the same logic, depends only on surprise_val)
+            df['prev_surprise'] = df.groupby('ticker')['surprise_val'].shift(1).fillna(0)
             df['consecutive_beat'] = ((df['surprise_val'] > 0) & (df['prev_surprise'] > 0)).astype(int); current_features.append('consecutive_beat')
             df['consecutive_miss'] = ((df['surprise_val'] < 0) & (df['prev_surprise'] < 0)).astype(int); current_features.append('consecutive_miss')
             current_features.append('prev_surprise')
-        else: print("Info: 'Surprise' column not found, skipping surprise features.")
+        else:
+            print("Info: 'Surprise' column not loaded by DataLoader. Skipping surprise features.")
+            # Add NaN placeholders if needed for consistent feature set downstream
+            for col in ['surprise_val', 'pos_surprise', 'neg_surprise', 'surprise_magnitude', 'prev_surprise', 'consecutive_beat', 'consecutive_miss']:
+                df[col] = np.nan
+                current_features.append(col) # Still add name to list, will be imputed later
 
-        # --- Announcement Time Features ---
+        # --- Announcement Time Features (Conditional) ---
         if 'Time' in df.columns:
              try:
-                 time_parsed = pd.to_datetime(df['Time'], errors='coerce', format='%H:%M:%S').dt # Try specific format
+                 time_parsed = pd.to_datetime(df['Time'], errors='coerce', format='%H:%M:%S').dt # Try specific
                  if time_parsed.isna().all(): time_parsed = pd.to_datetime(df['Time'], errors='coerce').dt # Try generic
-                 df['announcement_hour'] = time_parsed.hour.fillna(-1).astype(int) # Fill missing hours
+                 df['announcement_hour'] = time_parsed.hour.fillna(-1).astype(int)
                  df['is_bmo'] = ((df['announcement_hour'] >= 0) & (df['announcement_hour'] < 9)).astype(int); current_features.append('is_bmo')
                  df['is_amc'] = ((df['announcement_hour'] >= 16) & (df['announcement_hour'] <= 23)).astype(int); current_features.append('is_amc')
                  df['is_market_hours'] = ((df['announcement_hour'] >= 9) & (df['announcement_hour'] < 16)).astype(int); current_features.append('is_market_hours')
                  current_features.append('announcement_hour')
              except Exception as e: print(f"Warning: Could not parse 'Time' column: {e}")
-        else: print("Info: 'Time' column not found, skipping BMO/AMC features.")
+        else:
+            print("Info: 'Time' column not loaded by DataLoader. Skipping time features.")
+            for col in ['announcement_hour', 'is_bmo', 'is_amc', 'is_market_hours']: df[col] = np.nan; current_features.append(col)
 
-        # --- Quarter Features ---
+        # --- Quarter Features (Conditional) ---
         if 'Quarter' in df.columns:
             try:
                 df['quarter_num'] = df['Quarter'].astype(str).str.extract(r'Q(\d)', expand=False).astype(float)
                 for i in range(1, 5): col = f'is_q{i}'; df[col] = (df['quarter_num'] == i).fillna(0).astype(int); current_features.append(col); self.categorical_features.append(col)
                 current_features.append('quarter_num')
             except Exception as e: print(f"Warning: Could not extract quarter number: {e}")
-        else: print("Info: 'Quarter' column not found, skipping quarter features.")
+        else:
+            print("Info: 'Quarter' column not loaded by DataLoader. Skipping quarter features.")
+            for col in ['quarter_num'] + [f'is_q{i}' for i in range(1,5)]: df[col] = np.nan; current_features.append(col)
 
-        # --- Sector/Industry Features ---
+        # --- Sector/Industry Features (Conditional) ---
         if 'Sector' in df.columns:
              df['Sector'] = df['Sector'].fillna('Unknown').astype(str)
              if fit_categorical:
-                 self.sector_dummies_cols = pd.get_dummies(df['Sector'], prefix='sector', drop_first=True).columns.tolist()
-                 print(f"Learned {len(self.sector_dummies_cols)} sector dummies.")
+                 self.sector_dummies_cols = pd.get_dummies(df['Sector'], prefix='sector', drop_first=True).columns.tolist(); print(f"Learned {len(self.sector_dummies_cols)} sector dummies.")
              if self.sector_dummies_cols:
                  sector_dummies_df = pd.get_dummies(df['Sector'], prefix='sector', drop_first=True)
                  for col in self.sector_dummies_cols: # Add missing/ensure order
                      if col not in sector_dummies_df: sector_dummies_df[col] = 0
-                 df = pd.concat([df, sector_dummies_df[self.sector_dummies_cols]], axis=1)
-                 current_features.extend(self.sector_dummies_cols); self.categorical_features.extend(self.sector_dummies_cols)
+                 df = pd.concat([df, sector_dummies_df[self.sector_dummies_cols]], axis=1); current_features.extend(self.sector_dummies_cols); self.categorical_features.extend(self.sector_dummies_cols)
+             else: print("Info: Sector dummies not fitted or available. Skipping feature creation.") # Skip adding if not fitted
+        else: print("Info: 'Sector' column not loaded by DataLoader. Skipping sector features.")
 
         if 'Industry' in df.columns:
              df['Industry'] = df['Industry'].fillna('Unknown').astype(str)
              if fit_categorical:
-                 top_n = 20 # Configurable
-                 self.top_industries = df['Industry'].value_counts().head(top_n).index.tolist()
+                 top_n = 20; self.top_industries = df['Industry'].value_counts().head(top_n).index.tolist()
                  df['Industry_Top'] = df['Industry'].apply(lambda x: x if x in self.top_industries else 'Other_Industry')
-                 self.industry_dummies_cols = pd.get_dummies(df['Industry_Top'], prefix='industry', drop_first=True).columns.tolist()
-                 print(f"Learned {len(self.industry_dummies_cols)} industry dummies (Top {top_n}).")
+                 self.industry_dummies_cols = pd.get_dummies(df['Industry_Top'], prefix='industry', drop_first=True).columns.tolist(); print(f"Learned {len(self.industry_dummies_cols)} industry dummies.")
              if self.industry_dummies_cols:
                   df['Industry_Top'] = df['Industry'].apply(lambda x: x if x in self.top_industries else 'Other_Industry')
                   industry_dummies_df = pd.get_dummies(df['Industry_Top'], prefix='industry', drop_first=True)
                   for col in self.industry_dummies_cols: # Add missing/ensure order
                       if col not in industry_dummies_df: industry_dummies_df[col] = 0
-                  df = pd.concat([df, industry_dummies_df[self.industry_dummies_cols]], axis=1)
-                  current_features.extend(self.industry_dummies_cols); self.categorical_features.extend(self.industry_dummies_cols)
+                  df = pd.concat([df, industry_dummies_df[self.industry_dummies_cols]], axis=1); current_features.extend(self.industry_dummies_cols); self.categorical_features.extend(self.industry_dummies_cols)
+             else: print("Info: Industry dummies not fitted or available. Skipping feature creation.") # Skip adding if not fitted
+        else: print("Info: 'Industry' column not loaded by DataLoader. Skipping industry features.")
+
 
         self.feature_names = sorted(list(set(current_features)))
-        print(f"Calculated {len(self.feature_names)} raw Earnings features.")
+        print(f"Calculated/checked {len(self.feature_names)} raw Earnings features.")
         return df
 
     def get_features_target(self, df, fit_imputer=False):
-        """Extract feature matrix X and target vector y, handling missing values."""
+        """Extract feature matrix X and target vector y, handling missing values. (Unchanged)"""
         print("Extracting Earnings features (X) and target (y)...")
-        df = df.copy()
+        df = df.copy();
         if not self.feature_names: raise RuntimeError("Run calculate_features first.")
         available_features = [col for col in self.feature_names if col in df.columns]
         if not available_features: raise ValueError("No calculated features found in DataFrame.")
-
         df_with_target = df.dropna(subset=['future_ret'])
-        if len(df_with_target) == 0:
-            print("Warning: No data remains after filtering for non-null target.")
-            return pd.DataFrame(columns=available_features), pd.Series(dtype=float)
-
-        # Separate numeric and categorical (already dummified)
+        if len(df_with_target) == 0: print("Warning: No data remains after filtering target."); return pd.DataFrame(columns=available_features), pd.Series(dtype=float)
         numeric_features = [f for f in available_features if f not in self.categorical_features]
         categorical_df = df_with_target[[f for f in available_features if f in self.categorical_features]].copy()
-
-        X_numeric = df_with_target[numeric_features].copy()
-        y = df_with_target['future_ret'].copy()
-        print(f"Original numeric X shape: {X_numeric.shape}. Categorical X shape: {categorical_df.shape}. Non-null y: {len(y)}")
-
-        # Impute numeric features
-        if fit_imputer:
-            print("Fitting imputer on numeric features and transforming...")
-            X_numeric_imputed = self.imputer.fit_transform(X_numeric)
+        X_numeric = df_with_target[numeric_features].copy(); y = df_with_target['future_ret'].copy()
+        print(f"Original numeric X: {X_numeric.shape}. Categorical X: {categorical_df.shape}. Non-null y: {len(y)}")
+        if fit_imputer: print("Fitting imputer..."); X_numeric_imputed = self.imputer.fit_transform(X_numeric)
         else:
-            if not hasattr(self.imputer, 'statistics_'): raise RuntimeError("Imputer not fitted.")
-            print("Transforming numeric features using pre-fitted imputer...")
+            if not hasattr(self.imputer, 'statistics_'): raise RuntimeError("Imputer not fitted."); print("Transforming with imputer...")
             X_numeric_imputed = self.imputer.transform(X_numeric)
-
         X_numeric = pd.DataFrame(X_numeric_imputed, columns=numeric_features, index=X_numeric.index)
-
-        # Combine numeric (imputed) and categorical (already 0/1)
-        X = pd.concat([X_numeric, categorical_df], axis=1)
-        X = X[available_features] # Ensure original order
-
+        X = pd.concat([X_numeric, categorical_df], axis=1); X = X[available_features] # Combine and reorder
         if X.isna().any().any(): warnings.warn("NaNs remain AFTER imputation!")
         else: print("No NaNs remaining after imputation.")
-
-        self.final_feature_names = X.columns.tolist()
-        print(f"Final X shape: {X.shape}. Using {len(self.final_feature_names)} features.")
+        self.final_feature_names = X.columns.tolist(); print(f"Final X shape: {X.shape}. Using {len(self.final_feature_names)} features.")
         return X, y
-
-
-# --- Earnings Specific Models ---
 
 class SurpriseClassificationModel:
     """
