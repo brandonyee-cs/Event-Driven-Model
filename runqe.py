@@ -26,7 +26,7 @@ except ImportError as e:
 # --- File Paths and Parameters ---
 # <<< --- UPDATE THESE PATHS --- >>>
 # This file should contain Ticker and ANNDATS (or similar actual announcement date)
-EARNINGS_EVENT_FILE = '/home/d87016661/phhz3nshlvyavdx1.csv'
+EARNINGS_EVENT_FILE = '/home/d87016661/detail_history_actuals.csv'
 STOCK_FILES = [
     '/home/d87016661/crsp_dsf-2000-2001.parquet',   
     '/home/d87016661/crsp_dsf-2002-2003.parquet',
