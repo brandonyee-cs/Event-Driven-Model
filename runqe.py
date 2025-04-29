@@ -18,10 +18,18 @@ except ImportError as e:
 
 # --- File Paths and Parameters ---
 # <<< --- UPDATE THESE PATHS --- >>>
-EARNINGS_FILE = 'path/to/your/earnings_announcements.csv'
 STOCK_FILES = [
-    'path/to/stock_data_part1.csv',
-    'path/to/stock_data_part2.csv'
+    '/home/d87016661/crsp_dsf-2000-2001.parquet',   
+    '/home/d87016661/crsp_dsf-2002-2003.parquet',
+    '/home/d87016661/crsp_dsf-2004-2005.parquet',
+    '/home/d87016661/crsp_dsf-2006-2007.parquet',
+    '/home/d87016661/crsp_dsf-2008-2009.parquet',
+    '/home/d87016661/crsp_dsf-2010-2011.parquet',
+    '/home/d87016661/crsp_dsf-2016-2017.parquet',
+    '/home/d87016661/crsp_dsf-2018-2019.parquet',
+    '/home/d87016661/crsp_dsf-2020-2021.parquet',
+    '/home/d87016661/crsp_dsf-2022-2023.parquet',
+    '/home/d87016661/crsp_dsf-2024-2025.parquet'
 ]
 # <<< -------------------------- >>>
 
