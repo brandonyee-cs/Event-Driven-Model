@@ -33,46 +33,93 @@ class DataLoader:
         self.window_days = window_days
 
     def _load_single_stock_file(self, stock_path):
-        """Load and process a single stock data file. (Identical to previous version)"""
+        """Load and process a single stock data file (CSV or Parquet). Raises ValueError on failure."""
         try:
-            headers = pd.read_csv(stock_path, nrows=0).columns
-            date_col = next((col for col in headers if col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt']), None)
-            if date_col:
-                stock_data = pd.read_csv(stock_path, parse_dates=[date_col]).rename(columns={date_col: 'date'})
+            # --- Determine file type and load data ---
+            _, file_extension = os.path.splitext(stock_path)
+            file_extension = file_extension.lower()
+
+            if file_extension == '.parquet':
+                print(f"Reading Parquet file: {stock_path}")
+                stock_data = pd.read_parquet(stock_path)
+            elif file_extension == '.csv':
+                print(f"Reading CSV file: {stock_path}")
+                # Original CSV reading logic (including header peek)
+                headers = pd.read_csv(stock_path, nrows=0).columns
+                date_col = next((col for col in headers if col.lower() in ['date', 'trade_date', 'trading_date', 'tradedate', 'dt']), None)
+                if date_col:
+                    stock_data = pd.read_csv(stock_path, parse_dates=[date_col])
+                    # Rename is handled below
+                else:
+                    stock_data = pd.read_csv(stock_path)
+                    print(f"Warning: No standard date column identified via header peek in {stock_path}. Will attempt conversion.")
             else:
-                stock_data = pd.read_csv(stock_path)
-                print(f"Warning: No standard date column in {stock_path}. Attempting conversion.")
+                raise ValueError(f"Unsupported stock file format: {file_extension}. Only .csv and .parquet are supported.")
 
-            ticker_col_map = {'sym_root': 'ticker', 'symbol': 'ticker'}
-            stock_data.rename(columns=ticker_col_map, inplace=True)
-            if 'ticker' not in stock_data.columns: raise ValueError(f"No 'ticker' column found in {stock_path}.")
+            # --- Process the loaded DataFrame (common for both CSV and Parquet) ---
 
+            # Rename date column if needed (handle cases where parquet might already have 'date')
             if 'date' not in stock_data.columns:
-                 date_col_alt = next((col for col in stock_data.columns if col.lower() in ['trade_date', 'trading_date', 'tradedate', 'dt', 'time', 'timestamp']), None)
-                 if date_col_alt: stock_data = stock_data.rename(columns={date_col_alt: 'date'})
-                 else: raise ValueError(f"No 'date' column found in {stock_path}.")
+                 date_col_map = {
+                     'trade_date': 'date', 'trading_date': 'date',
+                     'tradedate': 'date', 'dt': 'date', 'time': 'date',
+                     'timestamp': 'date'
+                 }
+                 # Find first matching alternative date column name (case-insensitive check on lowercased columns)
+                 lower_cols = {col.lower(): col for col in stock_data.columns}
+                 found_date_col = None
+                 for lower_alt, std_alt in date_col_map.items():
+                     if lower_alt in lower_cols:
+                         found_date_col = lower_cols[lower_alt]
+                         stock_data = stock_data.rename(columns={found_date_col: 'date'})
+                         print(f"Renamed stock data column '{found_date_col}' to 'date'.")
+                         break
+                 if not found_date_col:
+                     raise ValueError(f"No 'date' or recognized alternative date column found in loaded data from {stock_path}.")
+            elif date_col and date_col != 'date' and date_col in stock_data.columns: # Handle case where CSV load used original name
+                 stock_data = stock_data.rename(columns={date_col: 'date'})
 
+
+            # Rename ticker column if needed
+            ticker_col_map = {'sym_root': 'ticker', 'symbol': 'ticker', 'permno':'ticker'} # Added PERMNO as potential ticker source
+            stock_data.rename(columns={k: v for k, v in ticker_col_map.items() if k in stock_data.columns}, inplace=True)
+            if 'ticker' not in stock_data.columns: raise ValueError(f"No 'ticker' or recognized alternative (sym_root, symbol, permno) column found in {stock_path}.")
+
+            # Ensure date column is datetime type
             if not pd.api.types.is_datetime64_any_dtype(stock_data['date']):
                  try:
                      stock_data['date'] = pd.to_datetime(stock_data['date'], errors='coerce')
                      if stock_data['date'].isna().all(): raise ValueError("All dates failed parse.")
                  except Exception as e: raise ValueError(f"Date conversion failed in {stock_path}: {e}")
 
+            # Ensure essential columns exist
+            # Adjust required_cols based on your specific needs for earnings analysis
             required_cols = ['date', 'ticker', 'prc', 'ret', 'vol']
             missing_cols = [col for col in required_cols if col not in stock_data.columns]
             if missing_cols:
-                 essential_pr = ['prc', 'ret']
+                 essential_pr = ['prc', 'ret'] # Price and return are absolutely essential
                  if any(col in missing_cols for col in essential_pr):
                       raise ValueError(f"Missing essential columns in {stock_path}: {[c for c in essential_pr if c in missing_cols]}")
-                 else: print(f"Warning: Missing optional columns in {stock_path}: {missing_cols}.")
+                 else: # Warn if only optional cols like 'vol' are missing
+                      print(f"Warning: Missing optional columns in {stock_path}: {missing_cols}. Some features might be skipped.")
 
+            # Convert potential numeric columns, coercing errors
             numeric_cols = ['prc', 'ret', 'vol', 'openprc', 'askhi', 'bidlo', 'shrout']
             for col in numeric_cols:
-                if col in stock_data.columns: stock_data[col] = pd.to_numeric(stock_data[col], errors='coerce')
-            return stock_data
-        except FileNotFoundError: raise ValueError(f"Stock file not found: {stock_path}")
-        except Exception as e: raise ValueError(f"Error processing {stock_path}: {e}")
+                if col in stock_data.columns:
+                     # Check if already numeric before converting (parquet might load types correctly)
+                     if not pd.api.types.is_numeric_dtype(stock_data[col]):
+                         stock_data[col] = pd.to_numeric(stock_data[col], errors='coerce')
 
+            # Convert ticker to string, just in case (e.g., if PERMNO was used)
+            stock_data['ticker'] = stock_data['ticker'].astype(str)
+
+            return stock_data
+
+        except FileNotFoundError: raise ValueError(f"Stock file not found: {stock_path}")
+        except ImportError: raise ImportError(f"Reading parquet file {stock_path} failed. Ensure 'pyarrow' or 'fastparquet' is installed (`pip install pyarrow`).")
+        except Exception as e: raise ValueError(f"Error processing stock file {stock_path}: {e}")
+            
     def load_data(self):
         """
         Load earnings event dates (from IBES summary/actuals) and stock data,
