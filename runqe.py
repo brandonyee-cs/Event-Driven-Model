@@ -59,7 +59,7 @@ VOL_EVENT_WINDOW = (-2, 2)       # Days relative to event for event vol calc
 
 # --- Optional ML Parameters ---
 # Set to True to run the ML prediction parts (slower)
-RUN_ML_ANALYSIS = False # Keep False initially for faster testing
+RUN_ML_ANALYSIS = True # Keep False initially for faster testing
 ML_PREDICTION_WINDOW = 3    # Target for ML models (e.g., predict 3-day return)
 ML_TEST_SPLIT_SIZE = 0.2
 
@@ -114,6 +114,15 @@ def run_analysis():
             event_window=VOL_EVENT_WINDOW
         )
 
+        analyzer.analyze_sharpe_ratio_dynamics(
+             results_dir=RESULTS_DIR,
+             file_prefix=FILE_PREFIX,
+             window=SHARPE_ROLLING_WINDOW, # Use the new parameter
+             pre_days=WINDOW_DAYS,
+             post_days=WINDOW_DAYS
+             # risk_free_rate=0.0 # Optional, defaults to 0
+        )
+        
         # --- Optional: Run ML Prediction Analysis ---
         if RUN_ML_ANALYSIS:
             print("\n--- Running Optional ML Analysis (Polars) ---")
