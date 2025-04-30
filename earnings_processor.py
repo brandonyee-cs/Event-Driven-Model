@@ -1567,35 +1567,127 @@ class Analysis:
 
 
     def analyze_volatility_spikes(self, results_dir: str, file_prefix: str = "earnings", window: int = 5, min_periods: int = 3, pre_days: int = 30, post_days: int = 30, baseline_window=(-60, -11), event_window=(-2, 2)):
-        # ... (Keep corrected version) ...
+        """Calculates, plots, and saves rolling volatility and event vs baseline comparison using Polars."""
         print(f"\n--- Analyzing Rolling Volatility (Window={window} rows) using Polars ---")
-        if self.data is None or 'ret' not in self.data.columns or 'days_to_announcement' not in self.data.columns: print("Error: Data/required columns missing."); return None
-        df = self.data.sort(['event_id', 'date'])
-        df = df.with_columns(pl.col('ret').rolling_std(window_size=window, min_periods=min_periods).over('event_id').alias('rolling_vol'))
-        df = df.with_columns((pl.col('rolling_vol') * np.sqrt(252) * 100).alias('annualized_vol'))
-        aligned_vol = df.group_by('days_to_announcement').agg(pl.mean('annualized_vol').alias('avg_annualized_vol')).filter((pl.col('days_to_announcement') >= -pre_days) & (pl.col('days_to_announcement') <= post_days)).sort('days_to_announcement').drop_nulls()
+        if self.data is None or 'ret' not in self.data.columns or 'days_to_announcement' not in self.data.columns:
+            print("Error: Data/required columns missing."); return None
+
+        df = self.data.sort(['event_id', 'date']) # Ensure sorted
+
+        # Calculate rolling volatility (row-based window)
+        df = df.with_columns(
+            pl.col('ret').rolling_std(window_size=window, min_periods=min_periods)
+              .over('event_id') # Apply rolling within each event group
+              .alias('rolling_vol')
+        )
+        # Annualize volatility
+        df = df.with_columns(
+            (pl.col('rolling_vol') * np.sqrt(252) * 100).alias('annualized_vol') # In percent
+        )
+
+        # Align volatility by days relative to announcement
+        aligned_vol = df.group_by('days_to_announcement').agg(
+            pl.mean('annualized_vol').alias('avg_annualized_vol')
+        ).filter(
+            (pl.col('days_to_announcement') >= -pre_days) &
+            (pl.col('days_to_announcement') <= post_days)
+        ).sort('days_to_announcement').drop_nulls() # Drop days with no avg vol
+
+        # --- Plotting & Saving Rolling Volatility ---
+        # ... (Plotting code remains the same) ...
         if not aligned_vol.is_empty():
             aligned_vol_pd = aligned_vol.to_pandas().set_index('days_to_announcement')
-            fig1, ax1 = plt.subplots(figsize=(12, 6)); aligned_vol_pd['avg_annualized_vol'].plot(kind='line', marker='.', linestyle='-', ax=ax1); ax1.axvline(0, color='red', linestyle='--', lw=1, label='Announcement Day'); ax1.set_title(f'Average Rolling Volatility Around Earnings Announcement (Window={window} rows)'); ax1.set_xlabel('Days Relative to Announcement'); ax1.set_ylabel('Avg. Annualized Volatility (%)'); ax1.legend(); ax1.grid(True, alpha=0.5); plt.tight_layout()
-            plot_filename_vol = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d.png"); csv_filename_vol = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d_data.csv")
+            fig1, ax1 = plt.subplots(figsize=(12, 6))
+            aligned_vol_pd['avg_annualized_vol'].plot(kind='line', marker='.', linestyle='-', ax=ax1)
+            ax1.axvline(0, color='red', linestyle='--', lw=1, label='Announcement Day')
+            ax1.set_title(f'Average Rolling Volatility Around Earnings Announcement (Window={window} rows)')
+            ax1.set_xlabel('Days Relative to Announcement')
+            ax1.set_ylabel('Avg. Annualized Volatility (%)')
+            ax1.legend(); ax1.grid(True, alpha=0.5)
+            plt.tight_layout()
+            plot_filename_vol = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d.png")
+            csv_filename_vol = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d_data.csv")
             try: plt.savefig(plot_filename_vol); print(f"Saved rolling vol plot to: {plot_filename_vol}")
             except Exception as e: print(f"Error saving plot: {e}")
             try: aligned_vol_pd.to_csv(csv_filename_vol); print(f"Saved rolling vol data to: {csv_filename_vol}")
             except Exception as e: print(f"Error saving data: {e}")
             plt.close(fig1)
-        else: print("No data for rolling volatility plot.")
-        vol_comp = df.group_by('event_id').agg([pl.std('ret').filter((pl.col('days_to_announcement') >= baseline_window[0]) & (pl.col('days_to_announcement') <= baseline_window[1])).alias('vol_baseline'), pl.count('ret').filter((pl.col('days_to_announcement') >= baseline_window[0]) & (pl.col('days_to_announcement') <= baseline_window[1])).alias('n_baseline'), pl.std('ret').filter((pl.col('days_to_announcement') >= event_window[0]) & (pl.col('days_to_announcement') <= event_window[1])).alias('vol_event'), pl.count('ret').filter((pl.col('days_to_announcement') >= event_window[0]) & (pl.col('days_to_announcement') <= event_window[1])).alias('n_event')]).filter((pl.col('n_baseline') >= min_periods) & (pl.col('n_event') >= min_periods) & (pl.col('vol_baseline').is_not_null()) & (pl.col('vol_baseline') > 1e-9) & (pl.col('vol_event').is_not_null()))
+        else:
+            print("No data for rolling volatility plot.")
+
+
+        # --- Compare Event vs Baseline Volatility ---
+        print("Calculating Event vs Baseline Volatility Ratios...") # Add print statement
+        # --- *** CORRECTED AGGREGATION *** ---
+        vol_comp = df.group_by('event_id').agg([
+            # Baseline Volatility: Apply filter to 'ret' column *before* std()
+            pl.col('ret').filter(
+                (pl.col('days_to_announcement') >= baseline_window[0]) &
+                (pl.col('days_to_announcement') <= baseline_window[1])
+            ).std().alias('vol_baseline'),
+
+            # Baseline Count: Count rows matching the filter
+            pl.len().filter( # Use pl.len() to count rows matching the filter
+                (pl.col('days_to_announcement') >= baseline_window[0]) &
+                (pl.col('days_to_announcement') <= baseline_window[1])
+            ).alias('n_baseline'), # Note: pl.len() is preferred over pl.count() inside agg
+
+            # Event Volatility: Apply filter to 'ret' column *before* std()
+            pl.col('ret').filter(
+                (pl.col('days_to_announcement') >= event_window[0]) &
+                (pl.col('days_to_announcement') <= event_window[1])
+            ).std().alias('vol_event'),
+
+            # Event Count: Count rows matching the filter
+            pl.len().filter(
+                (pl.col('days_to_announcement') >= event_window[0]) &
+                (pl.col('days_to_announcement') <= event_window[1])
+            ).alias('n_event'),
+        ]).filter( # Filter AFTER aggregation based on counts and valid vol
+             (pl.col('n_baseline') >= min_periods) &
+             (pl.col('n_event') >= min_periods) &
+             (pl.col('vol_baseline').is_not_null()) &
+             (pl.col('vol_baseline') > 1e-9) & # Avoid division by zero/tiny
+             (pl.col('vol_event').is_not_null())
+        )
+        # --- *** END OF CORRECTION *** ---
+
+        # Calculate ratio
         if not vol_comp.is_empty():
-            vol_ratios_df = vol_comp.with_columns((pl.col('vol_event') / pl.col('vol_baseline')).alias('volatility_ratio'))
-            avg_r = vol_ratios_df['volatility_ratio'].mean(); med_r = vol_ratios_df['volatility_ratio'].median(); num_valid_ratios = vol_ratios_df.height
+            vol_ratios_df = vol_comp.with_columns(
+                (pl.col('vol_event') / pl.col('vol_baseline')).alias('volatility_ratio')
+            )
+
+            avg_r = vol_ratios_df['volatility_ratio'].mean()
+            med_r = vol_ratios_df['volatility_ratio'].median()
+            num_valid_ratios = vol_ratios_df.height
+
             print(f"\nVolatility Spike (Event: {event_window}, Baseline: {baseline_window}): Avg Ratio={avg_r:.4f}, Median Ratio={med_r:.4f} ({num_valid_ratios} events)")
+
+            # Save ratio data
+            # ... (Saving and plotting code remains the same) ...
             csv_filename_ratio = os.path.join(results_dir, f"{file_prefix}_volatility_ratios.csv")
-            try: vol_ratios_df.select(['event_id', 'volatility_ratio']).write_csv(csv_filename_ratio); print(f"Saved vol ratios data to: {csv_filename_ratio}")
+            try:
+                vol_ratios_df.select(['event_id', 'volatility_ratio']).write_csv(csv_filename_ratio)
+                print(f"Saved vol ratios data to: {csv_filename_ratio}")
             except Exception as e: print(f"Error saving vol ratios: {e}")
-            fig2, ax2 = plt.subplots(figsize=(8, 5)); ratios_pd = vol_ratios_df['volatility_ratio'].to_pandas(); sns.histplot(ratios_pd.dropna(), bins=30, kde=True, ax=ax2); ax2.axvline(1, c='grey', ls='--', label='Ratio = 1'); ax2.axvline(avg_r, c='red', ls=':', label=f'Mean ({avg_r:.2f})'); ax2.set_title('Distribution of Volatility Ratios (Event / Baseline)'); ax2.set_xlabel('Volatility Ratio'); ax2.set_ylabel('Frequency'); ax2.legend(); plt.tight_layout()
+
+            # Plot histogram of ratios (convert ratio column to Pandas)
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            ratios_pd = vol_ratios_df['volatility_ratio'].to_pandas()
+            sns.histplot(ratios_pd.dropna(), bins=30, kde=True, ax=ax2) # Dropna just in case
+            ax2.axvline(1, c='grey', ls='--', label='Ratio = 1')
+            ax2.axvline(avg_r, c='red', ls=':', label=f'Mean ({avg_r:.2f})')
+            ax2.set_title('Distribution of Volatility Ratios (Event / Baseline)')
+            ax2.set_xlabel('Volatility Ratio'); ax2.set_ylabel('Frequency')
+            ax2.legend()
+            plt.tight_layout()
+
             plot_filename_hist = os.path.join(results_dir, f"{file_prefix}_volatility_ratio_hist.png")
             try: plt.savefig(plot_filename_hist); print(f"Saved vol ratio hist plot: {plot_filename_hist}")
             except Exception as e: print(f"Error saving hist: {e}")
             plt.close(fig2)
-        else: print("\nCould not calculate volatility ratios (insufficient valid data).")
+        else:
+            print("\nCould not calculate volatility ratios (insufficient valid data after filtering).")
+
         return aligned_vol
