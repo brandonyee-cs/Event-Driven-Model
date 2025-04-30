@@ -2445,6 +2445,15 @@ class Analysis:
             pl.n_unique('event_id').alias('unique_events')
         ).sort('days_to_announcement')
         
+        # FIX: Ensure both DataFrames have the same data type for the join key
+        results_df = results_df.with_columns(
+            pl.col('days_to_announcement').cast(pl.Int32)
+        )
+        
+        event_counts = event_counts.with_columns(
+            pl.col('days_to_announcement').cast(pl.Int32)
+        )
+        
         # Join results with event counts
         results_with_counts = results_df.join(
             event_counts, 
