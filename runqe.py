@@ -54,11 +54,17 @@ STRATEGY_ENTRY_DAY = 0      # Day relative to event to enter (0=Announcement Day
 
 # Volatility Analysis Parameters
 VOL_ROLLING_WINDOW = 5     # Days for rolling Volatility calculation (row-based)
-VOL_BASELINE_WINDOW = (-60, -11) # Days relative to event for baseline vol calc
+VOL_BASELINE_WINDOW = (-60, 60) # Days relative to event for baseline vol calc
 VOL_EVENT_WINDOW = (-2, 2)       # Days relative to event for event vol calc
+VOL_PRE_DAYS = 60         # Look back 60 days before announcement
+VOL_POST_DAYS = 60        # Look ahead 60 days after announcement
 
 # Sharpe Ratio Time Series Parameters
 SHARPE_TIME_GROUPING = 'quarter'  # 'year', 'quarter', or 'month'
+
+# Rolling Sharpe Time Series Parameters
+ROLLING_SHARPE_WINDOW = 5  # Window size for rolling Sharpe calculation (in days)
+ROLLING_ANALYSIS_WINDOW = (-60, 60)  # Days relative to announcement to analyze
 
 # --- Optional ML Parameters ---
 # Set to True to run the ML prediction parts (slower)
@@ -111,47 +117,58 @@ def run_analysis():
             results_dir=RESULTS_DIR,
             file_prefix=FILE_PREFIX,
             window=VOL_ROLLING_WINDOW,
-            pre_days=WINDOW_DAYS,
-            post_days=WINDOW_DAYS,
+            pre_days=VOL_PRE_DAYS,             # Updated to 60 days
+            post_days=VOL_POST_DAYS,           # Updated to 60 days
             baseline_window=VOL_BASELINE_WINDOW,
             event_window=VOL_EVENT_WINDOW
         )
-        # --- Run Sharpe Ratio Comparison Analysis ---
-        analyzer.plot_sharpe_ratio_time_series(
+        ## --- Run Sharpe Ratio Comparison Analysis ---
+        #analyzer.plot_sharpe_ratio_time_series(
+        #    results_dir=RESULTS_DIR,
+        #    file_prefix=FILE_PREFIX,
+        #    entry_day=STRATEGY_ENTRY_DAY,
+        #    holding_period=STRATEGY_HOLDING_PERIOD,
+        #    time_grouping=SHARPE_TIME_GROUPING
+        #    # risk_free_rate=0.0  # Optional
+        #)
+ 
+        ## --- Run Event Window Sharpe Ratio Analysis ---
+        #analyzer.analyze_event_window_sharpe(
+        #    results_dir=RESULTS_DIR,
+        #    file_prefix=FILE_PREFIX,
+        #    event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
+        #    # risk_free_rate=0.0  # Optional
+        #)
+
+        ## --- Calculate Average Sharpe Ratio ---
+        #avg_sharpe_results = analyzer.calculate_average_sharpe(
+        #    return_col='ret',
+        #    event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
+        #    annualize=True,
+        #    # risk_free_rate=0.0  # Optional
+        #)
+
+        #if avg_sharpe_results and 'sharpe_ratio' in avg_sharpe_results:
+        #    # Save results to CSV
+        #    sharpe_results_df = pl.DataFrame([avg_sharpe_results])
+        #    csv_filename = os.path.join(RESULTS_DIR, f"{FILE_PREFIX}_average_sharpe.csv")
+        #    try:
+        #        sharpe_results_df.write_csv(csv_filename)
+        #        print(f"Saved average Sharpe ratio results to: {csv_filename}")
+        #    except Exception as e:
+        #        print(f"Error saving Sharpe ratio results: {e}")
+
+
+        # --- Run Rolling Sharpe Time Series Analysis ---
+        analyzer.calculate_rolling_sharpe_timeseries(
             results_dir=RESULTS_DIR,
             file_prefix=FILE_PREFIX,
-            entry_day=STRATEGY_ENTRY_DAY,
-            holding_period=STRATEGY_HOLDING_PERIOD,
-            time_grouping=SHARPE_TIME_GROUPING
-            # risk_free_rate=0.0  # Optional
-        )
-
-        # --- Run Event Window Sharpe Ratio Analysis ---
-        analyzer.analyze_event_window_sharpe(
-            results_dir=RESULTS_DIR,
-            file_prefix=FILE_PREFIX,
-            event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
-            # risk_free_rate=0.0  # Optional
-        )
-
-        # --- Calculate Average Sharpe Ratio ---
-        avg_sharpe_results = analyzer.calculate_average_sharpe(
             return_col='ret',
-            event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
+            analysis_window=ROLLING_ANALYSIS_WINDOW,
+            sharpe_window=ROLLING_SHARPE_WINDOW,
             annualize=True,
             # risk_free_rate=0.0  # Optional
         )
-
-        if avg_sharpe_results and 'sharpe_ratio' in avg_sharpe_results:
-            # Save results to CSV
-            sharpe_results_df = pl.DataFrame([avg_sharpe_results])
-            csv_filename = os.path.join(RESULTS_DIR, f"{FILE_PREFIX}_average_sharpe.csv")
-            try:
-                sharpe_results_df.write_csv(csv_filename)
-                print(f"Saved average Sharpe ratio results to: {csv_filename}")
-            except Exception as e:
-                print(f"Error saving Sharpe ratio results: {e}")
-
         # --- Optional: Run ML Prediction Analysis ---
         if RUN_ML_ANALYSIS:
             print("\n--- Running Optional ML Analysis (Polars) ---")
