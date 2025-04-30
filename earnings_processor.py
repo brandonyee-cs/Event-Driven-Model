@@ -1173,13 +1173,13 @@ class EarningsDriftModel:
                 traceback.print_exc()
         return results
 
-# --- Analysis Class ---
 class Analysis:
-    def __init__(self, data_loader: DataLoader, feature_engineer: FeatureEngineer):
+    def __init__(self, data_loader: 'DataLoader', feature_engineer: 'FeatureEngineer'):
         """Analysis class for Earnings data using Polars."""
         self.data_loader = data_loader
         self.feature_engineer = feature_engineer
         self.data: Optional[pl.DataFrame] = None
+        # Store NumPy arrays for ML models
         self.X_train_np: Optional[np.ndarray] = None
         self.X_test_np: Optional[np.ndarray] = None
         self.y_train_np: Optional[np.ndarray] = None
@@ -1187,10 +1187,10 @@ class Analysis:
         self.train_data: Optional[pl.DataFrame] = None # Store processed train split DF
         self.test_data: Optional[pl.DataFrame] = None # Store processed test split DF
         self.final_feature_names: Optional[List[str]] = None # Store final feature names after processing
-        self.models: Dict[str, Any] = {}
-        self.surprise_model: Optional[SurpriseClassificationModel] = None
-        self.pead_model: Optional[EarningsDriftModel] = None
-        self.results: Dict[str, Dict] = {}
+        self.models: Dict[str, Any] = {} # Standard models (Ridge, XGBDecile)
+        self.surprise_model: Optional['SurpriseClassificationModel'] = None
+        self.pead_model: Optional['EarningsDriftModel'] = None
+        self.results: Dict[str, Dict] = {} # Standard model results
         self.surprise_results: Dict = {}
         self.pead_results: Dict = {}
 
@@ -1616,8 +1616,9 @@ class Analysis:
             post_announce_actual = event_actual_data.filter(pl.col('date') >= announce_date)
             if post_announce_actual.is_empty(): print(f"No post-announcement data for {event_id}"); continue
 
+            # Calculate cumulative product correctly within the filtered event data
             post_announce_actual = post_announce_actual.with_columns(
-                 ((pl.col('ret').fill_null(0) + 1).cum_prod().over(pl.lit(1)) - 1) # Cumprod over whole group (assuming it's only one event_id)
+                 ((pl.col('ret').fill_null(0) + 1).cum_prod() - 1) # Cumprod over the filtered group
                  .alias('actual_cum_ret')
             )
 
@@ -1648,53 +1649,61 @@ class Analysis:
             plotted_count += 1
 
     def calculate_event_strategy_returns(self, holding_period: int = 20, entry_day: int = 0, return_col: str = 'ret') -> Optional[pl.DataFrame]:
-        """Simulates a buy-and-hold strategy for each event using Polars and calculates returns."""
-        print(f"  Calculating strategy returns (entry T{entry_day}, hold {holding_period} days)...") # Add verbosity
+        """
+        Simulates a buy-and-hold strategy for each event using Polars and calculates returns,
+        selecting exactly holding_period trading days post-entry.
+        """
+        print(f"  Calculating strategy returns (entry T{entry_day}, hold {holding_period} trading days)...")
         if self.data is None or return_col not in self.data.columns or 'days_to_announcement' not in self.data.columns:
             print("  Error: Data/required columns missing for strategy simulation.")
             return None
 
         df_sorted = self.data.sort(['event_id', 'date'])
 
-        entry_points = df_sorted.filter(pl.col('days_to_announcement') == entry_day) \
-                                .select(['event_id', 'date']) \
-                                .rename({'date': 'entry_date'})
+        # Use row numbers for exact trading day count
+        df_with_row_nr = df_sorted.with_columns(
+            pl.int_range(0, pl.count()).over('event_id').alias('row_nr_in_event')
+        )
+        entry_point_rows = df_with_row_nr.filter(pl.col('days_to_announcement') == entry_day) \
+                                        .select(['event_id', 'row_nr_in_event']) \
+                                        .rename({'row_nr_in_event': 'entry_row_nr'})
 
-        if entry_points.is_empty():
+        if entry_point_rows.is_empty():
              print(f"  Warning: No entry points found for entry_day = {entry_day}. Strategy returns will be empty.")
              return pl.DataFrame({'event_id': [], 'strategy_return': []}, schema={'event_id': pl.Utf8, 'strategy_return': pl.Float64})
 
-        print(f"    Found {entry_points.height} potential entry points.")
+        print(f"    Found {entry_point_rows.height} potential entry points.")
+        df_with_entry_row = df_with_row_nr.join(entry_point_rows, on='event_id', how='left')
 
-        df_with_entry = df_sorted.join(entry_points, on='event_id', how='left')
-
-        holding_data = df_with_entry.filter(
-             (pl.col('date') > pl.col('entry_date')) &
-             (pl.col('date') <= pl.col('entry_date') + pl.duration(days=holding_period))
+        # Filter for the 'holding_period' rows *after* the entry row
+        holding_data = df_with_entry_row.filter(
+            (pl.col('row_nr_in_event') > pl.col('entry_row_nr')) &
+            (pl.col('row_nr_in_event') <= pl.col('entry_row_nr') + holding_period)
         )
-        print(f"    Found {holding_data.height} rows within holding period windows (before filtering by count).")
+        print(f"    Found {holding_data.height} rows within holding period windows (using row numbers).")
         if holding_data.is_empty():
-            print("    Warning: No data rows found within any holding period window.")
+            print("    Warning: No data rows found within any holding period window (using row numbers).")
             return pl.DataFrame({'event_id': [], 'strategy_return': []}, schema={'event_id': pl.Utf8, 'strategy_return': pl.Float64})
 
+        # Calculate compound return, ensuring exactly holding_period days
         strategy_returns_agg = holding_data.group_by('event_id').agg(
             (pl.col(return_col).fill_null(0) + 1).product().alias("prod_ret_factor"),
-            pl.count().alias("holding_days")
+            pl.count().alias("holding_days_count")
         ).filter(
-            pl.col('holding_days') >= holding_period
+            pl.col('holding_days_count') == holding_period # Crucial filter
         ).with_columns(
              (pl.col('prod_ret_factor') - 1).alias('strategy_return')
         ).select(['event_id', 'strategy_return'])
 
-        print(f"    Found {strategy_returns_agg.height} events with sufficient holding period data ({holding_period} days).")
+        print(f"    Found {strategy_returns_agg.height} events with exactly {holding_period} holding days after entry.")
         if strategy_returns_agg.is_empty():
-             print(f"    Warning: No events had the required {holding_period} days in their holding period.")
+             print(f"    Warning: No events had exactly {holding_period} trading days available after the entry point.")
 
         return strategy_returns_agg
 
     def analyze_event_sharpe_ratio(self, results_dir: str, file_prefix: str = "earnings", holding_period: int = 20, entry_day: int = 0, risk_free_rate: float = 0.0):
         """Calculates and analyzes the Sharpe Ratio of a simple event-based strategy using Polars."""
-        print(f"\n--- Analyzing Event Strategy Sharpe Ratio (Entry: T{entry_day}, Hold: {holding_period}d) ---")
+        print(f"\n--- Analyzing Event Strategy Sharpe Ratio (Entry: T{entry_day}, Hold: {holding_period} trading days) ---")
         strategy_returns_df = self.calculate_event_strategy_returns(holding_period=holding_period, entry_day=entry_day)
 
         if strategy_returns_df is None or strategy_returns_df.height < 2:
@@ -1705,7 +1714,7 @@ class Analysis:
             print("Error: 'strategy_return' column not found after calculation.")
             return None
 
-        print(f"Calculated returns for {strategy_returns_df.height} events.")
+        print(f"Using returns from {strategy_returns_df.height} events for Sharpe calculation.")
 
         stats = strategy_returns_df.select([
             pl.mean('strategy_return').alias('mean_ret'),
@@ -1733,7 +1742,7 @@ class Analysis:
         returns_pd = strategy_returns_df['strategy_return'].to_pandas()
         sns.histplot(returns_pd.dropna(), bins=30, kde=True, ax=ax)
         ax.axvline(mean_ret, color='red', linestyle='--', label=f'Mean ({mean_ret:.2%})')
-        ax.set_title(f'Distribution of {holding_period}-Day Strategy Returns (Entry T{entry_day}) - Earnings')
+        ax.set_title(f'Distribution of {holding_period}-Trading-Day Strategy Returns (Entry T{entry_day}) - Earnings')
         ax.set_xlabel(f'{holding_period}-Day Return'); ax.set_ylabel('Frequency'); ax.legend()
         plt.tight_layout()
         plot_filename = os.path.join(results_dir, f"{file_prefix}_strategy_returns_hist_h{holding_period}_e{entry_day}.png")
