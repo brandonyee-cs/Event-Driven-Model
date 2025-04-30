@@ -126,6 +126,14 @@ def run_analysis():
             # risk_free_rate=0.0  # Optional
         )
 
+        # --- Run Event Window Sharpe Ratio Analysis ---
+        analyzer.analyze_event_window_sharpe(
+            results_dir=RESULTS_DIR,
+            file_prefix=FILE_PREFIX,
+            event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
+            # risk_free_rate=0.0  # Optional
+        )
+
         # --- Optional: Run ML Prediction Analysis ---
         if RUN_ML_ANALYSIS:
             print("\n--- Running Optional ML Analysis (Polars) ---")
