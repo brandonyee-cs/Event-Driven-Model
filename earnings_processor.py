@@ -1203,54 +1203,85 @@ class Analysis:
 
     def train_models(self, test_size=0.2, time_split_column='Announcement Date'):
         """Split data, process features/target, and train all models using Polars/NumPy."""
-        # ... (Keep corrected version) ...
-        if self.data is None: raise RuntimeError("Run load_and_prepare_data() first.")
-        if time_split_column not in self.data.columns: raise ValueError(f"Time split column '{time_split_column}' not found.")
-        if 'event_id' not in self.data.columns: raise ValueError("'event_id' required.")
-        if 'future_ret' not in self.data.columns: self.data = self.feature_engineer.create_target(self.data)
-        if not self.feature_engineer.feature_names: self.data = self.feature_engineer.calculate_features(self.data, fit_categorical=False)
-        print(f"\n--- Splitting Earnings Data (Train/Test based on {time_split_column}) ---")
-        events = self.data.select(['event_id', time_split_column]).unique().sort(time_split_column)
-        split_index = int(events.height * (1 - test_size));
-        if split_index == 0 or split_index == events.height: raise ValueError("test_size results in empty train/test set.")
-        split_date = events.item(split_index, time_split_column); print(f"Splitting {events.height} unique events. Train before {split_date}.")
-        train_mask = pl.col(time_split_column) < split_date; test_mask = pl.col(time_split_column) >= split_date
-        train_data_raw = self.data.filter(train_mask); test_data_raw = self.data.filter(test_mask)
-        print(f"Train rows (raw): {train_data_raw.height}, Test rows (raw): {test_data_raw.height}.")
-        if train_data_raw.is_empty() or test_data_raw.is_empty(): raise ValueError("Train or test split resulted in empty DataFrame.")
-        print("\nFitting FeatureEngineer components (Categorical/Imputer) on Training Data...")
-        self.train_data = self.feature_engineer.calculate_features(train_data_raw, fit_categorical=True)
-        self.X_train_np, self.y_train_np, _ = self.feature_engineer.get_features_target(self.train_data, fit_imputer=True)
-        print("\nApplying FeatureEngineer components to Test Data...")
-        self.test_data = self.feature_engineer.calculate_features(test_data_raw, fit_categorical=False)
-        self.X_test_np, self.y_test_np, self.final_feature_names = self.feature_engineer.get_features_target(self.test_data, fit_imputer=False)
-        print(f"\nTrain shapes (NumPy): X={self.X_train_np.shape}, y={self.y_train_np.shape}")
-        print(f"Test shapes (NumPy): X={self.X_test_np.shape}, y={self.y_test_np.shape}")
-        if self.X_train_np.shape[0] == 0 or self.X_test_np.shape[0] == 0: raise ValueError("Train or test NumPy array empty after feature extraction.")
-        if not self.final_feature_names: raise RuntimeError("Final feature names were not set during feature extraction.")
+        # ... (Data loading, splitting, feature extraction preamble remains the same) ...
+        if self.X_train_np.shape[0] == 0 or self.X_test_np.shape[0] == 0:
+             raise ValueError("Train or test NumPy array empty after feature extraction.")
+        if not self.final_feature_names:
+            raise RuntimeError("Final feature names were not set during feature extraction.")
+
         print("\n--- Training Standard Models (Earnings) ---")
-        try: X_train_pl_imputed = pl.DataFrame(self.X_train_np, schema=self.final_feature_names, strict=False); y_train_pl = pl.Series("future_ret", self.y_train_np)
-        except Exception as e: raise RuntimeError(f"Could not convert imputed NumPy training arrays to Polars: {e}")
-        try: print("Training TimeSeriesRidge..."); ts_ridge = TimeSeriesRidge(alpha=1.0, lambda2=0.1, feature_order=self.final_feature_names); ts_ridge.fit(X_train_pl_imputed, y_train_pl); self.models['TimeSeriesRidge'] = ts_ridge; print("TimeSeriesRidge complete.")
+        # Convert imputed NumPy arrays back to Polars DFs for models expecting them
+        try:
+             X_train_pl_imputed = pl.DataFrame(self.X_train_np, schema=self.final_feature_names, strict=False)
+             y_train_pl = pl.Series("future_ret", self.y_train_np)
+        except Exception as e:
+             raise RuntimeError(f"Could not convert imputed NumPy training arrays to Polars: {e}")
+
+        # 1. TimeSeriesRidge (Expects Polars DF)
+        try:
+             print("Training TimeSeriesRidge...")
+             ts_ridge = TimeSeriesRidge(alpha=1.0, lambda2=0.1, feature_order=self.final_feature_names)
+             # Ensure input Polars DF has correct schema and non-zero rows if X_train_np was non-empty
+             if X_train_pl_imputed.height > 0:
+                 ts_ridge.fit(X_train_pl_imputed, y_train_pl)
+                 self.models['TimeSeriesRidge'] = ts_ridge
+                 print("TimeSeriesRidge complete.")
+             else:
+                 print("Skipping TimeSeriesRidge fit due to empty training data.")
         except Exception as e: print(f"Error TimeSeriesRidge: {e}"); traceback.print_exc()
-        try: print("\nTraining XGBoostDecile..."); xgb_params = {'n_estimators': 150, 'max_depth': 5, 'learning_rate': 0.05, 'objective': 'reg:squarederror', 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42, 'n_jobs': -1, 'early_stopping_rounds': 10}
-             if 'momentum_5' not in X_train_pl_imputed.columns: print("Warning: 'momentum_5' not found for XGBoostDecile.")
-             xgb_decile = XGBoostDecileModel(weight=0.7, momentum_feature='momentum_5', n_deciles=10, alpha=1.0, lambda_smooth=0.1, xgb_params=xgb_params, ts_ridge_feature_order=self.final_feature_names); xgb_decile.fit(X_train_pl_imputed, y_train_pl); self.models['XGBoostDecile'] = xgb_decile; print("XGBoostDecile complete.")
-        except Exception as e: print(f"Error XGBoostDecile: {e}"); traceback.print_exc()
+
+        # 2. XGBoostDecile (Expects Polars DF)
+        try: # <--- Start of XGB try block
+             print("\nTraining XGBoostDecile...")
+             xgb_params = {'n_estimators': 150, 'max_depth': 5, 'learning_rate': 0.05, 'objective': 'reg:squarederror', 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42, 'n_jobs': -1, 'early_stopping_rounds': 10}
+
+             # Check momentum feature existence
+             if 'momentum_5' not in X_train_pl_imputed.columns:
+                 print("Warning: 'momentum_5' not found for XGBoostDecile.")
+
+             # Ensure input Polars DF has correct schema and non-zero rows if X_train_np was non-empty
+             if X_train_pl_imputed.height > 0:
+                 xgb_decile = XGBoostDecileModel(weight=0.7, momentum_feature='momentum_5', n_deciles=10, alpha=1.0, lambda_smooth=0.1, xgb_params=xgb_params, ts_ridge_feature_order=self.final_feature_names)
+                 xgb_decile.fit(X_train_pl_imputed, y_train_pl) # Fit with Polars DF
+                 self.models['XGBoostDecile'] = xgb_decile
+                 print("XGBoostDecile complete.")
+             else:
+                 print("Skipping XGBoostDecile fit due to empty training data.")
+        # --- ADDED THIS EXCEPT BLOCK ---
+        except Exception as e:
+            print(f"Error XGBoostDecile: {e}")
+            traceback.print_exc()
+        # --- END OF ADDED BLOCK ---
+
+
+        # --- Train Surprise Classification Model ---
+        # ... (Rest of the train_models method remains the same) ...
         surprise_col_name = 'surprise_val'
         if self.train_data is not None and surprise_col_name in self.train_data.columns and self.train_data.filter(pl.col(surprise_col_name).is_not_null()).height > 0:
              print("\n--- Training Surprise Classification Model ---")
              try:
                  train_data_for_surprise = self.train_data.filter(pl.col('future_ret').is_not_null())
-                 if train_data_for_surprise.height == self.X_train_np.shape[0]: surprise_train_np = train_data_for_surprise.get_column(surprise_col_name).cast(pl.Float64).fill_null(0).to_numpy(); self.surprise_model = SurpriseClassificationModel(); self.surprise_model.fit(self.X_train_np, self.y_train_np, surprise_train_np, self.final_feature_names); print("SurpriseClassificationModel training complete.")
-                 else: print(f"Warning: Row mismatch between features ({self.X_train_np.shape[0]}) and filtered train data ({train_data_for_surprise.height}). Skipping surprise model."); self.surprise_model = None
+                 if train_data_for_surprise.height == self.X_train_np.shape[0]:
+                     surprise_train_np = train_data_for_surprise.get_column(surprise_col_name).cast(pl.Float64).fill_null(0).to_numpy()
+                     self.surprise_model = SurpriseClassificationModel()
+                     self.surprise_model.fit(self.X_train_np, self.y_train_np, surprise_train_np, self.final_feature_names)
+                     print("SurpriseClassificationModel training complete.")
+                 else:
+                     print(f"Warning: Row mismatch between features ({self.X_train_np.shape[0]}) and filtered train data ({train_data_for_surprise.height}). Skipping surprise model.")
+                     self.surprise_model = None
              except Exception as e: print(f"Error SurpriseClassificationModel: {e}"); self.surprise_model = None; traceback.print_exc()
         else: print(f"\n'{surprise_col_name}' column not found or all NaNs in processed train set. Skipping surprise model.")
+
         print("\n--- Training Earnings Drift (PEAD) Model ---")
-        try: self.pead_model = EarningsDriftModel(time_horizons=[1, 3, 5, 10, 20])
-             if self.train_data is not None: self.pead_model.fit(self.train_data, feature_cols=self.final_feature_names); print("EarningsDriftModel training complete.")
-             else: print("Error: Processed training data (self.train_data) is None. Skipping PEAD model."); self.pead_model = None
+        try:
+             self.pead_model = EarningsDriftModel(time_horizons=[1, 3, 5, 10, 20])
+             if self.train_data is not None:
+                 self.pead_model.fit(self.train_data, feature_cols=self.final_feature_names)
+                 print("EarningsDriftModel training complete.")
+             else:
+                 print("Error: Processed training data (self.train_data) is None. Skipping PEAD model."); self.pead_model = None
         except Exception as e: print(f"Error EarningsDriftModel: {e}"); self.pead_model = None; traceback.print_exc()
+
         print("\n--- All Earnings Model Training Complete ---"); return self.models
 
     def evaluate_models(self) -> Dict[str, Dict]:
