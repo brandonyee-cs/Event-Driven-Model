@@ -183,7 +183,7 @@ class DataLoader:
             # Rename and process
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Announcement Date'})
             event_data_processed = event_data_renamed.with_columns([
-                pl.col('Announcement Date').str.to_datetime(strict=False, errors='null'),
+                pl.col('ANNDAT').str.to_datetime(strict=False),
                 pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
             ])
 
