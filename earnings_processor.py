@@ -1854,3 +1854,204 @@ class Analysis:
             print("\nCould not calculate volatility ratios (insufficient valid data or aggregation error).")
 
         return aligned_vol
+        def plot_sharpe_ratio_time_series(self, results_dir: str, file_prefix: str = "earnings",
+                                          entry_day: int = 0, holding_period: int = 20,
+                                          time_grouping: str = 'year', risk_free_rate: float = 0.0):
+            """
+            Calculates and plots Sharpe ratio over time for an 'all buy' earnings strategy.
+            
+            Parameters:
+            results_dir (str): Directory to save results
+            file_prefix (str): Prefix for saved files
+            entry_day (int): Day relative to announcement to enter positions
+            holding_period (int): Holding period in trading days
+            time_grouping (str): How to group time periods ('year', 'quarter', 'month')
+            risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
+            
+            Returns:
+            pl.DataFrame: DataFrame containing Sharpe ratios for each time period
+            """
+            print(f"\n--- Analyzing Time Series of Sharpe Ratios (Entry: T{entry_day}, Hold: {holding_period} days) ---")
+            if self.data is None:
+                print("Error: Data not loaded.") 
+                return None
+                
+            # Calculate strategy returns
+            strategy_returns_df = self.calculate_event_strategy_returns(
+                holding_period=holding_period, 
+                entry_day=entry_day
+            )
+            
+            if strategy_returns_df is None or strategy_returns_df.is_empty():
+                print(f"Error: Not enough data for Entry T{entry_day}, Hold {holding_period}")
+                return None
+            
+            # Join returns with event dates
+            event_dates = self.data.filter(pl.col('days_to_announcement') == entry_day).select(['event_id', 'Announcement Date'])
+            event_dates = event_dates.unique(subset=['event_id'], keep='first')
+            
+            returns_with_dates = strategy_returns_df.join(
+                event_dates, 
+                on='event_id', 
+                how='inner'
+            )
+            
+            if returns_with_dates.is_empty():
+                print("Error: Failed to join strategy returns with announcement dates.")
+                return None
+            
+            # Extract time period components
+            returns_with_dates = returns_with_dates.with_columns([
+                pl.col('Announcement Date').dt.year().alias('year'),
+                pl.col('Announcement Date').dt.quarter().alias('quarter'),
+                pl.col('Announcement Date').dt.month().alias('month')
+            ])
+            
+            # Create time period label based on grouping
+            if time_grouping == 'quarter':
+                returns_with_dates = returns_with_dates.with_columns(
+                    (pl.col('year').cast(pl.Utf8) + "-Q" + pl.col('quarter').cast(pl.Utf8)).alias('time_period')
+                )
+            elif time_grouping == 'month':
+                returns_with_dates = returns_with_dates.with_columns(
+                    (pl.col('year').cast(pl.Utf8) + "-" + pl.col('month').cast(pl.Utf8).str.zfill(2)).alias('time_period')
+                )
+            else:  # Default to year
+                returns_with_dates = returns_with_dates.with_columns(
+                    pl.col('year').cast(pl.Utf8).alias('time_period')
+                )
+            
+            # Calculate Sharpe ratio for each time period
+            periods = []
+            sharpes = []
+            counts = []
+            mean_returns = []
+            std_returns = []
+            
+            for period in returns_with_dates['time_period'].unique().sort():
+                period_returns = returns_with_dates.filter(pl.col('time_period') == period)
+                if period_returns.height < 5:  # Skip periods with too few observations
+                    continue
+                    
+                period_stats = period_returns.select([
+                    pl.mean('strategy_return').alias('mean_ret'),
+                    pl.std('strategy_return').alias('std_ret'),
+                    pl.count().alias('count')
+                ]).row(0)
+                
+                mean_ret = period_stats[0] if period_stats[0] is not None else np.nan
+                std_ret = period_stats[1] if period_stats[1] is not None else np.nan
+                count = period_stats[2]
+                
+                # Annualize the Sharpe ratio
+                sharpe = np.nan
+                if not np.isnan(std_ret) and std_ret > 0:
+                    # Annualize returns and volatility
+                    ann_factor = 252 / holding_period
+                    ann_ret = (1 + mean_ret) ** ann_factor - 1
+                    ann_vol = std_ret * np.sqrt(ann_factor)
+                    sharpe = (ann_ret - risk_free_rate) / ann_vol
+                    
+                periods.append(period)
+                sharpes.append(sharpe)
+                counts.append(count)
+                mean_returns.append(mean_ret)
+                std_returns.append(std_ret)
+            
+            # Create results DataFrame
+            results_df = pl.DataFrame({
+                'time_period': periods,
+                'sharpe_ratio': sharpes,
+                'mean_return': mean_returns,
+                'std_dev': std_returns,
+                'count': counts
+            })
+            
+            # Plot time series
+            try:
+                results_pd = results_df.to_pandas()
+                
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+                
+                # Sharpe ratio plot
+                color = results_pd['sharpe_ratio'].map(lambda x: 'green' if x >= 0 else 'red')
+                bars1 = ax1.bar(results_pd['time_period'], results_pd['sharpe_ratio'], color=color)
+                ax1.set_title(f'Annualized Sharpe Ratio by {time_grouping.capitalize()} (Entry: T{entry_day}, Hold: {holding_period} days)')
+                ax1.set_ylabel('Annualized Sharpe Ratio')
+                ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+                
+                # Add overall average line
+                avg_sharpe = results_pd['sharpe_ratio'].mean()
+                ax1.axhline(y=avg_sharpe, color='blue', linestyle='--', alpha=0.7, label=f'Average: {avg_sharpe:.2f}')
+                ax1.legend()
+                
+                # Rotate x-axis labels if many periods
+                if len(periods) > 8:
+                    plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+                
+                # Add value labels if fewer periods
+                if len(periods) <= 15:
+                    for bar in bars1:
+                        height = bar.get_height()
+                        if not np.isnan(height):
+                            ax1.annotate(f'{height:.2f}',
+                                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                                        xytext=(0, 3 if height >= 0 else -10),
+                                        textcoords="offset points",
+                                        ha='center', va='bottom' if height >= 0 else 'top')
+                
+                # Sample count plot
+                bars2 = ax2.bar(results_pd['time_period'], results_pd['count'], color='lightblue')
+                ax2.set_title('Number of Events per Period')
+                ax2.set_ylabel('Count')
+                
+                if len(periods) > 8:
+                    plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
+                    
+                plt.tight_layout()
+                plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_time_series_{time_grouping}.png")
+                plt.savefig(plot_filename)
+                print(f"Saved Sharpe ratio time series plot to: {plot_filename}")
+                plt.close(fig)
+                
+                # Also create a rolling Sharpe ratio plot if there are enough periods
+                if len(periods) >= 4:
+                    fig, ax = plt.subplots(figsize=(14, 6))
+                    
+                    # Calculate rolling averages
+                    roll_window = min(4, len(periods))
+                    results_pd['rolling_sharpe'] = results_pd['sharpe_ratio'].rolling(window=roll_window).mean()
+                    
+                    # Plot
+                    ax.plot(results_pd['time_period'], results_pd['sharpe_ratio'], 'o-', label='Period Sharpe')
+                    ax.plot(results_pd['time_period'], results_pd['rolling_sharpe'], 'r-', linewidth=2, 
+                           label=f'{roll_window}-Period Rolling Avg')
+                    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+                    ax.axhline(y=avg_sharpe, color='blue', linestyle='--', alpha=0.7, label=f'Overall Avg: {avg_sharpe:.2f}')
+                    
+                    ax.set_title(f'Annualized Sharpe Ratio and Rolling Average (Entry: T{entry_day}, Hold: {holding_period} days)')
+                    ax.set_ylabel('Annualized Sharpe Ratio')
+                    ax.legend()
+                    
+                    if len(periods) > 8:
+                        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+                        
+                    plt.tight_layout()
+                    roll_plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_rolling_{time_grouping}.png")
+                    plt.savefig(roll_plot_filename)
+                    print(f"Saved rolling Sharpe ratio plot to: {roll_plot_filename}")
+                    plt.close(fig)
+                
+            except Exception as e:
+                print(f"Error creating Sharpe ratio time series plots: {e}")
+                traceback.print_exc()
+            
+            # Save results to CSV
+            csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_time_series_{time_grouping}.csv")
+            try:
+                results_df.write_csv(csv_filename)
+                print(f"Saved Sharpe ratio time series data to: {csv_filename}")
+            except Exception as e:
+                print(f"Error saving Sharpe ratio data: {e}")
+            
+            return results_df
