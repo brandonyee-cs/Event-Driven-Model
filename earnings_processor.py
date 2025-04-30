@@ -258,7 +258,7 @@ class DataLoader:
                  print(f"    Warning: Failed to scan/prepare {failed_stock_loads} stock file(s) for this chunk.")
 
             # Concatenate the filtered scans (still lazy)
-            combined_stock_scan = pl.concat(stock_scans, how='common') # Use 'common' to handle schema variations if any
+            combined_stock_scan = pl.concat(stock_scans, how='vertical_relaxed') # Use 'common' to handle schema variations if any
 
             # Collect the required stock data for this chunk (Execute the query)
             print(f"    Collecting filtered stock data for chunk {i+1}...")
