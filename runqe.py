@@ -57,9 +57,8 @@ VOL_ROLLING_WINDOW = 5     # Days for rolling Volatility calculation (row-based)
 VOL_BASELINE_WINDOW = (-60, -11) # Days relative to event for baseline vol calc
 VOL_EVENT_WINDOW = (-2, 2)       # Days relative to event for event vol calc
 
-# Sharpe Ratio Comparison Parameters
-SHARPE_ENTRY_DAYS = [-1, 0, 1, 2]  # Days relative to announcement to enter
-SHARPE_HOLDING_PERIODS = [5, 10, 20, 30]  # Holding periods to compare
+# Sharpe Ratio Time Series Parameters
+SHARPE_TIME_GROUPING = 'quarter'  # 'year', 'quarter', or 'month'
 
 # --- Optional ML Parameters ---
 # Set to True to run the ML prediction parts (slower)
@@ -118,11 +117,12 @@ def run_analysis():
             event_window=VOL_EVENT_WINDOW
         )
         # --- Run Sharpe Ratio Comparison Analysis ---
-        analyzer.plot_sharpe_ratio_comparison(
+        analyzer.plot_sharpe_ratio_time_series(
             results_dir=RESULTS_DIR,
             file_prefix=FILE_PREFIX,
-            entry_days=SHARPE_ENTRY_DAYS,
-            holding_periods=SHARPE_HOLDING_PERIODS,
+            entry_day=STRATEGY_ENTRY_DAY,
+            holding_period=STRATEGY_HOLDING_PERIOD,
+            time_grouping=SHARPE_TIME_GROUPING
             # risk_free_rate=0.0  # Optional
         )
 
