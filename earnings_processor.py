@@ -7,6 +7,7 @@ from sklearn.impute import SimpleImputer
 import xgboost as xgb
 import warnings
 import os
+import gc
 from typing import List, Optional, Tuple, Dict, Any # For type hinting
 
 # Import shared models (assuming models.py is accessible)
