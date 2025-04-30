@@ -381,110 +381,312 @@ class EarningsDriftModel:
             except Exception as e: print(f"    Error evaluating PEAD {horizon}d: {e}"); results[horizon] = {'Error': str(e)}; traceback.print_exc()
         return results
 
+# --- START OF input_file_0.py (earnings_processor.py content) ---
+
+# ... (Imports and DataLoader, FeatureEngineer, other model classes remain the same) ...
+
+
+# --- Analysis Class ---
 class Analysis:
-    # ... (Analysis class init, load_and_prepare, train_models, evaluate_models remain unchanged) ...
-    # ... (Plotting methods remain unchanged) ...
+    # --- *** RESTORED __init__ METHOD *** ---
+    def __init__(self, data_loader: DataLoader, feature_engineer: FeatureEngineer):
+        """Analysis class for Earnings data using Polars."""
+        self.data_loader = data_loader
+        self.feature_engineer = feature_engineer
+        self.data: Optional[pl.DataFrame] = None
+        # Store NumPy arrays for ML models
+        self.X_train_np: Optional[np.ndarray] = None
+        self.X_test_np: Optional[np.ndarray] = None
+        self.y_train_np: Optional[np.ndarray] = None
+        self.y_test_np: Optional[np.ndarray] = None
+        self.train_data: Optional[pl.DataFrame] = None # Store processed train split DF
+        self.test_data: Optional[pl.DataFrame] = None # Store processed test split DF
+        self.final_feature_names: Optional[List[str]] = None # Store final feature names after processing
+        self.models: Dict[str, Any] = {} # Standard models (Ridge, XGBDecile)
+        self.surprise_model: Optional[SurpriseClassificationModel] = None
+        self.pead_model: Optional[EarningsDriftModel] = None
+        self.results: Dict[str, Dict] = {} # Standard model results
+        self.surprise_results: Dict = {}
+        self.pead_results: Dict = {}
+    # --- *** END OF RESTORED __init__ METHOD *** ---
+
+    def load_and_prepare_data(self, run_feature_engineering: bool = True):
+        # ... (Method remains the same) ...
+        print("--- Loading Earnings Data (Polars) ---")
+        self.data = self.data_loader.load_data()
+        if self.data is None or self.data.is_empty(): raise RuntimeError("Data loading failed.")
+        if run_feature_engineering:
+             print("\n--- Creating Target Variable (Earnings - Polars) ---")
+             self.data = self.feature_engineer.create_target(self.data)
+             print("\n--- Calculating Features (Earnings - Polars) ---")
+             self.data = self.feature_engineer.calculate_features(self.data, fit_categorical=False)
+        print("\n--- Earnings Data Loading/Preparation Complete ---")
+        return self.data
+
+    def train_models(self, test_size=0.2, time_split_column='Announcement Date'):
+        # ... (Method remains the same) ...
+        if self.data is None: raise RuntimeError("Run load_and_prepare_data() first.")
+        if time_split_column not in self.data.columns: raise ValueError(f"Time split column '{time_split_column}' not found.")
+        if 'event_id' not in self.data.columns: raise ValueError("'event_id' required.")
+        if 'future_ret' not in self.data.columns: print("ML Prep: Target variable 'future_ret' not found. Creating..."); self.data = self.feature_engineer.create_target(self.data)
+        if not self.feature_engineer.feature_names: print("ML Prep: Features not calculated. Calculating..."); self.data = self.feature_engineer.calculate_features(self.data, fit_categorical=False)
+        print(f"\n--- Splitting Earnings Data (Train/Test based on {time_split_column}) ---"); events = self.data.select(['event_id', time_split_column]).unique().sort(time_split_column); split_index = int(events.height * (1 - test_size));
+        if split_index == 0 or split_index == events.height: raise ValueError("test_size results in empty train/test set.")
+        split_date = events.item(split_index, time_split_column); print(f"Splitting {events.height} unique events. Train before {split_date}.")
+        train_mask = pl.col(time_split_column) < split_date; test_mask = pl.col(time_split_column) >= split_date; train_data_raw = self.data.filter(train_mask); test_data_raw = self.data.filter(test_mask); print(f"Train rows (raw): {train_data_raw.height}, Test rows (raw): {test_data_raw.height}.")
+        if train_data_raw.is_empty() or test_data_raw.is_empty(): raise ValueError("Train or test split resulted in empty DataFrame.")
+        print("\nFitting FeatureEngineer components (Categorical/Imputer) on Training Data..."); self.train_data = self.feature_engineer.calculate_features(train_data_raw, fit_categorical=True); self.X_train_np, self.y_train_np, _ = self.feature_engineer.get_features_target(self.train_data, fit_imputer=True)
+        print("\nApplying FeatureEngineer components to Test Data..."); self.test_data = self.feature_engineer.calculate_features(test_data_raw, fit_categorical=False); self.X_test_np, self.y_test_np, self.final_feature_names = self.feature_engineer.get_features_target(self.test_data, fit_imputer=False)
+        print(f"\nTrain shapes (NumPy): X={self.X_train_np.shape}, y={self.y_train_np.shape}"); print(f"Test shapes (NumPy): X={self.X_test_np.shape}, y={self.y_test_np.shape}")
+        if self.X_train_np.shape[0] == 0 or self.X_test_np.shape[0] == 0: raise ValueError("Train or test NumPy array empty after feature extraction.")
+        if not self.final_feature_names: raise RuntimeError("Final feature names were not set during feature extraction.")
+        print("\n--- Training Standard Models (Earnings) ---")
+        try: X_train_pl_imputed = pl.DataFrame(self.X_train_np, schema=self.final_feature_names, strict=False); y_train_pl = pl.Series("future_ret", self.y_train_np)
+        except Exception as e: raise RuntimeError(f"Could not convert imputed NumPy training arrays to Polars: {e}")
+        try:
+             print("Training TimeSeriesRidge...");
+             ts_ridge = TimeSeriesRidge(alpha=1.0, lambda2=0.1, feature_order=self.final_feature_names)
+             if X_train_pl_imputed.height > 0: ts_ridge.fit(X_train_pl_imputed, y_train_pl); self.models['TimeSeriesRidge'] = ts_ridge; print("TimeSeriesRidge complete.")
+             else: print("Skipping TimeSeriesRidge fit due to empty training data.")
+        except Exception as e: print(f"Error TimeSeriesRidge: {e}"); traceback.print_exc()
+        try:
+             print("\nTraining XGBoostDecile..."); xgb_params = {'n_estimators': 150, 'max_depth': 5, 'learning_rate': 0.05, 'objective': 'reg:squarederror', 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42, 'n_jobs': -1, 'early_stopping_rounds': 10}
+             if 'momentum_5' not in X_train_pl_imputed.columns: print("Warning: 'momentum_5' not found for XGBoostDecile.")
+             if X_train_pl_imputed.height > 0: xgb_decile = XGBoostDecileModel(weight=0.7, momentum_feature='momentum_5', n_deciles=10, alpha=1.0, lambda_smooth=0.1, xgb_params=xgb_params, ts_ridge_feature_order=self.final_feature_names); xgb_decile.fit(X_train_pl_imputed, y_train_pl); self.models['XGBoostDecile'] = xgb_decile; print("XGBoostDecile complete.")
+             else: print("Skipping XGBoostDecile fit due to empty training data.")
+        except Exception as e: print(f"Error XGBoostDecile: {e}"); traceback.print_exc()
+        surprise_col_name = 'surprise_val'
+        if self.train_data is not None and surprise_col_name in self.train_data.columns and self.train_data.filter(pl.col(surprise_col_name).is_not_null()).height > 0:
+             print("\n--- Training Surprise Classification Model ---")
+             try:
+                 train_data_for_surprise = self.train_data.filter(pl.col('future_ret').is_not_null())
+                 if train_data_for_surprise.height == self.X_train_np.shape[0]: surprise_train_np = train_data_for_surprise.get_column(surprise_col_name).cast(pl.Float64).fill_null(0).to_numpy(); self.surprise_model = SurpriseClassificationModel(); self.surprise_model.fit(self.X_train_np, self.y_train_np, surprise_train_np, self.final_feature_names); print("SurpriseClassificationModel training complete.")
+                 else: print(f"Warning: Row mismatch features ({self.X_train_np.shape[0]}) vs train data ({train_data_for_surprise.height}). Skipping surprise model."); self.surprise_model = None
+             except Exception as e: print(f"Error SurpriseClassificationModel: {e}"); self.surprise_model = None; traceback.print_exc()
+        else: print(f"\n'{surprise_col_name}' column not found or all NaNs in processed train set. Skipping surprise model.")
+        print("\n--- Training Earnings Drift (PEAD) Model ---")
+        try:
+             self.pead_model = EarningsDriftModel(time_horizons=[1, 3, 5, 10, 20])
+             if self.train_data is not None: self.pead_model.fit(self.train_data, feature_cols=self.final_feature_names); print("EarningsDriftModel training complete.")
+             else: print("Error: Processed training data (self.train_data) is None. Skipping PEAD model."); self.pead_model = None
+        except Exception as e: print(f"Error EarningsDriftModel: {e}"); self.pead_model = None; traceback.print_exc()
+        print("\n--- All Earnings Model Training Complete ---"); return self.models
+
+    def evaluate_models(self) -> Dict[str, Dict]:
+        # ... (Method remains the same) ...
+        print("\n--- Evaluating Earnings Models ---")
+        if self.X_test_np is None or self.y_test_np is None or self.X_test_np.shape[0]==0: print("Test data (NumPy) unavailable/empty."); return {}
+        if not self.final_feature_names: print("Final feature names not available. Cannot evaluate."); return {}
+        print("\n--- Standard Model Evaluation ---"); self.results = {}
+        try: X_test_pl_imputed = pl.DataFrame(self.X_test_np, schema=self.final_feature_names, strict=False)
+        except Exception as e: print(f"Error converting imputed NumPy test features to Polars: {e}. Skipping standard model eval."); X_test_pl_imputed = None
+        for name, model in self.models.items():
+            print(f"Evaluating {name}...")
+            if X_test_pl_imputed is None and isinstance(model, (TimeSeriesRidge, XGBoostDecileModel)): print(f"  Skipping {name} because Polars DataFrame conversion failed."); self.results[name] = {'Error': 'Polars DF conversion failed'}; continue
+            try:
+                y_pred_np = model.predict(X_test_pl_imputed); valid_mask = np.isfinite(self.y_test_np) & np.isfinite(y_pred_np); y_test_v, y_pred_v = self.y_test_np[valid_mask], y_pred_np[valid_mask]
+                if len(y_test_v) > 0: mse = mean_squared_error(y_test_v, y_pred_v); r2 = r2_score(y_test_v, y_pred_v)
+                else: mse, r2 = np.nan, np.nan
+                self.results[name] = {'MSE': mse, 'RMSE': np.sqrt(mse), 'R2': r2, 'N': len(y_test_v)}; print(f"  {name}: MSE={mse:.6f}, RMSE={np.sqrt(mse):.6f}, R2={r2:.4f}, N={len(y_test_v)}")
+            except Exception as e: print(f"  Error evaluating {name}: {e}"); self.results[name] = {'Error': str(e)}; traceback.print_exc()
+        surprise_col_name = 'surprise_val'
+        if self.surprise_model:
+             print("\n--- Surprise Model Evaluation ---")
+             if self.test_data is not None and surprise_col_name in self.test_data.columns and self.test_data.filter(pl.col(surprise_col_name).is_not_null()).height > 0:
+                 test_data_for_surprise = self.test_data.filter(pl.col('future_ret').is_not_null())
+                 if test_data_for_surprise.height == self.X_test_np.shape[0]:
+                     surprise_test_np = test_data_for_surprise.get_column(surprise_col_name).cast(pl.Float64).fill_null(0).to_numpy()
+                     try: self.surprise_results = self.surprise_model.evaluate(self.X_test_np, self.y_test_np, surprise_test_np)
+                     except Exception as e: print(f"  Error evaluating Surprise Model: {e}"); self.surprise_results = {'Error': str(e)}; traceback.print_exc()
+                 else: print(f"  Warning: Row mismatch test features ({self.X_test_np.shape[0]}) vs test data ({test_data_for_surprise.height}). Cannot evaluate surprise model."); self.surprise_results = {'Error': 'Row mismatch'}
+             else: print(f"  '{surprise_col_name}' column not found or all NaNs in processed test data. Cannot evaluate."); self.surprise_results = {'Error': f'{surprise_col_name} not found or all null'}
+        else: print("\nSurprise Model not trained. Skipping evaluation.")
+        if self.pead_model:
+             print("\n--- PEAD Model Evaluation ---");
+             try:
+                 if self.test_data is not None: self.pead_results = self.pead_model.evaluate(self.test_data)
+                 else: print("  Processed test data unavailable. Cannot evaluate PEAD model."); self.pead_results = {'Error': 'Test data unavailable'}
+             except Exception as e: print(f"  Error evaluating PEAD Model: {e}"); self.pead_results = {'Error': str(e)}; traceback.print_exc()
+        else: print("\nPEAD Model not trained. Skipping evaluation.")
+        print("\n--- Earnings Evaluation Complete ---")
+        return {"standard": self.results, "surprise": self.surprise_results, "pead": self.pead_results}
+
+    def analyze_sharpe_ratio_dynamics(self, results_dir: str, file_prefix: str = "earnings", risk_free_rate: float = 0.0, window: int = 20, min_periods: int = 10, pre_days: int = 30, post_days: int = 30):
+        # ... (Method remains the same) ...
+        print(f"\n--- Analyzing Rolling Sharpe Ratio (Window={window} rows) using Polars ---")
+        if self.data is None or 'ret' not in self.data.columns or 'days_to_announcement' not in self.data.columns: print("Error: Data/required columns missing."); return None
+        df = self.data.sort(['event_id', 'date']); df = df.with_columns([pl.col('ret').rolling_mean(window_size=window, min_periods=min_periods).over('event_id').alias('rolling_mean_ret'), pl.col('ret').rolling_std(window_size=window, min_periods=min_periods).over('event_id').alias('rolling_std_ret')])
+        epsilon = 1e-8; daily_risk_free = risk_free_rate / 252; df = df.with_columns(((pl.col('rolling_mean_ret') - daily_risk_free) / (pl.col('rolling_std_ret') + epsilon)).alias('daily_sharpe')); df = df.with_columns((pl.col('daily_sharpe') * np.sqrt(252)).alias('annualized_sharpe'))
+        aligned_sharpe = df.group_by('days_to_announcement').agg(pl.mean('annualized_sharpe').alias('avg_annualized_sharpe')).filter((pl.col('days_to_announcement') >= -pre_days) & (pl.col('days_to_announcement') <= post_days)).sort('days_to_announcement').drop_nulls()
+        if not aligned_sharpe.is_empty():
+            aligned_sharpe_pd = aligned_sharpe.to_pandas().set_index('days_to_announcement')
+            fig, ax = plt.subplots(figsize=(12, 6)); aligned_sharpe_pd['avg_annualized_sharpe'].plot(kind='line', marker='.', linestyle='-', ax=ax); ax.axvline(0, color='red', linestyle='--', linewidth=1, label='Announcement Day'); ax.axhline(0, color='grey', linestyle=':', linewidth=1); ax.set_title(f'Average Annualized Rolling Sharpe Ratio Around Earnings (Window={window} rows)'); ax.set_xlabel('Days Relative to Announcement'); ax.set_ylabel('Average Annualized Sharpe Ratio'); ax.legend(); ax.grid(True, alpha=0.5); plt.tight_layout()
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_rolling_{window}d.png"); csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_rolling_{window}d_data.csv")
+            try: plt.savefig(plot_filename); print(f"Saved Sharpe plot to: {plot_filename}")
+            except Exception as e: print(f"Error saving Sharpe plot: {e}")
+            try: aligned_sharpe_pd.to_csv(csv_filename); print(f"Saved Sharpe data to: {csv_filename}")
+            except Exception as e: print(f"Error saving Sharpe data: {e}")
+            plt.close(fig); print(f"Average Sharpe Ratio ({window} rows rolling) in plot window: {aligned_sharpe_pd['avg_annualized_sharpe'].mean():.4f}")
+        else: print("No data available for rolling Sharpe Ratio plot.")
+        return aligned_sharpe
+
+    def plot_feature_importance(self, results_dir: str, file_prefix: str = "earnings", model_name: str = 'TimeSeriesRidge', top_n: int = 20):
+        # ... (Method remains the same) ...
+        print(f"\n--- Plotting Earnings Feature Importance for {model_name} ---")
+        if model_name not in self.models: print(f"Error: Model '{model_name}' not found."); return None
+        model = self.models[model_name]; feature_names = self.final_feature_names
+        if not feature_names: print("Error: Final feature names not found (run training first)."); return None
+        importances = None
+        if isinstance(model, TimeSeriesRidge):
+             if hasattr(model, 'coef_') and model.coef_ is not None:
+                 if len(model.coef_) == len(feature_names): importances = np.abs(model.coef_)
+                 else: print(f"Warn: Ridge coef len ({len(model.coef_)}) != feature len ({len(feature_names)}).")
+        elif isinstance(model, XGBoostDecileModel):
+             if hasattr(model, 'xgb_model') and hasattr(model.xgb_model, 'feature_importances_'):
+                 xgb_importances = model.xgb_model.feature_importances_
+                 if len(xgb_importances) == len(feature_names): importances = xgb_importances
+                 else:
+                     try:
+                        booster = model.xgb_model.get_booster(); xgb_feat_names = booster.feature_names
+                        if xgb_feat_names and len(xgb_feat_names) == len(xgb_importances): imp_dict = dict(zip(xgb_feat_names, xgb_importances)); importances = np.array([imp_dict.get(name, 0) for name in feature_names])
+                        else: raise ValueError("Mismatch")
+                     except Exception: print(f"Warn: XGB importance len mismatch.")
+        if importances is None: print(f"Could not get importance scores for {model_name}."); return None
+        feat_imp_df_pl = pl.DataFrame({'Feature': feature_names, 'Importance': importances}).sort('Importance', descending=True).head(top_n); feat_imp_df_pd = feat_imp_df_pl.to_pandas()
+        fig, ax = plt.subplots(figsize=(10, max(6, top_n // 2))); sns.barplot(x='Importance', y='Feature', data=feat_imp_df_pd, palette='viridis', ax=ax); ax.set_title(f'Top {top_n} Features by Importance ({model_name} - Earnings)'); ax.set_xlabel('Importance Score'); ax.set_ylabel('Feature'); plt.tight_layout()
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_feat_importance_{model_name}.png");
+        try: plt.savefig(plot_filename); print(f"Saved feature importance plot to: {plot_filename}")
+        except Exception as e: print(f"Error saving feature importance plot: {e}")
+        plt.close(fig); return pl.DataFrame({'Feature': feature_names, 'Importance': importances}).sort('Importance', descending=True)
+
+    def analyze_earnings_surprise(self, results_dir: str, file_prefix: str = "earnings"):
+        # ... (Method remains the same) ...
+        print("\n--- Analyzing Earnings Surprise Impact (Polars) ---")
+        surprise_col = 'surprise_val'
+        if self.data is None or surprise_col not in self.data.columns or self.data.select(surprise_col).is_null().all(): print(f"No valid earnings surprise data ('{surprise_col}') available."); return None
+        analysis_data = self.data.filter((pl.col('days_to_announcement') >= -2) & (pl.col('days_to_announcement') <= 5))
+        if analysis_data.is_empty(): print("No data in analysis window."); return None
+        bins = [-np.inf, -0.01, 0.01, np.inf]; labels = ['Negative Surprise', 'Near Zero Surprise', 'Positive Surprise']
+        analysis_data = analysis_data.with_columns(pl.when(pl.col(surprise_col) < bins[1]).then(pl.lit(labels[0])).when(pl.col(surprise_col) < bins[2]).then(pl.lit(labels[1])).when(pl.col(surprise_col) >= bins[2]).then(pl.lit(labels[2])).otherwise(None).alias('Surprise Group')).drop_nulls(subset=['Surprise Group'])
+        if analysis_data.is_empty(): print("No data after assigning surprise groups."); return None
+        avg_returns = analysis_data.group_by(['Surprise Group', 'days_to_announcement']).agg(pl.mean('ret').alias('avg_ret')).sort(['Surprise Group', 'days_to_announcement'])
+        try: avg_returns_pivot = avg_returns.pivot(index='days_to_announcement', columns='Surprise Group', values='avg_ret').sort('days_to_announcement')
+        except Exception as e: print(f"Could not pivot average returns data: {e}."); avg_returns_pivot = None
+        avg_returns_sorted = avg_returns.sort(['Surprise Group', 'days_to_announcement']); avg_cum_returns = avg_returns_sorted.with_columns((pl.col('avg_ret').fill_null(0) + 1).cum_prod().over('Surprise Group').alias('cum_ret_factor')).with_columns((pl.col('cum_ret_factor') - 1).alias('avg_cum_ret'))
+        try: avg_cum_returns_pivot = avg_cum_returns.pivot(index='days_to_announcement', columns='Surprise Group', values='avg_cum_ret').sort('days_to_announcement'); avg_cum_returns_pd = avg_cum_returns_pivot.to_pandas().set_index('days_to_announcement')
+        except Exception as e: print(f"Could not pivot cumulative returns data: {e}."); avg_cum_returns_pivot = None; avg_cum_returns_pd = None
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        if avg_returns_pivot is not None:
+             try: avg_returns_pd = avg_returns_pivot.to_pandas().set_index('days_to_announcement'); avg_returns_pd.plot(kind='bar', ax=axes[0], width=0.8); axes[0].set_title('Average Daily Returns by Surprise'); axes[0].set_ylabel('Avg Daily Return'); axes[0].axhline(0, c='grey', ls='--', lw=0.8); axes[0].legend(title='Group'); axes[0].grid(axis='y', ls=':', alpha=0.6)
+             except Exception as plot_err: print(f"Error plotting daily surprise returns: {plot_err}"); axes[0].set_title('Average Daily Returns by Surprise (Plotting Error)')
+        else: axes[0].set_title('Average Daily Returns by Surprise (Pivot Error)')
+        if avg_cum_returns_pd is not None:
+             try: avg_cum_returns_pd.plot(kind='line', marker='o', ax=axes[1]); axes[1].set_title('Average Cumulative Returns by Surprise'); axes[1].set_ylabel('Avg Cum Return'); axes[1].set_xlabel('Days Rel. to Announce'); axes[1].axhline(0, c='grey', ls='--', lw=0.8); axes[1].axvline(0, c='red', ls=':', lw=1, label='Announce Day'); axes[1].legend(title='Group'); axes[1].grid(True, ls=':', alpha=0.6)
+             except Exception as plot_err: print(f"Error plotting cumulative surprise returns: {plot_err}"); axes[1].set_title('Average Cumulative Returns by Surprise (Plotting Error)')
+        else: axes[1].set_title('Average Cumulative Returns by Surprise (Pivot Error)')
+        plt.tight_layout(); plot_filename = os.path.join(results_dir, f"{file_prefix}_surprise_impact_returns.png"); csv_filename = os.path.join(results_dir, f"{file_prefix}_surprise_impact_cum_returns_data.csv")
+        try: plt.savefig(plot_filename); print(f"Saved surprise impact plot to: {plot_filename}")
+        except Exception as e: print(f"Error saving surprise plot: {e}")
+        if avg_cum_returns_pivot is not None:
+            try: avg_cum_returns_pivot.write_csv(csv_filename); print(f"Saved surprise cum returns data to: {csv_filename}")
+            except Exception as e: print(f"Error saving surprise data: {e}")
+        plt.close(fig); return avg_cum_returns
+
+    def plot_predictions_for_event(self, results_dir: str, event_id: str, file_prefix: str = "earnings", model_name: str = 'TimeSeriesRidge'):
+        # ... (Method remains the same) ...
+        print(f"\n--- Plotting Earnings Predictions for Event: {event_id} ({model_name}) ---")
+        if model_name not in self.models: print(f"Error: Model '{model_name}' not found."); return None
+        if self.data is None: print("Error: Data not loaded."); return None
+        model = self.models[model_name]; event_data_full = self.data.filter(pl.col('event_id') == event_id).sort('date')
+        if event_data_full.is_empty(): print(f"Error: No data for event_id '{event_id}'."); return None
+        ticker = event_data_full['ticker'][0]; announcement_date = event_data_full['Announcement Date'][0]
+        if not self.feature_engineer._imputer_fitted: print("Error: FeatureEngineer imputer not fitted."); return None
+        if not self.final_feature_names: print("Error: Final feature names not set."); return None
+        event_data_processed = self.feature_engineer.calculate_features(event_data_full, fit_categorical=False); X_event_np, y_event_actual_np, event_features = self.feature_engineer.get_features_target(event_data_processed, fit_imputer=False)
+        if X_event_np.shape[0] == 0: print(f"Warn: No valid features/target rows for event {event_id}."); return None
+        try: X_event_pl = pl.DataFrame(X_event_np, schema=event_features, strict=False); y_pred_event_np = model.predict(X_event_pl)
+        except Exception as e: print(f"Error predicting event {event_id}: {e}"); return None
+        event_data_pred_source = event_data_processed.filter(pl.col('future_ret').is_not_null())
+        if event_data_pred_source.height != len(y_pred_event_np): print(f"Warn: Mismatch predictions ({len(y_pred_event_np)}) vs source ({event_data_pred_source.height}). Adjusting."); min_len = min(event_data_pred_source.height, len(y_pred_event_np)); event_data_pred_source = event_data_pred_source.head(min_len); y_pred_event_np = y_pred_event_np[:min_len]
+        event_data_pred = event_data_pred_source.select(['date']).with_columns(pl.Series('predicted_future_ret', y_pred_event_np)); event_data_full_pd = event_data_full.select(['date', 'ret']).to_pandas(); event_data_pred_pd = event_data_pred.to_pandas(); announcement_date_pd = pd.Timestamp(announcement_date)
+        fig, ax = plt.subplots(figsize=(14, 6)); ax.plot(event_data_full_pd['date'], event_data_full_pd['ret'], '.-', label='Actual Daily Return', alpha=0.6, color='blue'); ax.scatter(event_data_pred_pd['date'], event_data_pred_pd['predicted_future_ret'], color='red', label=f'Predicted {self.feature_engineer.prediction_window}-day Future Ret', s=15, zorder=5, alpha=0.8); ax.axvline(x=announcement_date_pd, color='g', linestyle='--', label='Announcement Date'); ax.set_title(f"{ticker} ({event_id}) - Daily Returns & Predicted Future Returns ({model_name} - Earnings)"); ax.set_ylabel("Return"); ax.set_xlabel("Date"); ax.legend(); ax.grid(True, alpha=0.3); plt.tight_layout()
+        safe_event_id = "".join(c if c.isalnum() else "_" for c in event_id); plot_filename = os.path.join(results_dir, f"{file_prefix}_pred_vs_actual_{safe_event_id}_{model_name}.png")
+        try: plt.savefig(plot_filename); print(f"Saved prediction plot to: {plot_filename}")
+        except Exception as e: print(f"Error saving prediction plot: {e}")
+        plt.close(fig); return event_data_pred
+
+    def find_sample_event_ids(self, n=5):
+        # ... (Method remains the same) ...
+        if self.data is None or 'event_id' not in self.data.columns: return []
+        unique_events = self.data['event_id'].unique().head(n); return unique_events.to_list()
+
+    def plot_pead_predictions(self, results_dir: str, file_prefix: str = "earnings", n_events: int = 3):
+        # ... (Method remains the same) ...
+        print("\n--- Plotting PEAD Predictions vs Actual (Polars) ---")
+        if self.pead_model is None: print("PEAD Model not trained."); return
+        if self.test_data is None: print("Test data not available."); return
+        pead_predictions_df = self.pead_model.predict(self.test_data);
+        if pead_predictions_df.is_empty(): print("No PEAD predictions generated."); return
+        available_event_ids = pead_predictions_df['event_id'].unique().to_list();
+        if not available_event_ids: print("No event IDs found in PEAD predictions."); return
+        sample_event_ids = available_event_ids[:min(n_events * 5, len(available_event_ids))]
+        plotted_count = 0
+        for event_id in sample_event_ids:
+            if plotted_count >= n_events: break
+            event_preds = pead_predictions_df.filter(pl.col('event_id') == event_id);
+            if event_preds.is_empty(): continue
+            event_actual_data = self.test_data.filter(pl.col('event_id') == event_id).sort('date');
+            if event_actual_data.is_empty(): continue
+            ticker = event_actual_data['ticker'][0]; announce_date = event_actual_data['Announcement Date'][0]; post_announce_actual = event_actual_data.filter(pl.col('date') >= announce_date)
+            if post_announce_actual.is_empty(): print(f"No post-announcement data for {event_id}"); continue
+            post_announce_actual = post_announce_actual.with_columns(((pl.col('ret').fill_null(0) + 1).cum_prod().over('event_id') - 1).alias('actual_cum_ret'))
+            pred_cols = sorted([col for col in event_preds.columns if col.startswith('pred_drift_h')], key=lambda x: int(x[len('pred_drift_h'):])); horizons = [int(col[len('pred_drift_h'):]) for col in pred_cols]
+            if event_preds.height == 0: continue
+            pred_values = event_preds.select(pred_cols).row(0); plot_dates_pd = [pd.Timestamp(announce_date) + pd.Timedelta(days=h) for h in horizons]; pred_values_pd = list(pred_values); post_announce_actual_pd = post_announce_actual.select(['date', 'actual_cum_ret']).to_pandas(); announce_date_pd = pd.Timestamp(announce_date)
+            fig, ax = plt.subplots(figsize=(12, 6)); ax.plot(post_announce_actual_pd['date'], post_announce_actual_pd['actual_cum_ret'], marker='.', linestyle='-', label='Actual Cum. Return', color='blue'); ax.scatter(plot_dates_pd, pred_values_pd, color='red', marker='x', s=50, label='Predicted Cum. Return (PEAD)', zorder=5); ax.set_title(f"PEAD Analysis: {ticker} ({event_id})"); ax.set_xlabel("Date"); ax.set_ylabel("Cumulative Return"); ax.axvline(announce_date_pd, color='grey', linestyle='--', label='Announcement Date'); ax.legend(); ax.grid(True, alpha=0.4); plt.tight_layout()
+            safe_event_id = "".join(c if c.isalnum() else "_" for c in event_id); plot_filename = os.path.join(results_dir, f"{file_prefix}_pead_pred_{safe_event_id}.png")
+            try: plt.savefig(plot_filename); print(f"Saved PEAD prediction plot to: {plot_filename}")
+            except Exception as e: print(f"Error saving PEAD plot: {e}")
+            plt.close(fig); plotted_count += 1
 
     def calculate_event_strategy_returns(self, holding_period: int = 20, entry_day: int = 0, return_col: str = 'ret') -> Optional[pl.DataFrame]:
-        """Simulates a buy-and-hold strategy for each event using Polars and calculates returns."""
-        if self.data is None or return_col not in self.data.columns or 'days_to_announcement' not in self.data.columns:
-            print("Error: Data/required columns missing for strategy simulation.")
-            return None
-
-        print(f"DEBUG: Calculating strategy returns. Entry day: {entry_day}, Hold: {holding_period}") # Debug
-        df_sorted = self.data.sort(['event_id', 'date'])
-
-        entry_points = df_sorted.filter(pl.col('days_to_announcement') == entry_day) \
-                                .select(['event_id', 'date']) \
-                                .rename({'date': 'entry_date'})
-
-        print(f"DEBUG: Found {entry_points.height} potential entry points.") # Debug
-        if entry_points.is_empty():
-             print(f"No entry points found for entry_day = {entry_day}")
-             return pl.DataFrame({'event_id': [], 'strategy_return': []}, schema={'event_id': pl.Utf8, 'strategy_return': pl.Float64})
-
-        df_with_entry = df_sorted.join(entry_points, on='event_id', how='left')
-
-        holding_data = df_with_entry.filter(
-             (pl.col('date') > pl.col('entry_date')) &
-             (pl.col('date') <= pl.col('entry_date') + pl.duration(days=holding_period)) &
-             (pl.col('entry_date').is_not_null()) # Ensure entry_date exists
-        )
-        print(f"DEBUG: Found {holding_data.height} rows within holding period date ranges.") # Debug
-
-        # Add intermediate step to check counts before filtering by holding_period
-        strategy_returns_agg_pre_filter = holding_data.group_by('event_id').agg(
-           (pl.col(return_col).fill_null(0) + 1).product().alias("prod_ret_factor"),
-           pl.len().alias("holding_days") # Count actual trading days in the window
-        )
-        print(f"DEBUG: Aggregated returns BEFORE holding period filter ({strategy_returns_agg_pre_filter.height} events):") # Debug
-        print(strategy_returns_agg_pre_filter.head()) # Debug
-
-        # Now filter based on the actual number of days found
-        strategy_returns_agg = strategy_returns_agg_pre_filter.filter(
-            pl.col('holding_days') >= holding_period
-        ).with_columns(
-             (pl.col('prod_ret_factor') - 1).alias('strategy_return')
-        ).select(['event_id', 'strategy_return'])
-
-        print(f"DEBUG: Aggregated returns AFTER holding period filter ({strategy_returns_agg.height} events).") # Debug
-        return strategy_returns_agg
+        # ... (Method remains the same with debug prints) ...
+        if self.data is None or return_col not in self.data.columns or 'days_to_announcement' not in self.data.columns: print("Error: Data/required columns missing for strategy simulation."); return None
+        print(f"DEBUG: Calculating strategy returns. Entry day: {entry_day}, Hold: {holding_period}"); df_sorted = self.data.sort(['event_id', 'date'])
+        entry_points = df_sorted.filter(pl.col('days_to_announcement') == entry_day).select(['event_id', 'date']).rename({'date': 'entry_date'}); print(f"DEBUG: Found {entry_points.height} potential entry points.")
+        if entry_points.is_empty(): print(f"No entry points found for entry_day = {entry_day}"); return pl.DataFrame({'event_id': [], 'strategy_return': []}, schema={'event_id': pl.Utf8, 'strategy_return': pl.Float64})
+        df_with_entry = df_sorted.join(entry_points, on='event_id', how='left'); holding_data = df_with_entry.filter((pl.col('date') > pl.col('entry_date')) & (pl.col('date') <= pl.col('entry_date') + pl.duration(days=holding_period)) & (pl.col('entry_date').is_not_null())); print(f"DEBUG: Found {holding_data.height} rows within holding period date ranges.")
+        strategy_returns_agg_pre_filter = holding_data.group_by('event_id').agg((pl.col(return_col).fill_null(0) + 1).product().alias("prod_ret_factor"), pl.len().alias("holding_days")); print(f"DEBUG: Aggregated returns BEFORE holding period filter ({strategy_returns_agg_pre_filter.height} events):"); print(strategy_returns_agg_pre_filter.head())
+        strategy_returns_agg = strategy_returns_agg_pre_filter.filter(pl.col('holding_days') >= holding_period).with_columns((pl.col('prod_ret_factor') - 1).alias('strategy_return')).select(['event_id', 'strategy_return']); print(f"DEBUG: Aggregated returns AFTER holding period filter ({strategy_returns_agg.height} events)."); return strategy_returns_agg
 
     def analyze_event_sharpe_ratio(self, results_dir: str, file_prefix: str = "earnings", holding_period: int = 20, entry_day: int = 0, risk_free_rate: float = 0.0):
-        """Calculates and analyzes the Sharpe Ratio of a simple event-based strategy using Polars."""
-        print(f"\n--- Analyzing Event Strategy Sharpe Ratio (Entry: T{entry_day}, Hold: {holding_period}d) ---")
-        strategy_returns_df = self.calculate_event_strategy_returns(holding_period=holding_period, entry_day=entry_day) # Calls function with debug prints
-
-        if strategy_returns_df is None or strategy_returns_df.is_empty() or strategy_returns_df.height < 2:
-            num_returns = strategy_returns_df.height if strategy_returns_df is not None else 0
-            # **Corrected Error Message**
-            print(f"Error: Insufficient valid returns ({num_returns}) after filtering for holding period {holding_period}. Cannot calculate Sharpe.")
-            return None
-
-        # ... (Rest of Sharpe analysis and plotting remains the same) ...
-        print(f"Calculated returns for {strategy_returns_df.height} events.")
-        stats = strategy_returns_df.select([pl.mean('strategy_return').alias('mean_ret'), pl.std('strategy_return').alias('std_ret')]).row(0); mean_ret = stats[0] if stats[0] is not None else np.nan; std_ret = stats[1] if stats[1] is not None else np.nan
+        # ... (Method remains the same with corrected error message) ...
+        print(f"\n--- Analyzing Event Strategy Sharpe Ratio (Entry: T{entry_day}, Hold: {holding_period}d) ---"); strategy_returns_df = self.calculate_event_strategy_returns(holding_period=holding_period, entry_day=entry_day)
+        if strategy_returns_df is None or strategy_returns_df.is_empty() or strategy_returns_df.height < 2: num_returns = strategy_returns_df.height if strategy_returns_df is not None else 0; print(f"Error: Insufficient valid returns ({num_returns}) after filtering for holding period {holding_period}. Cannot calculate Sharpe."); return None
+        print(f"Calculated returns for {strategy_returns_df.height} events."); stats = strategy_returns_df.select([pl.mean('strategy_return').alias('mean_ret'), pl.std('strategy_return').alias('std_ret')]).row(0); mean_ret = stats[0] if stats[0] is not None else np.nan; std_ret = stats[1] if stats[1] is not None else np.nan
         if np.isnan(std_ret) or std_ret == 0: print("Warning: Standard deviation of returns is zero or NaN. Sharpe ratio is undefined."); sharpe = np.nan
         else: period_rf = (1 + risk_free_rate)**(holding_period/252) - 1 if risk_free_rate != 0 else 0; sharpe = (mean_ret - period_rf) / (std_ret + 1e-9)
-        print(f"  Mean Return: {mean_ret:.4%}, Std Dev: {std_ret:.4%}, Period Sharpe: {sharpe:.4f}")
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_strategy_returns_h{holding_period}_e{entry_day}.csv")
+        print(f"  Mean Return: {mean_ret:.4%}, Std Dev: {std_ret:.4%}, Period Sharpe: {sharpe:.4f}"); csv_filename = os.path.join(results_dir, f"{file_prefix}_strategy_returns_h{holding_period}_e{entry_day}.csv")
         try: strategy_returns_df.write_csv(csv_filename); print(f"Saved strategy returns to: {csv_filename}")
         except Exception as e: print(f"Error saving returns data: {e}")
         try:
-            fig, ax = plt.subplots(figsize=(10, 6)); returns_pd = strategy_returns_df.get_column('strategy_return').to_pandas()
-            sns.histplot(returns_pd.dropna(), bins=30, kde=True, ax=ax); ax.axvline(mean_ret, color='red', linestyle='--', label=f'Mean ({mean_ret:.2%})'); ax.set_title(f'Distribution of {holding_period}-Day Strategy Returns (Entry T{entry_day}) - Earnings'); ax.set_xlabel(f'{holding_period}-Day Return'); ax.set_ylabel('Frequency'); ax.legend(); plt.tight_layout()
+            fig, ax = plt.subplots(figsize=(10, 6)); returns_pd = strategy_returns_df.get_column('strategy_return').to_pandas(); sns.histplot(returns_pd.dropna(), bins=30, kde=True, ax=ax); ax.axvline(mean_ret, color='red', linestyle='--', label=f'Mean ({mean_ret:.2%})'); ax.set_title(f'Distribution of {holding_period}-Day Strategy Returns (Entry T{entry_day}) - Earnings'); ax.set_xlabel(f'{holding_period}-Day Return'); ax.set_ylabel('Frequency'); ax.legend(); plt.tight_layout()
             plot_filename = os.path.join(results_dir, f"{file_prefix}_strategy_returns_hist_h{holding_period}_e{entry_day}.png")
             try: plt.savefig(plot_filename); print(f"Saved returns histogram to: {plot_filename}")
             except Exception as e: print(f"Error saving histogram: {e}")
             plt.close(fig)
-        except Exception as e: print(f"Error during plotting Sharpe ratio histogram: {e}")
+        except Exception as e: print(f"Error during plotting Sharpe ratio histogram: {e}"); plt.close('all')
         return {'mean_return': mean_ret, 'std_dev_return': std_ret, 'period_sharpe': sharpe, 'num_events': strategy_returns_df.height}
 
 
     def analyze_volatility_spikes(self, results_dir: str, file_prefix: str = "earnings", window: int = 5, min_periods: int = 3, pre_days: int = 30, post_days: int = 30, baseline_window=(-60, -11), event_window=(-2, 2)):
         """Calculates, plots, and saves rolling volatility and event vs baseline comparison using Polars."""
         print(f"\n--- Analyzing Rolling Volatility (Window={window} rows) using Polars ---")
-        if self.data is None or 'ret' not in self.data.columns or 'days_to_announcement' not in self.data.columns:
-            print("Error: Data/required columns missing."); return None
-
+        if self.data is None or 'ret' not in self.data.columns or 'days_to_announcement' not in self.data.columns: print("Error: Data/required columns missing."); return None
         df = self.data.sort(['event_id', 'date'])
-
-        df = df.with_columns(
-            pl.col('ret').rolling_std(window_size=window, min_periods=min_periods)
-              .over('event_id').alias('rolling_vol')
-        )
-        df = df.with_columns(
-            (pl.col('rolling_vol') * np.sqrt(252) * 100).alias('annualized_vol')
-        )
-
-        aligned_vol = df.group_by('days_to_announcement').agg(
-            pl.mean('annualized_vol').alias('avg_annualized_vol')
-        ).filter(
-            (pl.col('days_to_announcement') >= -pre_days) &
-            (pl.col('days_to_announcement') <= post_days)
-        ).sort('days_to_announcement').drop_nulls()
-
-        # --- Plotting & Saving Rolling Volatility ---
+        df = df.with_columns(pl.col('ret').rolling_std(window_size=window, min_periods=min_periods).over('event_id').alias('rolling_vol'))
+        df = df.with_columns((pl.col('rolling_vol') * np.sqrt(252) * 100).alias('annualized_vol'))
+        aligned_vol = df.group_by('days_to_announcement').agg(pl.mean('annualized_vol').alias('avg_annualized_vol')).filter((pl.col('days_to_announcement') >= -pre_days) & (pl.col('days_to_announcement') <= post_days)).sort('days_to_announcement').drop_nulls()
         if not aligned_vol.is_empty():
             aligned_vol_pd = aligned_vol.to_pandas().set_index('days_to_announcement')
             fig1, ax1 = plt.subplots(figsize=(12, 6)); aligned_vol_pd['avg_annualized_vol'].plot(kind='line', marker='.', linestyle='-', ax=ax1); ax1.axvline(0, color='red', linestyle='--', lw=1, label='Announcement Day'); ax1.set_title(f'Average Rolling Volatility Around Earnings Announcement (Window={window} rows)'); ax1.set_xlabel('Days Relative to Announcement'); ax1.set_ylabel('Avg. Annualized Volatility (%)'); ax1.legend(); ax1.grid(True, alpha=0.5); plt.tight_layout()
@@ -495,66 +697,32 @@ class Analysis:
             except Exception as e: print(f"Error saving data: {e}")
             plt.close(fig1)
         else: print("No data for rolling volatility plot.")
-
-        # --- Compare Event vs Baseline Volatility ---
         print("Calculating Event vs Baseline Volatility Ratios...")
-        # --- *** CORRECTED AGGREGATION (Using pl.sum(condition)) *** ---
+        # --- *** CORRECTED AGGREGATION *** ---
         vol_comp = df.group_by('event_id').agg([
-            # Baseline Volatility: Apply filter to 'ret' column *before* std()
-            pl.col('ret').filter(
-                (pl.col('days_to_announcement') >= baseline_window[0]) &
-                (pl.col('days_to_announcement') <= baseline_window[1])
-            ).std().alias('vol_baseline'),
-
-            # Baseline Count: Sum the boolean condition
-            pl.sum(
-                (pl.col('days_to_announcement') >= baseline_window[0]) &
-                (pl.col('days_to_announcement') <= baseline_window[1])
-            ).alias('n_baseline'), # Summing boolean counts True values
-
-            # Event Volatility: Apply filter to 'ret' column *before* std()
-            pl.col('ret').filter(
-                (pl.col('days_to_announcement') >= event_window[0]) &
-                (pl.col('days_to_announcement') <= event_window[1])
-            ).std().alias('vol_event'),
-
-             # Event Count: Sum the boolean condition
-            pl.sum(
-                (pl.col('days_to_announcement') >= event_window[0]) &
-                (pl.col('days_to_announcement') <= event_window[1])
-            ).alias('n_event'),
-        ]).filter( # Filter AFTER aggregation based on counts and valid vol
-             (pl.col('n_baseline') >= min_periods) &
-             (pl.col('n_event') >= min_periods) &
-             (pl.col('vol_baseline').is_not_null()) &
-             (pl.col('vol_baseline') > 1e-9) & # Avoid division by zero/tiny
-             (pl.col('vol_event').is_not_null())
+            pl.col('ret').filter((pl.col('days_to_announcement') >= baseline_window[0]) & (pl.col('days_to_announcement') <= baseline_window[1])).std().alias('vol_baseline'),
+            pl.sum((pl.col('days_to_announcement') >= baseline_window[0]) & (pl.col('days_to_announcement') <= baseline_window[1])).alias('n_baseline'), # Use sum(boolean)
+            pl.col('ret').filter((pl.col('days_to_announcement') >= event_window[0]) & (pl.col('days_to_announcement') <= event_window[1])).std().alias('vol_event'),
+            pl.sum((pl.col('days_to_announcement') >= event_window[0]) & (pl.col('days_to_announcement') <= event_window[1])).alias('n_event'), # Use sum(boolean)
+        ]).filter(
+             (pl.col('n_baseline') >= min_periods) & (pl.col('n_event') >= min_periods) & (pl.col('vol_baseline').is_not_null()) & (pl.col('vol_baseline') > 1e-9) & (pl.col('vol_event').is_not_null())
         )
         # --- *** END OF CORRECTION *** ---
-
-        # Calculate ratio
         if not vol_comp.is_empty():
-            vol_ratios_df = vol_comp.with_columns(
-                (pl.col('vol_event') / pl.col('vol_baseline')).alias('volatility_ratio')
-            )
+            vol_ratios_df = vol_comp.with_columns((pl.col('vol_event') / pl.col('vol_baseline')).alias('volatility_ratio'))
             avg_r = vol_ratios_df['volatility_ratio'].mean(); med_r = vol_ratios_df['volatility_ratio'].median(); num_valid_ratios = vol_ratios_df.height
             print(f"\nVolatility Spike (Event: {event_window}, Baseline: {baseline_window}): Avg Ratio={avg_r:.4f}, Median Ratio={med_r:.4f} ({num_valid_ratios} events)")
-            # Save ratio data
             csv_filename_ratio = os.path.join(results_dir, f"{file_prefix}_volatility_ratios.csv")
             try: vol_ratios_df.select(['event_id', 'volatility_ratio']).write_csv(csv_filename_ratio); print(f"Saved vol ratios data to: {csv_filename_ratio}")
             except Exception as e: print(f"Error saving vol ratios: {e}")
-            # Plot histogram
             try:
                  fig2, ax2 = plt.subplots(figsize=(8, 5)); ratios_pd = vol_ratios_df.get_column('volatility_ratio').to_pandas(); sns.histplot(ratios_pd.dropna(), bins=30, kde=True, ax=ax2); ax2.axvline(1, c='grey', ls='--', label='Ratio = 1'); ax2.axvline(avg_r, c='red', ls=':', label=f'Mean ({avg_r:.2f})'); ax2.set_title('Distribution of Volatility Ratios (Event / Baseline)'); ax2.set_xlabel('Volatility Ratio'); ax2.set_ylabel('Frequency'); ax2.legend(); plt.tight_layout()
                  plot_filename_hist = os.path.join(results_dir, f"{file_prefix}_volatility_ratio_hist.png")
                  try: plt.savefig(plot_filename_hist); print(f"Saved vol ratio hist plot: {plot_filename_hist}")
                  except Exception as e: print(f"Error saving hist: {e}")
                  plt.close(fig2)
-            except Exception as e: print(f"Error during plotting volatility ratio histogram: {e}"); plt.close('all') # Close any potentially open figs
-        else:
-            print("\nCould not calculate volatility ratios (insufficient valid data after filtering).")
-
+            except Exception as e: print(f"Error during plotting volatility ratio histogram: {e}"); plt.close('all')
+        else: print("\nCould not calculate volatility ratios (insufficient valid data after filtering).")
         return aligned_vol
-
 
 # --- END OF input_file_0.py (earnings_processor.py content) ---
