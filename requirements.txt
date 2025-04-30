@@ -1,6 +1,7 @@
 # Core data manipulation and analysis
 pandas==1.5.3
 numpy==1.24.3
+polars>=0.20.0,<0.21.0
 
 # Visualization
 matplotlib==3.7.1
@@ -12,3 +13,5 @@ xgboost==1.7.6
 
 # Data reading/processing
 pyarrow==12.0.0  # For Parquet file support
+
+# requirements.txt
