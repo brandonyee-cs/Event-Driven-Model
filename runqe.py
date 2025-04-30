@@ -55,7 +55,7 @@ STRATEGY_ENTRY_DAY = 0      # Day relative to event to enter (0=Announcement Day
 # Volatility Analysis Parameters
 VOL_ROLLING_WINDOW = 5     # Days for rolling Volatility calculation (row-based)
 VOL_BASELINE_WINDOW = (-60, -11) # Days relative to event for baseline vol calc
-VOL_EVENT_WINDOW = (-2, 2)       # Days relative to event for event vol calc
+VOL_EVENT_WINDOW = (-20, 20)       # Days relative to event for event vol calc
 
 # Sharpe Ratio Time Series Parameters
 SHARPE_TIME_GROUPING = 'quarter'  # 'year', 'quarter', or 'month'
