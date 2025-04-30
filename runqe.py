@@ -117,6 +117,14 @@ def run_analysis():
             baseline_window=VOL_BASELINE_WINDOW,
             event_window=VOL_EVENT_WINDOW
         )
+        # --- Run Sharpe Ratio Comparison Analysis ---
+        analyzer.plot_sharpe_ratio_comparison(
+            results_dir=RESULTS_DIR,
+            file_prefix=FILE_PREFIX,
+            entry_days=SHARPE_ENTRY_DAYS,
+            holding_periods=SHARPE_HOLDING_PERIODS,
+            # risk_free_rate=0.0  # Optional
+        )
 
         # --- Optional: Run ML Prediction Analysis ---
         if RUN_ML_ANALYSIS:
