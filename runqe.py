@@ -57,6 +57,10 @@ VOL_ROLLING_WINDOW = 5     # Days for rolling Volatility calculation (row-based)
 VOL_BASELINE_WINDOW = (-60, -11) # Days relative to event for baseline vol calc
 VOL_EVENT_WINDOW = (-2, 2)       # Days relative to event for event vol calc
 
+# Sharpe Ratio Comparison Parameters
+SHARPE_ENTRY_DAYS = [-1, 0, 1, 2]  # Days relative to announcement to enter
+SHARPE_HOLDING_PERIODS = [5, 10, 20, 30]  # Holding periods to compare
+
 # --- Optional ML Parameters ---
 # Set to True to run the ML prediction parts (slower)
 RUN_ML_ANALYSIS = False # Keep False initially for faster testing
