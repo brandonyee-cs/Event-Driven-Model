@@ -11,7 +11,7 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 try:
-    from fda_processor import DataLoader, FeatureEngineer, Analysis
+    from polars_pre_chunk.fda_processor import DataLoader, FeatureEngineer, Analysis
     print("Successfully imported FDA processor classes.")
 except ImportError as e:
     print(f"Error importing from fda_processor: {e}"); sys.exit(1)

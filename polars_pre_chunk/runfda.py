@@ -13,7 +13,7 @@ if current_dir not in sys.path:
 try:
     # Assuming models.py is also in the same directory or path
     # The processor files now use Polars
-    from fda_processor import DataLoader, FeatureEngineer, Analysis
+    from polars_pre_chunk.fda_processor import DataLoader, FeatureEngineer, Analysis
     print("Successfully imported FDA processor classes (Polars version).")
 except ImportError as e:
     print(f"Error importing from fda_processor: {e}")
