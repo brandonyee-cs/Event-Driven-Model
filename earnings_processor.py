@@ -2055,3 +2055,194 @@ class Analysis:
             print(f"Error saving Sharpe ratio data: {e}")
         
         return results_df
+    
+    def analyze_event_window_sharpe(self, results_dir: str, file_prefix: str = "earnings", 
+                               event_window: Tuple[int, int] = (-2, 2), 
+                               risk_free_rate: float = 0.0):
+        """
+        Calculates Sharpe ratio for a strategy that buys at the start of the event window
+        and sells at the end of the event window for each earnings announcement.
+        
+        Parameters:
+        results_dir (str): Directory to save results
+        file_prefix (str): Prefix for saved files
+        event_window (Tuple[int, int]): Days relative to announcement (start, end)
+        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
+        
+        Returns:
+        Dict: Dictionary containing Sharpe ratio and related statistics
+        """
+        print(f"\n--- Analyzing Event Window Sharpe Ratio (Window: {event_window}) ---")
+        if self.data is None or 'ret' not in self.data.columns:
+            print("Error: Data not loaded or missing return column.")
+            return None
+        
+        # Filter data to include only days within the event window
+        event_data = self.data.filter(
+            (pl.col('days_to_announcement') >= event_window[0]) & 
+            (pl.col('days_to_announcement') <= event_window[1])
+        )
+        
+        if event_data.is_empty():
+            print(f"Error: No data found within event window {event_window}.")
+            return None
+        
+        # Calculate cumulative return for each event
+        # First sort data by event_id and date
+        event_data = event_data.sort(['event_id', 'date'])
+        
+        # Group by event_id and calculate cumulative return for each event
+        event_returns = event_data.group_by('event_id').agg(
+            # Calculate cumulative product of (1 + return)
+            ((pl.col('ret').fill_null(0) + 1).product() - 1).alias('event_return'),
+            # Count days to ensure we have complete window
+            pl.count().alias('days_count'),
+            # Get announcement date
+            pl.first('Announcement Date').alias('announcement_date'),
+            # Get ticker
+            pl.first('ticker').alias('ticker')
+        )
+        
+        # Filter to include only events with complete data (all days in window)
+        window_size = event_window[1] - event_window[0] + 1
+        complete_events = event_returns.filter(pl.col('days_count') == window_size)
+        
+        if complete_events.is_empty() or complete_events.height < 10:
+            print(f"Warning: Insufficient events with complete {window_size}-day window data.")
+            if not complete_events.is_empty():
+                print(f"Found only {complete_events.height} complete events.")
+            return None
+        
+        # Calculate statistics
+        stats = complete_events.select([
+            pl.mean('event_return').alias('mean_return'),
+            pl.std('event_return').alias('std_dev'),
+            pl.count().alias('event_count')
+        ]).row(0)
+        
+        mean_return = stats[0] if stats[0] is not None else np.nan
+        std_dev = stats[1] if stats[1] is not None else np.nan
+        event_count = stats[2]
+        
+        # Calculate annualized figures
+        trading_days_per_year = 252
+        ann_factor = trading_days_per_year / window_size
+        
+        ann_return = (1 + mean_return) ** ann_factor - 1
+        ann_vol = std_dev * np.sqrt(ann_factor)
+        
+        # Calculate Sharpe ratio
+        sharpe_ratio = np.nan
+        if not np.isnan(ann_vol) and ann_vol > 0:
+            sharpe_ratio = (ann_return - risk_free_rate) / ann_vol
+        
+        # Print results
+        print("\nEvent Window Strategy Results:")
+        print(f"  Window: {event_window[0]} to {event_window[1]} days relative to announcement")
+        print(f"  Number of events: {event_count}")
+        print(f"  Average return per event: {mean_return:.4%}")
+        print(f"  Standard deviation: {std_dev:.4%}")
+        print(f"  Annualized return: {ann_return:.4%}")
+        print(f"  Annualized volatility: {ann_vol:.4%}")
+        print(f"  Annualized Sharpe ratio: {sharpe_ratio:.4f}")
+        
+        # Also calculate by year
+        complete_events = complete_events.with_columns(
+            pl.col('announcement_date').dt.year().alias('year')
+        )
+        
+        yearly_stats = complete_events.group_by('year').agg([
+            pl.mean('event_return').alias('mean_return'),
+            pl.std('event_return').alias('std_dev'),
+            pl.count().alias('event_count')
+        ]).sort('year')
+        
+        # Calculate yearly Sharpe ratios
+        yearly_stats = yearly_stats.with_columns([
+            ((1 + pl.col('mean_return')) ** ann_factor - 1).alias('ann_return'),
+            (pl.col('std_dev') * np.sqrt(ann_factor)).alias('ann_vol')
+        ]).with_columns(
+            ((pl.col('ann_return') - risk_free_rate) / pl.col('ann_vol')).alias('sharpe_ratio')
+        )
+        
+        # Create plots
+        try:
+            # Distribution of returns
+            fig, ax = plt.subplots(figsize=(10, 6))
+            returns_pd = complete_events['event_return'].to_pandas()
+            sns.histplot(returns_pd.dropna(), bins=30, kde=True, ax=ax)
+            ax.axvline(mean_return, color='red', linestyle='--', label=f'Mean ({mean_return:.2%})')
+            ax.set_title(f'Distribution of {window_size}-Day Event Window Returns')
+            ax.set_xlabel('Return')
+            ax.set_ylabel('Frequency')
+            ax.legend()
+            
+            plt.tight_layout()
+            hist_filename = os.path.join(results_dir, f"{file_prefix}_event_window_return_dist.png")
+            plt.savefig(hist_filename)
+            print(f"Saved return distribution plot to: {hist_filename}")
+            plt.close(fig)
+            
+            # Yearly Sharpe ratios
+            yearly_stats_pd = yearly_stats.to_pandas()
+            
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
+            
+            # Sharpe ratio by year
+            bars = ax1.bar(yearly_stats_pd['year'].astype(str), yearly_stats_pd['sharpe_ratio'], color=yearly_stats_pd['sharpe_ratio'].map(lambda x: 'green' if x >= 0 else 'red'))
+            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            ax1.axhline(y=sharpe_ratio, color='blue', linestyle='--', alpha=0.7, label=f'Overall: {sharpe_ratio:.2f}')
+            ax1.set_title(f'Annualized Sharpe Ratio by Year (Event Window: {event_window[0]} to {event_window[1]})')
+            ax1.set_ylabel('Sharpe Ratio')
+            ax1.legend()
+            
+            # Add value labels
+            for bar in bars:
+                height = bar.get_height()
+                if not np.isnan(height):
+                    ax1.annotate(f'{height:.2f}',
+                                xy=(bar.get_x() + bar.get_width() / 2, height),
+                                xytext=(0, 3 if height >= 0 else -10),
+                                textcoords="offset points",
+                                ha='center', va='bottom' if height >= 0 else 'top')
+            
+            # Event count by year
+            ax2.bar(yearly_stats_pd['year'].astype(str), yearly_stats_pd['event_count'], color='lightblue')
+            ax2.set_title('Number of Events per Year')
+            ax2.set_ylabel('Count')
+            
+            plt.tight_layout()
+            year_filename = os.path.join(results_dir, f"{file_prefix}_event_window_sharpe_by_year.png")
+            plt.savefig(year_filename)
+            print(f"Saved yearly Sharpe ratio plot to: {year_filename}")
+            plt.close(fig)
+            
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+            traceback.print_exc()
+        
+        # Save results to CSV
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_event_window_yearly_stats.csv")
+        try:
+            yearly_stats.write_csv(csv_filename)
+            print(f"Saved yearly statistics to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving yearly stats: {e}")
+        
+        # Also save individual event returns
+        events_csv = os.path.join(results_dir, f"{file_prefix}_event_window_returns.csv")
+        try:
+            complete_events.write_csv(events_csv)
+            print(f"Saved individual event returns to: {events_csv}")
+        except Exception as e:
+            print(f"Error saving event returns: {e}")
+        
+        return {
+            'window': event_window,
+            'mean_return': mean_return,
+            'std_dev': std_dev,
+            'ann_return': ann_return,
+            'ann_vol': ann_vol,
+            'sharpe_ratio': sharpe_ratio,
+            'event_count': event_count
+        }
