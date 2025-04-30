@@ -26,26 +26,36 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
 class DataLoader:
+    # Keep __init__ and _load_single_stock_parquet as they were in the previous correction
+    # _load_single_stock_parquet is used within the chunked load_data now.
     def __init__(self, earnings_path: str, stock_paths: List[str], window_days: int = 30):
-        # ... (init remains the same) ...
+        """
+        Initialize DataLoader for Earnings events using Polars.
+
+        Parameters:
+        earnings_path (str): Path to the event data CSV. Must contain ticker and announcement date.
+        stock_paths (list): List of paths to stock price/return data PARQUET files.
+        window_days (int): Number of days before/after event date.
+        """
         self.earnings_path = earnings_path
         if isinstance(stock_paths, str): self.stock_paths = [stock_paths]
         elif isinstance(stock_paths, list): self.stock_paths = stock_paths
         else: raise TypeError("stock_paths must be a string or a list of Parquet file paths.")
         self.window_days = window_days
+        # Add chunk size parameter for event processing
+        self.event_chunk_size = 5000 # Adjust based on memory capacity
 
     def _load_single_stock_parquet(self, stock_path: str) -> Optional[pl.DataFrame]:
-        # ... (This method remains the same as the previous corrected version) ...
-        # ... (It handles stock data, not the event file) ...
+        """Load and process a single stock data PARQUET file using Polars."""
+        # --- THIS METHOD IS UNCHANGED FROM THE PREVIOUS CORRECTION ---
+        # --- It handles standardizing columns and types for one stock file ---
         try:
-            print(f"  Reading Parquet file: {stock_path}")
+            # print(f"  Reading Parquet file: {stock_path}") # Reduce verbosity inside chunk loop
             stock_data = pl.read_parquet(stock_path)
-            print(f"  Read {len(stock_data)} rows from {stock_path}")
+            # print(f"  Read {len(stock_data)} rows from {stock_path}") # Reduce verbosity
 
-            # --- Column Name Standardization (Case-Insensitive) ---
             original_columns = stock_data.columns
             col_map_lower = {col.lower(): col for col in original_columns}
-
             standard_names = {
                 'date': ['date', 'trade_date', 'trading_date', 'tradedate', 'dt'],
                 'ticker': ['ticker', 'symbol', 'sym_root', 'tic', 'permno'],
@@ -59,7 +69,7 @@ class DataLoader:
             }
             rename_dict = {}
             found_std_names = {}
-            selected_cols = [] # Keep track of standardized columns found
+            selected_cols = []
 
             for std_name, variations in standard_names.items():
                 found = False
@@ -69,7 +79,7 @@ class DataLoader:
                         if original_case_col != std_name:
                             rename_dict[original_case_col] = std_name
                         found_std_names[std_name] = True
-                        selected_cols.append(original_case_col) # Add original name to selection
+                        selected_cols.append(original_case_col)
                         found = True
                         break
                 if not found:
@@ -79,53 +89,49 @@ class DataLoader:
             if rename_dict:
                 stock_data = stock_data.rename(rename_dict)
 
-            # --- Data Type and Existence Checks ---
-            required_cols = ['date', 'ticker', 'prc', 'ret', 'vol'] # Earnings often uses vol
+            required_cols = ['date', 'ticker', 'prc', 'ret', 'vol']
             missing_cols = [col for col in required_cols if col not in stock_data.columns]
             if missing_cols:
-                 essential_pr = ['prc', 'ret'] # Price and return are absolutely essential
+                 essential_pr = ['prc', 'ret']
                  if any(col in missing_cols for col in essential_pr):
                       raise ValueError(f"Missing essential columns after standardization in {stock_path}: {[c for c in essential_pr if c in missing_cols]}")
-                 else: # Warn if only optional cols like 'vol' are missing
+                 else:
                       print(f"  Warning: Missing optional columns in {stock_path}: {missing_cols}. Some features might be skipped.")
 
-            # Ensure date column is datetime
             if stock_data["date"].dtype != pl.Datetime:
-                 print(f"  Warning: 'date' column in {stock_path} is {stock_data['date'].dtype}. Attempting conversion to Datetime.")
+                 # print(f"  Warning: 'date' column in {stock_path} is {stock_data['date'].dtype}. Attempting conversion to Datetime.")
                  stock_data = stock_data.with_columns(
-                     pl.col("date").str.to_datetime(strict=False).alias("date") # CORRECTED
+                     pl.col("date").str.to_datetime(strict=False).alias("date")
                  )
             n_null_dates = stock_data.filter(pl.col("date").is_null()).height
             if n_null_dates > 0:
-                print(f"  Warning: Found {n_null_dates} null dates in {stock_path}. Dropping these rows.")
+                # print(f"  Warning: Found {n_null_dates} null dates in {stock_path}. Dropping these rows.")
                 stock_data = stock_data.drop_nulls(subset=["date"])
 
-            # Ensure ticker is string
             if stock_data["ticker"].dtype != pl.Utf8:
                 stock_data = stock_data.with_columns(pl.col("ticker").cast(pl.Utf8))
 
-            # Ensure numeric columns are numeric (Float64), handle inf
             numeric_cols_to_check = ['prc', 'ret', 'vol', 'openprc', 'askhi', 'bidlo', 'shrout']
             cast_expressions = []
             for col in numeric_cols_to_check:
                 if col in stock_data.columns:
                     if stock_data[col].dtype not in [pl.Float32, pl.Float64]:
-                         print(f"  Warning: Column '{col}' in {stock_path} is {stock_data[col].dtype}. Attempting conversion to Float64.")
+                         # print(f"  Warning: Column '{col}' in {stock_path} is {stock_data[col].dtype}. Attempting conversion to Float64.")
+                         pass # Warning commented out for less verbosity
                     cast_expressions.append(
                         pl.when(pl.col(col).cast(pl.Float64, strict=False).is_infinite())
-                        .then(None) # Replace inf with null
+                        .then(None)
                         .otherwise(pl.col(col).cast(pl.Float64, strict=False))
                         .alias(col)
                     )
             if cast_expressions:
                  stock_data = stock_data.with_columns(cast_expressions)
 
-            # Select necessary columns based on standardized names found
             final_cols = list(standard_names.keys())
             cols_present = [col for col in final_cols if col in stock_data.columns]
             stock_data = stock_data.select(cols_present)
 
-            print(f"  Successfully processed {stock_path}. Final shape: {stock_data.shape}")
+            # print(f"  Successfully processed {stock_path}. Final shape: {stock_data.shape}") # Reduce verbosity
             return stock_data
 
         except FileNotFoundError:
@@ -133,118 +139,222 @@ class DataLoader:
             return None
         except Exception as e:
             print(f"Error processing Parquet stock file {stock_path}: {e}")
-            traceback.print_exc() # Print traceback for debugging
+            # traceback.print_exc() # Optionally uncomment for detailed debugging
             return None
+
 
     def load_data(self) -> Optional[pl.DataFrame]:
         """
-        Load earnings event dates (CSV) and stock data (PARQUET) using Polars, then merge them.
+        Load earnings event dates (CSV) and stock data (PARQUET) using Polars,
+        processing events in chunks to manage memory.
         Explicitly uses 'ANNDATS' as the announcement date column.
         """
-        # --- Load Earnings Event Dates (CSV) ---
+        # --- Load ALL Unique Earnings Event Dates First ---
         try:
             print(f"Loading earnings event dates from: {self.earnings_path} (CSV)")
-            # Peek at header to find columns
             event_df_peek = pl.read_csv_batched(self.earnings_path, batch_size=1).next_batches(1)[0]
-
-            # --- Find Ticker Column ---
             ticker_col = next((c for c in ['TICKER', 'ticker', 'Ticker', 'symbol', 'tic'] if c in event_df_peek.columns), None)
             if not ticker_col: raise ValueError("Missing Ticker column in event file.")
-
-            # --- Explicitly Use ANNDATS ---
             date_col = 'ANNDATS'
-            if date_col not in event_df_peek.columns:
-                raise ValueError(f"Required announcement date column '{date_col}' not found in event file.")
+            if date_col not in event_df_peek.columns: raise ValueError(f"Required announcement date column '{date_col}' not found.")
 
             print(f"Using columns '{ticker_col}' (as ticker) and '{date_col}' (as Announcement Date) from event file.")
-
-            # Load only necessary columns
             event_data_raw = pl.read_csv(self.earnings_path, columns=[ticker_col, date_col])
-
-            # --- Rename and Process ---
-            # Rename ANNDATS to the internal standard 'Announcement Date'
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Announcement Date'})
-
             event_data_processed = event_data_renamed.with_columns([
-                # Apply corrected datetime conversion to the renamed 'Announcement Date' column
-                pl.col('Announcement Date').str.to_datetime(strict=False), # Corrected, removed errors=
+                pl.col('Announcement Date').str.to_datetime(strict=False),
                 pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
-            ])
+            ]).drop_nulls(subset=['Announcement Date'])
 
-            initial_count = event_data_processed.height
-            event_data_filtered = event_data_processed.drop_nulls(subset=['Announcement Date'])
-            dropped_count = initial_count - event_data_filtered.height
-            if dropped_count > 0: print(f"  Warning: Dropped {dropped_count} rows with invalid dates.")
-
-            # Keep only unique ticker-date pairs
-            earnings_events = event_data_filtered.unique(subset=['ticker', 'Announcement Date'], keep='first')
-            print(f"Found {len(earnings_events)} unique earnings events (Ticker-Date pairs).")
+            earnings_events = event_data_processed.unique(subset=['ticker', 'Announcement Date'], keep='first')
+            n_total_events = earnings_events.height
+            print(f"Found {n_total_events} unique earnings events (Ticker-Date pairs).")
             if earnings_events.is_empty(): raise ValueError("No valid earnings events found.")
 
         except FileNotFoundError: raise FileNotFoundError(f"Earnings event file not found: {self.earnings_path}")
-        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}") # Keep wrapped error message
+        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}")
 
-        # --- Load Stock Data (Parquet) ---
-        stock_data_list, failed_files = [], []
-        print("\nLoading stock data from Parquet files...")
-        for stock_path in self.stock_paths:
-            processed_data = self._load_single_stock_parquet(stock_path)
-            if processed_data is not None:
-                stock_data_list.append(processed_data.with_columns(pl.col('ticker').str.to_uppercase()))
-            else:
-                failed_files.append(stock_path)
+        # --- Process Events in Chunks ---
+        processed_chunks = []
+        num_chunks = (n_total_events + self.event_chunk_size - 1) // self.event_chunk_size
+        print(f"Processing events in {num_chunks} chunk(s) of size {self.event_chunk_size}...")
 
-        if not stock_data_list: raise ValueError("No stock Parquet data loaded successfully.")
-        if failed_files: print(f"\nWarning: Skipped {len(failed_files)} stock file(s): {failed_files}\n")
+        # Pre-scan Parquet files once to get schema (optional, but good practice)
+        # stock_schema = pl.scan_parquet(self.stock_paths[0]).schema if self.stock_paths else None
 
-        # --- Combine and Merge ---
-        print("Combining loaded stock data...")
-        stock_data_combined = pl.concat(stock_data_list, how='vertical')
-        print(f"Combined stock data rows before deduplication: {len(stock_data_combined)}")
-        stock_data_combined = stock_data_combined.unique(subset=['date', 'ticker'], keep='first', maintain_order=False)
-        print(f"Combined stock data rows after deduplication: {len(stock_data_combined)}")
-        if stock_data_combined.is_empty(): raise ValueError("Stock data empty after deduplication.")
+        for i in range(num_chunks):
+            start_idx = i * self.event_chunk_size
+            end_idx = min((i + 1) * self.event_chunk_size, n_total_events)
+            event_chunk = earnings_events.slice(start_idx, end_idx - start_idx)
+            print(f"  Processing event chunk {i+1}/{num_chunks} ({event_chunk.height} events)...")
 
-        print("\nMerging event dates with stock data...")
-        tickers_with_earnings = earnings_events.get_column('ticker').unique()
-        stock_data_filtered = stock_data_combined.filter(pl.col('ticker').is_in(tickers_with_earnings))
-        print(f"Filtered stock data for {tickers_with_earnings.len()} tickers. Rows: {len(stock_data_filtered)}")
-        if stock_data_filtered.is_empty(): raise ValueError("No stock data for relevant tickers.")
+            # Determine required tickers and date range for this chunk
+            chunk_tickers = event_chunk['ticker'].unique()
+            min_ann_date = event_chunk['Announcement Date'].min()
+            max_ann_date = event_chunk['Announcement Date'].max()
+            # Calculate buffer for window_days safely
+            buffer = pl.duration(days=self.window_days)
+            required_min_date = min_ann_date - buffer
+            required_max_date = max_ann_date + buffer
+            print(f"    Tickers: {chunk_tickers.len()}, Date Range: {required_min_date} to {required_max_date}")
 
-        merged_data = stock_data_filtered.join(
-            earnings_events, on='ticker', how='inner'
-        )
+            # --- Load Relevant Stock Data for this Chunk (Filtered Scan) ---
+            stock_scans = []
+            failed_stock_loads = 0
+            for stock_path in self.stock_paths:
+                try:
+                    # Scan, Standardize, Filter (Lazy)
+                    scan = pl.scan_parquet(stock_path)
+                    original_columns = list(scan.schema.keys()) # Get schema keys
+                    col_map_lower = {col.lower(): col for col in original_columns}
+                    standard_names = { # Keep this consistent with _load_single_stock_parquet
+                        'date': ['date', 'trade_date', 'trading_date', 'tradedate', 'dt'],
+                        'ticker': ['ticker', 'symbol', 'sym_root', 'tic', 'permno'],
+                        'prc': ['prc', 'price', 'close', 'adj close', 'adj_prc'],
+                        'ret': ['ret', 'return', 'daily_ret'],
+                        'vol': ['vol', 'volume'],
+                        'openprc': ['openprc', 'open'], 'askhi': ['askhi', 'high', 'askhigh'],
+                        'bidlo': ['bidlo', 'low', 'bidlow'], 'shrout': ['shrout', 'shares_outstanding']
+                    }
+                    rename_dict = {}
+                    selected_orig_cols = []
+                    final_std_cols = []
 
-        # Calculate relative days and filter window
-        event_window_data = merged_data.with_columns(
-            (pl.col('date') - pl.col('Announcement Date')).dt.total_days().cast(pl.Int32).alias('days_to_announcement')
-        ).filter(
-            (pl.col('days_to_announcement') >= -self.window_days) &
-            (pl.col('days_to_announcement') <= self.window_days)
-        )
+                    for std_name, variations in standard_names.items():
+                        for var in variations:
+                            if var in col_map_lower:
+                                original_case_col = col_map_lower[var]
+                                if original_case_col != std_name:
+                                    rename_dict[original_case_col] = std_name
+                                selected_orig_cols.append(original_case_col)
+                                final_std_cols.append(std_name) # Standard name expected after rename
+                                break
 
-        if event_window_data.is_empty(): raise ValueError("No stock data found within event windows.")
+                    # Select original columns, then apply filters and renames
+                    scan = scan.select(selected_orig_cols)
+                    if rename_dict:
+                         scan = scan.rename(rename_dict)
 
-        # Add event identifier and announcement flag
-        event_window_data = event_window_data.with_columns([
-            (pl.col('days_to_announcement') == 0).cast(pl.Int8).alias('is_announcement_date'),
-            (pl.col("ticker") + "_" + pl.col("Announcement Date").dt.strftime('%Y%m%d')).alias('event_id')
-        ])
+                    # Ensure types before filtering (lazily)
+                    scan = scan.with_columns([
+                        pl.col("date").str.to_datetime(strict=False),
+                        pl.col("ticker").cast(pl.Utf8).str.to_uppercase()
+                    ])
 
-        # Select necessary columns
-        final_cols = stock_data_filtered.columns + ['Announcement Date', 'days_to_announcement', 'is_announcement_date', 'event_id']
-        final_cols = sorted(list(set(final_cols)))
-        final_cols = [c for c in final_cols if c in event_window_data.columns]
-        event_window_data = event_window_data.select(final_cols)
+                    # <<< --- CRUCIAL FILTERING STEP --- >>>
+                    filtered_scan = scan.filter(
+                        pl.col('ticker').is_in(chunk_tickers) &
+                        pl.col('date').is_between(required_min_date, required_max_date, closed='both')
+                    )
+                    stock_scans.append(filtered_scan)
+                except Exception as e:
+                    print(f"    Warning: Failed to scan/prepare stock file {stock_path}: {e}")
+                    failed_stock_loads += 1
 
-        print(f"Created windows for {event_window_data['event_id'].n_unique()} unique earnings events.")
-        combined_data = event_window_data.sort(['ticker', 'Announcement Date', 'date'])
+            if not stock_scans:
+                print(f"    Warning: No stock data could be scanned for chunk {i+1}. Skipping chunk.")
+                continue
+            if failed_stock_loads > 0:
+                 print(f"    Warning: Failed to scan/prepare {failed_stock_loads} stock file(s) for this chunk.")
 
+            # Concatenate the filtered scans (still lazy)
+            combined_stock_scan = pl.concat(stock_scans, how='common') # Use 'common' to handle schema variations if any
+
+            # Collect the required stock data for this chunk (Execute the query)
+            print(f"    Collecting filtered stock data for chunk {i+1}...")
+            try:
+                # Use streaming=True for potentially large collects
+                stock_data_chunk = combined_stock_scan.collect(streaming=True)
+            except Exception as e:
+                 print(f"    Error collecting stock data for chunk {i+1}: {e}. Skipping chunk.")
+                 continue
+
+            print(f"    Collected {stock_data_chunk.height} stock rows.")
+
+            # Standardize types for collected data (important after collect)
+            # Apply similar type conversions as in _load_single_stock_parquet
+            stock_data_chunk = stock_data_chunk.with_columns([
+                 pl.col("date").str.to_datetime(strict=False), # Ensure datetime
+                 pl.col("ticker").cast(pl.Utf8).str.to_uppercase() # Ensure uppercase string
+                 ]
+            )
+            numeric_cols_to_check = ['prc', 'ret', 'vol', 'openprc', 'askhi', 'bidlo', 'shrout']
+            cast_expressions = []
+            for col in numeric_cols_to_check:
+                if col in stock_data_chunk.columns:
+                    cast_expressions.append(
+                        pl.when(pl.col(col).cast(pl.Float64, strict=False).is_infinite())
+                        .then(None).otherwise(pl.col(col).cast(pl.Float64, strict=False))
+                        .alias(col)
+                    )
+            if cast_expressions:
+                stock_data_chunk = stock_data_chunk.with_columns(cast_expressions)
+
+            # Deduplicate collected stock data for the chunk
+            stock_data_chunk = stock_data_chunk.unique(subset=['date', 'ticker'], keep='first', maintain_order=False)
+            print(f"    Deduplicated stock rows: {stock_data_chunk.height}")
+            if stock_data_chunk.is_empty():
+                 print(f"    Warning: No stock data remained after deduplication for chunk {i+1}. Skipping chunk.")
+                 continue
+
+            # --- Merge event chunk with stock data chunk ---
+            print(f"    Merging events with stock data for chunk {i+1}...")
+            merged_chunk = stock_data_chunk.join(
+                event_chunk, on='ticker', how='inner'
+            )
+            print(f"    Merged chunk rows: {merged_chunk.height}")
+
+            # --- Calculate relative days and filter window FOR THE CHUNK ---
+            processed_chunk = merged_chunk.with_columns(
+                (pl.col('date') - pl.col('Announcement Date')).dt.total_days().cast(pl.Int32).alias('days_to_announcement')
+            ).filter(
+                (pl.col('days_to_announcement') >= -self.window_days) &
+                (pl.col('days_to_announcement') <= self.window_days)
+            )
+
+            if processed_chunk.is_empty():
+                print(f"    Warning: No data found within event window for chunk {i+1}.")
+                continue
+
+            # Add event identifier
+            processed_chunk = processed_chunk.with_columns([
+                (pl.col('days_to_announcement') == 0).cast(pl.Int8).alias('is_announcement_date'),
+                (pl.col("ticker") + "_" + pl.col("Announcement Date").dt.strftime('%Y%m%d')).alias('event_id')
+            ])
+
+            # Select necessary columns (ensure consistency)
+            # Get cols from stock_data_chunk + event_chunk + derived cols
+            stock_cols = stock_data_chunk.columns
+            event_cols = event_chunk.columns # ['ticker', 'Announcement Date']
+            derived_cols = ['days_to_announcement', 'is_announcement_date', 'event_id']
+            # Combine, ensuring 'ticker'/'Announcement Date' aren't duplicated
+            final_cols = list(set(stock_cols) | set(event_cols) | set(derived_cols))
+            final_cols = [c for c in final_cols if c in processed_chunk.columns] # Ensure they exist
+            processed_chunk = processed_chunk.select(final_cols)
+
+            print(f"    Processed chunk {i+1} shape: {processed_chunk.shape}")
+            processed_chunks.append(processed_chunk)
+            # Optional: Clean up memory explicitly
+            del stock_data_chunk, merged_chunk, event_chunk
+            import gc
+            gc.collect()
+
+
+        # --- Final Concatenation ---
+        if not processed_chunks:
+            print("Error: No data chunks were processed successfully.")
+            return None
+
+        print("\nConcatenating processed chunks...")
+        combined_data = pl.concat(processed_chunks, how='vertical').sort(['ticker', 'Announcement Date', 'date'])
         print(f"Final Earnings dataset shape: {combined_data.shape}")
         mem_usage_mb = combined_data.estimated_size("mb")
         print(f"Final DataFrame memory usage: {mem_usage_mb:.2f} MB")
-        return combined_data
 
+        if combined_data.is_empty():
+             print("Warning: Final combined data is empty after chunk processing.")
+
+        return combined_data
 
 class FeatureEngineer:
     def __init__(self, prediction_window: int = 3):
