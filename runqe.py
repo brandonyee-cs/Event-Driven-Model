@@ -134,6 +134,24 @@ def run_analysis():
             # risk_free_rate=0.0  # Optional
         )
 
+        # --- Calculate Average Sharpe Ratio ---
+        avg_sharpe_results = analyzer.calculate_average_sharpe(
+            return_col='ret',
+            event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
+            annualize=True,
+            # risk_free_rate=0.0  # Optional
+        )
+
+        if avg_sharpe_results and 'sharpe_ratio' in avg_sharpe_results:
+            # Save results to CSV
+            sharpe_results_df = pl.DataFrame([avg_sharpe_results])
+            csv_filename = os.path.join(RESULTS_DIR, f"{FILE_PREFIX}_average_sharpe.csv")
+            try:
+                sharpe_results_df.write_csv(csv_filename)
+                print(f"Saved average Sharpe ratio results to: {csv_filename}")
+            except Exception as e:
+                print(f"Error saving Sharpe ratio results: {e}")
+
         # --- Optional: Run ML Prediction Analysis ---
         if RUN_ML_ANALYSIS:
             print("\n--- Running Optional ML Analysis (Polars) ---")

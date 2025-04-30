@@ -2246,3 +2246,97 @@ class Analysis:
             'sharpe_ratio': sharpe_ratio,
             'event_count': event_count
         }
+    
+    def calculate_average_sharpe(self, return_col: str = 'ret', event_window: Tuple[int, int] = (-2, 2), 
+                           annualize: bool = True, risk_free_rate: float = 0.0) -> Dict[str, Any]:
+        """
+        Calculates the average Sharpe ratio across all earnings events.
+        
+        Parameters:
+        return_col (str): Column name containing returns
+        event_window (Tuple[int, int]): Days relative to announcement (start, end) to include
+        annualize (bool): Whether to annualize the Sharpe ratio
+        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
+        
+        Returns:
+        Dict: Dictionary containing Sharpe ratio and related statistics
+        """
+        print(f"\n--- Calculating Average Sharpe Ratio (Window: {event_window}) ---")
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or missing return column.")
+            return {'sharpe_ratio': np.nan, 'error': 'Data not available'}
+        
+        # Filter data to include only days within the event window
+        event_data = self.data.filter(
+            (pl.col('days_to_announcement') >= event_window[0]) & 
+            (pl.col('days_to_announcement') <= event_window[1])
+        )
+        
+        if event_data.is_empty():
+            print(f"Error: No data found within event window {event_window}.")
+            return {'sharpe_ratio': np.nan, 'error': 'No data in window'}
+        
+        # Calculate statistics directly on filtered returns
+        stats = event_data.select([
+            pl.mean(return_col).alias('mean_daily_return'),
+            pl.std(return_col).alias('std_daily_return'),
+            pl.count().alias('total_observations')
+        ]).row(0)
+        
+        mean_daily_return = stats[0] if stats[0] is not None else np.nan
+        std_daily_return = stats[1] if stats[1] is not None else np.nan
+        total_observations = stats[2]
+        
+        # Calculate Sharpe ratio
+        if np.isnan(mean_daily_return) or np.isnan(std_daily_return) or std_daily_return == 0:
+            print("Warning: Cannot calculate Sharpe ratio (insufficient data or zero volatility).")
+            return {
+                'mean_return': mean_daily_return,
+                'std_dev': std_daily_return,
+                'observations': total_observations,
+                'sharpe_ratio': np.nan,
+                'error': 'Calculation failed'
+            }
+        
+        # Calculate daily equivalent of risk-free rate if needed
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
+        
+        # Calculate daily Sharpe ratio
+        daily_sharpe = (mean_daily_return - daily_rf) / std_daily_return
+        
+        # Annualize if requested
+        if annualize:
+            # Standard annualization formula: daily sharpe * sqrt(252)
+            sharpe_ratio = daily_sharpe * np.sqrt(252)
+            ann_return = (1 + mean_daily_return) ** 252 - 1
+            ann_vol = std_daily_return * np.sqrt(252)
+        else:
+            sharpe_ratio = daily_sharpe
+            ann_return = mean_daily_return
+            ann_vol = std_daily_return
+        
+        # Collect event count information
+        unique_events = event_data['event_id'].unique().height
+        
+        # Print results
+        period_desc = "Annualized" if annualize else "Daily"
+        print(f"\nAverage {period_desc} Sharpe Ratio Results:")
+        print(f"  Window: {event_window[0]} to {event_window[1]} days relative to announcement")
+        print(f"  Unique events: {unique_events}")
+        print(f"  Total observations: {total_observations}")
+        print(f"  Mean return: {mean_daily_return:.6f} (daily)")
+        print(f"  Standard deviation: {std_daily_return:.6f} (daily)")
+        print(f"  {period_desc} return: {ann_return:.4%}")
+        print(f"  {period_desc} volatility: {ann_vol:.4%}")
+        print(f"  {period_desc} Sharpe ratio: {sharpe_ratio:.4f}")
+        
+        return {
+            'window': event_window,
+            'mean_daily_return': mean_daily_return,
+            'std_daily_return': std_daily_return,
+            'annualized_return': ann_return,
+            'annualized_volatility': ann_vol,
+            'sharpe_ratio': sharpe_ratio,
+            'unique_events': unique_events,
+            'total_observations': total_observations
+        }
