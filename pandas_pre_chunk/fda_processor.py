@@ -12,11 +12,11 @@ import os # Added import
 # Import shared models
 # Ensure src directory is discoverable or adjust path
 try:
-    from models import TimeSeriesRidge, XGBoostDecileModel
+    from pandas_pre_chunk.models import TimeSeriesRidge, XGBoostDecileModel
 except ImportError:
     # Fallback if src isn't directly importable (e.g., running script directly)
     try:
-        from models import TimeSeriesRidge, XGBoostDecileModel
+        from pandas_pre_chunk.models import TimeSeriesRidge, XGBoostDecileModel
     except ImportError:
         print("Error: Could not import models from 'src.models' or 'models'.")
         print("Ensure models.py is accessible.")

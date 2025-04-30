@@ -13,7 +13,7 @@ import os # Added import
 # Import shared models
 # Ensure models.py is accessible
 try:
-    from models import TimeSeriesRidge, XGBoostDecileModel
+    from pandas_pre_chunk.models import TimeSeriesRidge, XGBoostDecileModel
 except ImportError:
     print("Error: Could not import models from 'models'.")
     print("Ensure models.py is in the same directory or Python path.")
