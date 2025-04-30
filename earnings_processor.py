@@ -138,6 +138,7 @@ class DataLoader:
         processing events in chunks to manage memory. Includes debugging prints.
         """
         # --- Load ALL Unique Earnings Event Dates First ---
+                # --- Load ALL Unique Earnings Event Dates First ---
         try:
             print(f"Loading earnings event dates from: {self.earnings_path} (CSV)")
             # ... (finding ticker_col and date_col='ANNDATS' remains the same) ...
@@ -148,16 +149,34 @@ class DataLoader:
             if date_col not in event_df_peek.columns: raise ValueError(f"Required announcement date column '{date_col}' not found.")
 
             print(f"Using columns '{ticker_col}' (as ticker) and '{date_col}' (as Announcement Date) from event file.")
-            event_data_raw = pl.read_csv(self.earnings_path, columns=[ticker_col, date_col], try_parse_dates=True) # Try Polars parsing
+            # Load, letting Polars try to parse dates
+            event_data_raw = pl.read_csv(self.earnings_path, columns=[ticker_col, date_col], try_parse_dates=True)
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Announcement Date'})
 
-            # Try converting Announcement Date (handle potential non-standard formats)
-            event_data_processed = event_data_renamed.with_columns([
-                pl.col('Announcement Date').str.to_datetime(strict=False), # Use default formats
-                # Add more specific formats if needed: .str.to_datetime(format="%Y%m%d", strict=False) etc.
-                pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
-            ]).drop_nulls(subset=['Announcement Date'])
+            # --- CORRECTED Date Handling ---
+            # Check the dtype of 'Announcement Date' AFTER reading
+            if event_data_renamed['Announcement Date'].dtype == pl.Object or isinstance(event_data_renamed['Announcement Date'].dtype, pl.String):
+                # If it's still Object or String, try explicit parsing
+                print("    'Announcement Date' read as Object/String, attempting str.to_datetime...")
+                event_data_processed = event_data_renamed.with_columns([
+                     pl.col('Announcement Date').str.to_datetime(strict=False).cast(pl.Datetime), # Explicit parse and cast
+                     pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
+                 ])
+            elif isinstance(event_data_renamed['Announcement Date'].dtype, (pl.Date, pl.Datetime)):
+                 # If already Date/Datetime, just ensure ticker is correct type
+                 print("    'Announcement Date' already parsed as Date/Datetime.")
+                 event_data_processed = event_data_renamed.with_columns([
+                     pl.col('Announcement Date').cast(pl.Datetime), # Ensure it's Datetime specifically if needed
+                     pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
+                 ])
+            else:
+                # Handle other unexpected types
+                 raise TypeError(f"Unexpected dtype for 'Announcement Date': {event_data_renamed['Announcement Date'].dtype}")
 
+            # --- End CORRECTED Date Handling ---
+
+            # Continue with dropping nulls and unique
+            event_data_processed = event_data_processed.drop_nulls(subset=['Announcement Date'])
             earnings_events = event_data_processed.unique(subset=['ticker', 'Announcement Date'], keep='first')
             n_total_events = earnings_events.height
 
@@ -170,7 +189,7 @@ class DataLoader:
             if earnings_events.is_empty(): raise ValueError("No valid earnings events found.")
 
         except FileNotFoundError: raise FileNotFoundError(f"Earnings event file not found: {self.earnings_path}")
-        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}")
+        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}") # Keep wrapped error message
 
         # --- Process Events in Chunks ---
         processed_chunks = []
