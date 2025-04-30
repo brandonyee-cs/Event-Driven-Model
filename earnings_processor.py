@@ -27,14 +27,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 class DataLoader:
     def __init__(self, earnings_path: str, stock_paths: List[str], window_days: int = 30):
-        """
-        Initialize DataLoader for Earnings events using Polars.
-
-        Parameters:
-        earnings_path (str): Path to the event data CSV. Must contain ticker and announcement date.
-        stock_paths (list): List of paths to stock price/return data PARQUET files.
-        window_days (int): Number of days before/after event date.
-        """
+        # ... (init remains the same) ...
         self.earnings_path = earnings_path
         if isinstance(stock_paths, str): self.stock_paths = [stock_paths]
         elif isinstance(stock_paths, list): self.stock_paths = stock_paths
@@ -42,10 +35,10 @@ class DataLoader:
         self.window_days = window_days
 
     def _load_single_stock_parquet(self, stock_path: str) -> Optional[pl.DataFrame]:
-        """Load and process a single stock data PARQUET file using Polars."""
+        # ... (This method remains the same as the previous corrected version) ...
+        # ... (It handles stock data, not the event file) ...
         try:
             print(f"  Reading Parquet file: {stock_path}")
-            # Use low_memory for potentially large files, adjust as needed
             stock_data = pl.read_parquet(stock_path)
             print(f"  Read {len(stock_data)} rows from {stock_path}")
 
@@ -82,11 +75,8 @@ class DataLoader:
                 if not found:
                     found_std_names[std_name] = False
 
-            # Select only the columns identified (using original names)
             stock_data = stock_data.select(selected_cols)
-            # Apply renaming
             if rename_dict:
-                # print(f"  Renaming columns: {rename_dict}")
                 stock_data = stock_data.rename(rename_dict)
 
             # --- Data Type and Existence Checks ---
@@ -99,14 +89,12 @@ class DataLoader:
                  else: # Warn if only optional cols like 'vol' are missing
                       print(f"  Warning: Missing optional columns in {stock_path}: {missing_cols}. Some features might be skipped.")
 
-            # Ensure date column is datetime (Polars handles various formats)
-            # Attempt conversion, coercing errors to Null
+            # Ensure date column is datetime
             if stock_data["date"].dtype != pl.Datetime:
                  print(f"  Warning: 'date' column in {stock_path} is {stock_data['date'].dtype}. Attempting conversion to Datetime.")
                  stock_data = stock_data.with_columns(
-                     pl.col("date").str.to_datetime(strict=False, errors="null").alias("date") # Use null on error
+                     pl.col("date").str.to_datetime(strict=False).alias("date") # CORRECTED
                  )
-            # Drop rows with null dates after conversion
             n_null_dates = stock_data.filter(pl.col("date").is_null()).height
             if n_null_dates > 0:
                 print(f"  Warning: Found {n_null_dates} null dates in {stock_path}. Dropping these rows.")
@@ -122,27 +110,15 @@ class DataLoader:
             for col in numeric_cols_to_check:
                 if col in stock_data.columns:
                     if stock_data[col].dtype not in [pl.Float32, pl.Float64]:
-                        print(f"  Warning: Column '{col}' in {stock_path} is not Float. Attempting conversion.")
-                    # Cast to Float64 and handle potential errors by setting to null
-                    # Then handle infinities
+                         print(f"  Warning: Column '{col}' in {stock_path} is {stock_data[col].dtype}. Attempting conversion to Float64.")
                     cast_expressions.append(
                         pl.when(pl.col(col).cast(pl.Float64, strict=False).is_infinite())
                         .then(None) # Replace inf with null
                         .otherwise(pl.col(col).cast(pl.Float64, strict=False))
                         .alias(col)
                     )
-
             if cast_expressions:
                  stock_data = stock_data.with_columns(cast_expressions)
-                 # Check for NaNs introduced by casting errors (strict=False sets errors to null)
-                 for col in numeric_cols_to_check:
-                     if col in stock_data.columns:
-                        n_nulls = stock_data.filter(pl.col(col).is_null()).height
-                        # Check if null count increased significantly (heuristic)
-                        # This is harder to track precisely without comparing before/after counts
-                        # if n_nulls > initial_null_counts.get(col, 0):
-                        #    print(f"  Warning: Coercion/Inf replacement might have introduced NaNs in column '{col}'.")
-
 
             # Select necessary columns based on standardized names found
             final_cols = list(standard_names.keys())
@@ -155,7 +131,6 @@ class DataLoader:
         except FileNotFoundError:
             print(f"Error: Stock Parquet file not found: {stock_path}")
             return None
-        # Polars might raise ComputeError, ArrowError, etc. Catch base Exception for now.
         except Exception as e:
             print(f"Error processing Parquet stock file {stock_path}: {e}")
             traceback.print_exc() # Print traceback for debugging
@@ -164,26 +139,35 @@ class DataLoader:
     def load_data(self) -> Optional[pl.DataFrame]:
         """
         Load earnings event dates (CSV) and stock data (PARQUET) using Polars, then merge them.
-        Focuses only on Ticker and Date from the event file.
+        Explicitly uses 'ANNDATS' as the announcement date column.
         """
         # --- Load Earnings Event Dates (CSV) ---
         try:
             print(f"Loading earnings event dates from: {self.earnings_path} (CSV)")
             # Peek at header to find columns
             event_df_peek = pl.read_csv_batched(self.earnings_path, batch_size=1).next_batches(1)[0]
+
+            # --- Find Ticker Column ---
             ticker_col = next((c for c in ['TICKER', 'ticker', 'Ticker', 'symbol', 'tic'] if c in event_df_peek.columns), None)
             if not ticker_col: raise ValueError("Missing Ticker column in event file.")
-            date_col = next((c for c in ['ANNDATS', 'Announcement Date', 'date', 'report_date', 'rdq'] if c in event_df_peek.columns), None)
-            if not date_col: raise ValueError("Missing Announcement Date column in event file.")
-            print(f"Using columns '{ticker_col}' and '{date_col}' from event file.")
+
+            # --- Explicitly Use ANNDATS ---
+            date_col = 'ANNDATS'
+            if date_col not in event_df_peek.columns:
+                raise ValueError(f"Required announcement date column '{date_col}' not found in event file.")
+
+            print(f"Using columns '{ticker_col}' (as ticker) and '{date_col}' (as Announcement Date) from event file.")
 
             # Load only necessary columns
             event_data_raw = pl.read_csv(self.earnings_path, columns=[ticker_col, date_col])
 
-            # Rename and process
+            # --- Rename and Process ---
+            # Rename ANNDATS to the internal standard 'Announcement Date'
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Announcement Date'})
+
             event_data_processed = event_data_renamed.with_columns([
-                pl.col('ANNDAT').str.to_datetime(strict=False),
+                # Apply corrected datetime conversion to the renamed 'Announcement Date' column
+                pl.col('Announcement Date').str.to_datetime(strict=False), # Corrected, removed errors=
                 pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
             ])
 
@@ -198,7 +182,7 @@ class DataLoader:
             if earnings_events.is_empty(): raise ValueError("No valid earnings events found.")
 
         except FileNotFoundError: raise FileNotFoundError(f"Earnings event file not found: {self.earnings_path}")
-        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}")
+        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}") # Keep wrapped error message
 
         # --- Load Stock Data (Parquet) ---
         stock_data_list, failed_files = [], []
@@ -215,24 +199,18 @@ class DataLoader:
 
         # --- Combine and Merge ---
         print("Combining loaded stock data...")
-        # Concatenate list of DataFrames
         stock_data_combined = pl.concat(stock_data_list, how='vertical')
         print(f"Combined stock data rows before deduplication: {len(stock_data_combined)}")
-
-        # Ensure types before unique check (already done in _load_single_stock_parquet)
-        # Deduplicate based on date and ticker
         stock_data_combined = stock_data_combined.unique(subset=['date', 'ticker'], keep='first', maintain_order=False)
         print(f"Combined stock data rows after deduplication: {len(stock_data_combined)}")
         if stock_data_combined.is_empty(): raise ValueError("Stock data empty after deduplication.")
 
         print("\nMerging event dates with stock data...")
-        # Filter stock data for tickers present in earnings events (more efficient before join)
         tickers_with_earnings = earnings_events.get_column('ticker').unique()
         stock_data_filtered = stock_data_combined.filter(pl.col('ticker').is_in(tickers_with_earnings))
         print(f"Filtered stock data for {tickers_with_earnings.len()} tickers. Rows: {len(stock_data_filtered)}")
         if stock_data_filtered.is_empty(): raise ValueError("No stock data for relevant tickers.")
 
-        # Join earnings events with filtered stock data
         merged_data = stock_data_filtered.join(
             earnings_events, on='ticker', how='inner'
         )
@@ -253,15 +231,11 @@ class DataLoader:
             (pl.col("ticker") + "_" + pl.col("Announcement Date").dt.strftime('%Y%m%d')).alias('event_id')
         ])
 
-        # Select necessary columns (all from stock_data_filtered + derived cols)
+        # Select necessary columns
         final_cols = stock_data_filtered.columns + ['Announcement Date', 'days_to_announcement', 'is_announcement_date', 'event_id']
-        # Remove potential duplicates if 'ticker'/'date' were somehow in earnings_events cols passed
         final_cols = sorted(list(set(final_cols)))
-        # Ensure all expected columns exist in the dataframe before selecting
         final_cols = [c for c in final_cols if c in event_window_data.columns]
-
         event_window_data = event_window_data.select(final_cols)
-
 
         print(f"Created windows for {event_window_data['event_id'].n_unique()} unique earnings events.")
         combined_data = event_window_data.sort(['ticker', 'Announcement Date', 'date'])
