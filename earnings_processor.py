@@ -24,30 +24,20 @@ except ImportError:
 warnings.filterwarnings('ignore', message='X does not have valid feature names, but SimpleImputer was fitted with feature names')
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-
 class DataLoader:
-    # Keep __init__ and _load_single_stock_parquet as they were in the previous correction
-    # _load_single_stock_parquet is used within the chunked load_data now.
+    # ... (__init__ and _load_single_stock_parquet remain the same) ...
     def __init__(self, earnings_path: str, stock_paths: List[str], window_days: int = 30):
-        """
-        Initialize DataLoader for Earnings events using Polars.
-
-        Parameters:
-        earnings_path (str): Path to the event data CSV. Must contain ticker and announcement date.
-        stock_paths (list): List of paths to stock price/return data PARQUET files.
-        window_days (int): Number of days before/after event date.
-        """
         self.earnings_path = earnings_path
         if isinstance(stock_paths, str): self.stock_paths = [stock_paths]
         elif isinstance(stock_paths, list): self.stock_paths = stock_paths
         else: raise TypeError("stock_paths must be a string or a list of Parquet file paths.")
         self.window_days = window_days
-        # Add chunk size parameter for event processing
         self.event_chunk_size = 5000 # Adjust based on memory capacity
 
     def _load_single_stock_parquet(self, stock_path: str) -> Optional[pl.DataFrame]:
-        # --- THIS METHOD IS UNCHANGED ---
-        # (Same as previous corrected version)
+        # --- THIS METHOD IS UNCHANGED FROM THE PREVIOUS CORRECTION ---
+        # (Handles eager loading standardization - not used directly in the loop anymore)
+        # ... (code from previous version) ...
         try:
             # print(f"  Reading Parquet file: {stock_path}") # Reduce verbosity inside chunk loop
             stock_data = pl.read_parquet(stock_path)
@@ -131,14 +121,12 @@ class DataLoader:
         except FileNotFoundError: return None
         except Exception: return None
 
-
     def load_data(self) -> Optional[pl.DataFrame]:
         """
         Load earnings event dates (CSV) and stock data (PARQUET) using Polars,
         processing events in chunks to manage memory. Includes debugging prints.
         """
         # --- Load ALL Unique Earnings Event Dates First ---
-                # --- Load ALL Unique Earnings Event Dates First ---
         try:
             print(f"Loading earnings event dates from: {self.earnings_path} (CSV)")
             # ... (finding ticker_col and date_col='ANNDATS' remains the same) ...
@@ -149,47 +137,38 @@ class DataLoader:
             if date_col not in event_df_peek.columns: raise ValueError(f"Required announcement date column '{date_col}' not found.")
 
             print(f"Using columns '{ticker_col}' (as ticker) and '{date_col}' (as Announcement Date) from event file.")
-            # Load, letting Polars try to parse dates
             event_data_raw = pl.read_csv(self.earnings_path, columns=[ticker_col, date_col], try_parse_dates=True)
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Announcement Date'})
 
-            # --- CORRECTED Date Handling ---
-            # Check the dtype of 'Announcement Date' AFTER reading
+            # --- Check/Correct Date Type ---
             if event_data_renamed['Announcement Date'].dtype == pl.Object or isinstance(event_data_renamed['Announcement Date'].dtype, pl.String):
-                # If it's still Object or String, try explicit parsing
                 print("    'Announcement Date' read as Object/String, attempting str.to_datetime...")
                 event_data_processed = event_data_renamed.with_columns([
-                     pl.col('Announcement Date').str.to_datetime(strict=False).cast(pl.Datetime), # Explicit parse and cast
+                     pl.col('Announcement Date').str.to_datetime(strict=False).cast(pl.Datetime),
                      pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
                  ])
             elif isinstance(event_data_renamed['Announcement Date'].dtype, (pl.Date, pl.Datetime)):
-                 # If already Date/Datetime, just ensure ticker is correct type
                  print("    'Announcement Date' already parsed as Date/Datetime.")
                  event_data_processed = event_data_renamed.with_columns([
-                     pl.col('Announcement Date').cast(pl.Datetime), # Ensure it's Datetime specifically if needed
+                     pl.col('Announcement Date').cast(pl.Datetime),
                      pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
                  ])
             else:
-                # Handle other unexpected types
                  raise TypeError(f"Unexpected dtype for 'Announcement Date': {event_data_renamed['Announcement Date'].dtype}")
+            # --- End Corrected Date Handling ---
 
-            # --- End CORRECTED Date Handling ---
-
-            # Continue with dropping nulls and unique
             event_data_processed = event_data_processed.drop_nulls(subset=['Announcement Date'])
             earnings_events = event_data_processed.unique(subset=['ticker', 'Announcement Date'], keep='first')
             n_total_events = earnings_events.height
 
-            # *** DEBUG: Print sample event data ***
             print("\n--- Sample Parsed Earnings Events ---")
             print(earnings_events.head(5))
             print("-" * 35 + "\n")
-
             print(f"Found {n_total_events} unique earnings events (Ticker-Date pairs).")
             if earnings_events.is_empty(): raise ValueError("No valid earnings events found.")
 
         except FileNotFoundError: raise FileNotFoundError(f"Earnings event file not found: {self.earnings_path}")
-        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}") # Keep wrapped error message
+        except Exception as e: raise ValueError(f"Error processing earnings event file {self.earnings_path}: {e}")
 
         # --- Process Events in Chunks ---
         processed_chunks = []
@@ -197,31 +176,30 @@ class DataLoader:
         print(f"Processing events in {num_chunks} chunk(s) of size {self.event_chunk_size}...")
 
         for i in range(num_chunks):
+            # ... (Chunk slicing and requirement calculation remains the same) ...
             start_idx = i * self.event_chunk_size
             end_idx = min((i + 1) * self.event_chunk_size, n_total_events)
             event_chunk = earnings_events.slice(start_idx, end_idx - start_idx)
             print(f"--- Processing event chunk {i+1}/{num_chunks} ({event_chunk.height} events) ---")
 
-            # Determine required tickers and date range for this chunk
             chunk_tickers = event_chunk['ticker'].unique()
             min_ann_date = event_chunk['Announcement Date'].min()
             max_ann_date = event_chunk['Announcement Date'].max()
-            buffer = pl.duration(days=self.window_days + 1) # Add buffer for safety
+            buffer = pl.duration(days=self.window_days + 1)
             required_min_date = min_ann_date - buffer
             required_max_date = max_ann_date + buffer
-
-            # *** DEBUG: Print chunk info ***
             print(f"    Chunk Tickers: {chunk_tickers.len()} (Sample: {chunk_tickers[:5].to_list()})")
-            print(f"    Chunk Ann Date Range: {min_ann_date} to {max_ann_date}")
             print(f"    Required Stock Date Range: {required_min_date} to {required_max_date}")
+
 
             stock_scans = []
             failed_stock_loads = 0
-            # --- Scan/Filter Stock Data (Lazy) ---
             print("    Scanning and filtering stock Parquet files (lazily)...")
             for stock_path in self.stock_paths:
                 try:
                     scan = pl.scan_parquet(stock_path)
+                    # --- Standardization ---
+                    # (Select original columns based on standard names)
                     original_columns = list(scan.schema.keys())
                     col_map_lower = {col.lower(): col for col in original_columns}
                     standard_names = { # Keep consistent
@@ -243,14 +221,34 @@ class DataLoader:
                                     rename_dict[original_case_col] = std_name
                                 selected_orig_cols.append(original_case_col)
                                 break
+                    if not selected_orig_cols: continue # Skip file if no relevant columns found
 
                     scan = scan.select(selected_orig_cols)
                     if rename_dict: scan = scan.rename(rename_dict)
 
-                    scan = scan.with_columns([
-                        pl.col("date").str.to_datetime(strict=False).cast(pl.Datetime), # Ensure correct type
-                        pl.col("ticker").cast(pl.Utf8).str.to_uppercase()
-                    ])
+                    # --- CORRECTED LAZY TYPE CONVERSION ---
+                    # Check dtype of 'date' before applying str.to_datetime lazily
+                    date_dtype = scan.schema.get('date')
+                    if date_dtype is None:
+                         print(f"    Warning: 'date' column missing in {stock_path} schema after selection/rename. Skipping.")
+                         continue
+
+                    scan_expressions = []
+                    if date_dtype == pl.Object or isinstance(date_dtype, pl.String):
+                        scan_expressions.append(pl.col("date").str.to_datetime(strict=False).cast(pl.Datetime))
+                    else: # Assume it's already Date/Datetime or compatible
+                        scan_expressions.append(pl.col("date").cast(pl.Datetime))
+
+                    # Handle ticker type
+                    if 'ticker' in scan.schema:
+                         scan_expressions.append(pl.col("ticker").cast(pl.Utf8).str.to_uppercase())
+                    else:
+                        print(f"    Warning: 'ticker' column missing in {stock_path} schema after selection/rename. Skipping.")
+                        continue # Cannot filter without ticker
+
+                    scan = scan.with_columns(scan_expressions)
+                    # --- End CORRECTED LAZY TYPE CONVERSION ---
+
 
                     # <<< --- Filtering Step --- >>>
                     filtered_scan = scan.filter(
@@ -269,40 +267,35 @@ class DataLoader:
             # Concatenate scans
             combined_stock_scan = pl.concat(stock_scans, how='vertical_relaxed')
 
-            # *** DEBUG: Estimate filtered size before collecting ***
-            try:
-                # schema = combined_stock_scan.schema # Fetch schema first
-                # estimated_rows = combined_stock_scan.select(pl.count()).collect().item() # Estimate count
-                # print(f"    Estimated stock rows to collect: {estimated_rows}")
-                # Note: Estimating rows can sometimes be slow or inaccurate depending on source
-                pass
-            except Exception as est_e:
-                 print(f"    Warning: Could not estimate rows before collect: {est_e}")
-
             # --- Collect Actual Stock Data ---
             print(f"    Collecting filtered stock data for chunk {i+1}...")
             try:
                 stock_data_chunk = combined_stock_scan.collect(streaming=True)
             except Exception as e:
+                 # Use traceback here since it's now imported
                  print(f"    ERROR collecting stock data for chunk {i+1}: {e}. Skipping chunk.")
-                 traceback.print_exc() # Print full traceback for collection errors
+                 traceback.print_exc()
                  continue
 
             print(f"    Collected {stock_data_chunk.height} stock rows.")
-            # *** DEBUG: Print sample collected stock data ***
-            if not stock_data_chunk.is_empty():
-                 print("    Sample collected stock data:")
-                 print(stock_data_chunk.head(3))
-                 # Check date range collected
-                 min_coll_date = stock_data_chunk['date'].min()
-                 max_coll_date = stock_data_chunk['date'].max()
-                 print(f"    Collected Stock Date Range: {min_coll_date} to {max_coll_date}")
-            else:
+            if stock_data_chunk.is_empty():
                  print("    Collected stock data is empty. Skipping rest of chunk processing.")
                  continue # Skip to next chunk if no stock data found
 
-            # --- Standardize Types and Deduplicate ---
-            # (Moved type standardization earlier, just deduplicate now)
+            # --- Standardize Types (Post-Collect) and Deduplicate ---
+            # (Ensure types again after collect, especially numerics)
+            cast_expressions_collect = []
+            numeric_cols_to_check = ['prc', 'ret', 'vol', 'openprc', 'askhi', 'bidlo', 'shrout']
+            for col in numeric_cols_to_check:
+                 if col in stock_data_chunk.columns:
+                      cast_expressions_collect.append(
+                           pl.when(pl.col(col).cast(pl.Float64, strict=False).is_infinite())
+                           .then(None).otherwise(pl.col(col).cast(pl.Float64, strict=False))
+                           .alias(col)
+                      )
+            if cast_expressions_collect:
+                stock_data_chunk = stock_data_chunk.with_columns(cast_expressions_collect)
+
             stock_data_chunk = stock_data_chunk.unique(subset=['date', 'ticker'], keep='first', maintain_order=False)
             print(f"    Deduplicated stock rows: {stock_data_chunk.height}")
             if stock_data_chunk.is_empty():
@@ -311,21 +304,12 @@ class DataLoader:
 
             # --- Merge event chunk with stock data chunk ---
             print(f"    Merging events with stock data...")
-            # Ensure join columns are same type
-            event_chunk = event_chunk.with_columns(pl.col('ticker').cast(pl.Utf8))
-            stock_data_chunk = stock_data_chunk.with_columns(pl.col('ticker').cast(pl.Utf8))
             merged_chunk = stock_data_chunk.join(
                 event_chunk, on='ticker', how='inner'
             )
             print(f"    Merged chunk rows: {merged_chunk.height}")
             if merged_chunk.is_empty():
                 print(f"    Warning: Merge resulted in empty data for chunk {i+1}. Check ticker matching.")
-                # *** DEBUG: Check if tickers existed in stock_data_chunk ***
-                # stock_tickers_in_chunk = stock_data_chunk['ticker'].unique()
-                # event_tickers_in_chunk = event_chunk['ticker'].unique()
-                # common_tickers = stock_tickers_in_chunk.filter(pl.col('ticker').is_in(event_tickers_in_chunk))
-                # print(f"    Common tickers found: {common_tickers.len()}")
-                # print(f"    Sample stock tickers in collected data: {stock_tickers_in_chunk[:5].to_list()}")
                 continue # Skip chunk
 
 
@@ -360,14 +344,13 @@ class DataLoader:
             processed_chunks.append(processed_chunk)
             print(f"--- Finished processing chunk {i+1} ---")
 
-            # Optional: Clean up memory explicitly
             del stock_data_chunk, merged_chunk, event_chunk, processed_chunk, combined_stock_scan, stock_scans
             gc.collect()
 
 
         # --- Final Concatenation ---
         if not processed_chunks:
-            print("Error: No data chunks were processed successfully.") # This error will now be raised below
+            print("Error: No data chunks were processed successfully.")
             return None # Return None if no chunks succeeded
 
         print("\nConcatenating processed chunks...")
@@ -378,7 +361,6 @@ class DataLoader:
 
         if combined_data.is_empty():
              print("Warning: Final combined data is empty after chunk processing.")
-             # This condition should ideally be caught by the 'if not processed_chunks' earlier
              return None
 
         return combined_data
