@@ -32,7 +32,7 @@ warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-class DataLoader:
+class FDADataLoader:
     def __init__(self, fda_path, stock_paths, window_days=100):
         """
         Initialize DataLoader for FDA events.
@@ -247,7 +247,7 @@ class DataLoader:
         print(f"Final DataFrame memory usage: {mem_usage / 1024**2:.2f} MB")
         return combined_data
 
-class FeatureEngineer:
+class FDAFeatureEngineer:
     def __init__(self, prediction_window=5):
         self.windows = [5, 10, 20]
         self.prediction_window = prediction_window
@@ -376,7 +376,7 @@ class FeatureEngineer:
         return X, y
 
 
-class Analysis:
+class FDAAnalysis:
     def __init__(self, data_loader, feature_engineer):
         """Analysis class for FDA data."""
         self.data_loader = data_loader

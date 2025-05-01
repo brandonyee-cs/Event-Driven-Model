@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore', message='X does not have valid feature names, 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-class DataLoader:
+class QEDataLoader:
     def __init__(self, earnings_path: str, stock_paths: List[str], window_days: int = 30):
         """
         Initialize DataLoader for Earnings events using Polars.
@@ -403,7 +403,7 @@ class DataLoader:
 
 
 # --- FeatureEngineer Class ---
-class FeatureEngineer:
+class QEFeatureEngineer:
     def __init__(self, prediction_window: int = 3):
         self.windows = [5, 10, 20]
         self.prediction_window = prediction_window
@@ -1173,7 +1173,7 @@ class EarningsDriftModel:
                 traceback.print_exc()
         return results
 
-class Analysis:
+class QEAnalysis:
     def __init__(self, data_loader: 'DataLoader', feature_engineer: 'FeatureEngineer'):
         """Analysis class for Earnings data using Polars."""
         self.data_loader = data_loader

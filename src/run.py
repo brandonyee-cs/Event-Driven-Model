@@ -9,9 +9,9 @@ import polars as pl
 # --- Configuration ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path: sys.path.append(current_dir)
-try: from fda_processor import DataLoader, FeatureEngineer, Analysis; print("Successfully imported FDA processor classes.")
+try: from fda_processor import FDADataLoader, FDAFeatureEngineer, FDAAnalysis; print("Successfully imported FDA processor classes.")
 except ImportError as e: print(f"Error importing from fda_processor: {e}"); sys.exit(1)
-try: from earnings_processor import DataLoader, FeatureEngineer, Analysis; print("Successfully imported Earnings processor classes (Polars version).")
+try: from earnings_processor import QEDataLoader, QEFeatureEngineer, QEAnalysis; print("Successfully imported Earnings processor classes (Polars version).")
 except ImportError as e: print(f"Error importing from earnings_processor: {e}"); print("Ensure 'earnings_processor.py', 'models.py' are in the same directory or Python path."); print("Ensure Polars is installed: pip install polars pyarrow"); sys.exit(1)
 
 # --- File Paths and Parameters ---
@@ -75,9 +75,9 @@ def fda_run_analysis():
     try:
         # --- Initialize Components ---
         print("\nInitializing components...")
-        data_loader = DataLoader(fda_path=FDA_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS)
-        feature_engineer = FeatureEngineer(prediction_window=5)
-        analyzer = Analysis(data_loader, feature_engineer)
+        data_loader = FDADataLoader(fda_path=FDA_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS)
+        feature_engineer = FDAFeatureEngineer(prediction_window=5)
+        analyzer = FDAAnalysis(data_loader, feature_engineer)
         print("Components initialized.")
 
         # --- Load Data ---
@@ -143,9 +143,9 @@ def qe_run_analysis():
         # --- Initialize Components ---
         print("\nInitializing components (Polars)...")
         feature_engineer_window = ML_PREDICTION_WINDOW if RUN_ML_ANALYSIS else 3
-        data_loader = DataLoader(earnings_path=EARNINGS_EVENT_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS)
-        feature_engineer = FeatureEngineer(prediction_window=feature_engineer_window)
-        analyzer = Analysis(data_loader, feature_engineer)
+        data_loader = QEDataLoader(earnings_path=EARNINGS_EVENT_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS)
+        feature_engineer = QEFeatureEngineer(prediction_window=feature_engineer_window)
+        analyzer = QEAnalysis(data_loader, feature_engineer)
         print("Components initialized.")
 
         # --- Load Data ---
