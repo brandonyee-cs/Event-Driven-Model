@@ -681,3 +681,406 @@ class Analysis:
             print("\nCould not calculate volatility ratios (insufficient data).")
 
         return aligned_vol
+
+    def calculate_rolling_sharpe_timeseries(self, results_dir: str, file_prefix: str = "fda",
+                                  return_col: str = 'ret', 
+                                  analysis_window: tuple = (-60, 60),
+                                  sharpe_window: int = 5,
+                                  annualize: bool = True, 
+                                  risk_free_rate: float = 0.0):
+        """
+        Calculates a time series of rolling Sharpe ratios around FDA approvals.
+
+        Parameters:
+        results_dir (str): Directory to save results
+        file_prefix (str): Prefix for saved files
+        return_col (str): Column name containing returns
+        analysis_window (tuple): Days relative to approval to analyze (start, end)
+        sharpe_window (int): Size of window for rolling Sharpe calculation in days
+        annualize (bool): Whether to annualize the Sharpe ratio
+        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
+
+        Returns:
+        pd.DataFrame: DataFrame containing Sharpe ratio time series
+        """
+        print(f"\n--- Calculating Rolling Sharpe Ratio Time Series (Analysis Window: {analysis_window}, Sharpe Window: {sharpe_window}) ---")
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or missing return column.")
+            return None
+
+        # Filter data to include only days within the extended analysis window
+        analysis_data = self.data[(self.data['days_to_approval'] >= analysis_window[0]) & 
+                                 (self.data['days_to_approval'] <= analysis_window[1])].copy()
+
+        if analysis_data.empty:
+            print(f"Error: No data found within analysis window {analysis_window}.")
+            return None
+
+        # Calculate daily equivalent of risk-free rate if needed
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
+
+        # Initialize results storage
+        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
+        sharpe_results = []
+
+        # Half window size for calculations
+        half_window = sharpe_window // 2
+
+        # For each day in the analysis window, calculate Sharpe ratio using surrounding days
+        for center_day in days_range:
+            window_start = center_day - half_window
+            window_end = center_day + half_window
+
+            # Filter data for current window
+            window_data = analysis_data[(analysis_data['days_to_approval'] >= window_start) & 
+                                       (analysis_data['days_to_approval'] <= window_end)]
+
+            if len(window_data) < sharpe_window // 2:  # Not enough data in window
+                sharpe_results.append({
+                    'days_to_approval': center_day,
+                    'mean_return': np.nan,
+                    'std_dev': np.nan,
+                    'sharpe_ratio': np.nan,
+                    'num_observations': 0
+                })
+                continue
+            
+            # Calculate statistics for window
+            mean_return = window_data[return_col].mean()
+            std_dev = window_data[return_col].std()
+            num_obs = len(window_data)
+
+            # Calculate Sharpe ratio
+            sharpe = np.nan
+            if not np.isnan(mean_return) and not np.isnan(std_dev) and std_dev > 0:
+                sharpe = (mean_return - daily_rf) / std_dev
+
+                # Annualize if requested
+                if annualize:
+                    sharpe = sharpe * np.sqrt(252)
+
+            sharpe_results.append({
+                'days_to_approval': center_day,
+                'mean_return': mean_return,
+                'std_dev': std_dev,
+                'sharpe_ratio': sharpe,
+                'num_observations': num_obs
+            })
+
+        # Convert results to DataFrame
+        results_df = pd.DataFrame(sharpe_results)
+
+        # Create a second DataFrame with event counts for each day
+        event_counts = analysis_data.groupby('days_to_approval')['event_id'].nunique().reset_index()
+        event_counts.columns = ['days_to_approval', 'unique_events']
+
+        # Join results with event counts
+        results_with_counts = pd.merge(results_df, event_counts, on='days_to_approval', how='left')
+        results_with_counts['unique_events'] = results_with_counts['unique_events'].fillna(0)
+
+        # Plot the results
+        try:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+
+            # Sharpe ratio plot
+            ax1.plot(results_with_counts['days_to_approval'], results_with_counts['sharpe_ratio'], 'b-', linewidth=2)
+            ax1.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+            ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Approval Day')
+
+            # Add vertical lines at key periods if using extended window
+            if analysis_window[0] <= -30 and analysis_window[1] >= 30:
+                ax1.axvline(x=-30, color='green', linestyle=':', linewidth=1, label='Month Before')
+                ax1.axvline(x=30, color='purple', linestyle=':', linewidth=1, label='Month After')
+
+            # Highlight the event window commonly used for volatility analysis
+            event_start, event_end = -2, 2  # Standard event window
+            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
+                ax1.axvspan(event_start, event_end, alpha=0.2, color='yellow', label='Event Window (-2 to +2)')
+
+            ax1.set_title(f'Rolling Sharpe Ratio Around FDA Approvals (Window Size: {sharpe_window} days)')
+            ax1.set_xlabel('Days Relative to Approval')
+            ax1.set_ylabel('Sharpe Ratio')
+            ax1.legend(loc='best')
+            ax1.grid(True, alpha=0.3)
+
+            # Calculate and plot rolling average of Sharpe
+            if len(results_with_counts) >= 10:  # Need enough data for meaningful average
+                window_size = min(10, len(results_with_counts) // 5)
+                results_with_counts['rolling_avg'] = results_with_counts['sharpe_ratio'].rolling(window=window_size, center=True).mean()
+                ax1.plot(results_with_counts['days_to_approval'], results_with_counts['rolling_avg'], 'r-', 
+                        linewidth=1.5, label=f'{window_size}-Day Rolling Avg')
+                ax1.legend(loc='best')
+
+            # Event count plot
+            ax2.bar(results_with_counts['days_to_approval'], results_with_counts['unique_events'], color='lightblue')
+            ax2.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
+            ax2.set_title('Number of Events per Day')
+            ax2.set_xlabel('Days Relative to Approval')
+            ax2.set_ylabel('Event Count')
+            ax2.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.png")
+            plt.savefig(plot_filename)
+            print(f"Saved rolling Sharpe time series plot to: {plot_filename}")
+            plt.close(fig)
+
+            # Also create a heatmap showing mean return and volatility
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+
+            # Mean return heatmap-style plot
+            mean_returns_df = results_with_counts[['days_to_approval', 'mean_return']].set_index('days_to_approval').T
+            sns.heatmap(mean_returns_df, cmap='RdYlGn', center=0, ax=ax1, cbar_kws={'label': 'Mean Return'})
+            ax1.set_title('Mean Return by Day Relative to Approval')
+            ax1.set_ylabel('')
+
+            # Volatility heatmap-style plot
+            volatility_df = results_with_counts[['days_to_approval', 'std_dev']].set_index('days_to_approval').T
+            sns.heatmap(volatility_df, cmap='YlOrRd', ax=ax2, cbar_kws={'label': 'Return Volatility'})
+            ax2.set_title('Return Volatility by Day Relative to Approval')
+            ax2.set_ylabel('')
+            ax2.set_xlabel('Days Relative to Approval')
+
+            plt.tight_layout()
+            heatmap_filename = os.path.join(results_dir, f"{file_prefix}_return_volatility_heatmap.png")
+            plt.savefig(heatmap_filename)
+            print(f"Saved return and volatility heatmap to: {heatmap_filename}")
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+            traceback.print_exc()
+
+        # Save results to CSV
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.csv")
+        try:
+            results_with_counts.to_csv(csv_filename, index=False)
+            print(f"Saved rolling Sharpe time series data to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving time series data: {e}")
+
+        return results_with_counts
+
+    def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "fda",
+                              return_col: str = 'ret', 
+                              analysis_window: tuple = (-60, 60),
+                              lookback_window: int = 10,
+                              quantiles: list = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
+                              annualize: bool = True, 
+                              risk_free_rate: float = 0.0):
+        """
+        Calculates and plots quantiles of Sharpe ratios across events for each day around FDA approvals.
+        
+        Parameters:
+        results_dir (str): Directory to save results
+        file_prefix (str): Prefix for saved files
+        return_col (str): Column name containing returns
+        analysis_window (tuple): Days relative to approval to analyze (start, end)
+        lookback_window (int): Window size for calculating Sharpe ratios (# of days)
+        quantiles (list): List of quantiles to calculate
+        annualize (bool): Whether to annualize the Sharpe ratio
+        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
+        
+        Returns:
+        pd.DataFrame: DataFrame containing Sharpe ratio quantiles by day
+        """
+        print(f"\n--- Calculating Sharpe Ratio Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
+        
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or missing return column.")
+            return None
+        
+        # Filter data to include only days within the extended analysis window
+        # We'll need extra days before for the lookback window calculations
+        extended_start = analysis_window[0] - lookback_window
+        analysis_data = self.data[(self.data['days_to_approval'] >= extended_start) & 
+                                 (self.data['days_to_approval'] <= analysis_window[1])].copy()
+        
+        if analysis_data.empty:
+            print(f"Error: No data found within analysis window {analysis_window}.")
+            return None
+        
+        # Calculate daily equivalent of risk-free rate if needed
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
+        
+        # Initialize results storage
+        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
+        results_data = []
+        
+        # For each day in the analysis window
+        print(f"Processing {len(days_range)} days...")
+        for center_day in days_range:
+            # Calculate the window for Sharpe calculation (lookback period)
+            window_start = center_day - lookback_window
+            window_end = center_day
+            
+            # Get data for all events in this window period
+            window_data = analysis_data[(analysis_data['days_to_approval'] >= window_start) & 
+                                       (analysis_data['days_to_approval'] <= window_end)]
+            
+            if window_data.empty:
+                # Record empty result and continue if no data for this day
+                empty_results = {"days_to_approval": center_day, "event_count": 0}
+                for q in quantiles:
+                    empty_results[f"sharpe_q{int(q*100)}"] = None
+                results_data.append(empty_results)
+                continue
+            
+            # Get all unique event IDs for this window
+            event_ids = window_data['event_id'].unique()
+            
+            # Calculate Sharpe ratio for each event in this window
+            event_sharpes = []
+            valid_event_count = 0
+            
+            for event_id in event_ids:
+                # Get data for this specific event in the window
+                event_data = window_data[window_data['event_id'] == event_id]
+                
+                # Need sufficient data points for a meaningful calculation
+                if len(event_data) < max(3, lookback_window // 3):
+                    continue
+                    
+                # Calculate mean return and std dev for this event
+                mean_ret = event_data[return_col].mean()
+                std_dev = event_data[return_col].std()
+                
+                # Calculate Sharpe ratio for this event
+                if not np.isnan(std_dev) and std_dev > 0:
+                    sharpe = (mean_ret - daily_rf) / std_dev
+                    
+                    # Annualize if requested
+                    if annualize:
+                        sharpe = sharpe * np.sqrt(252)
+                        
+                    event_sharpes.append(sharpe)
+                    valid_event_count += 1
+            
+            # Calculate quantiles if we have enough events
+            day_results = {"days_to_approval": center_day, "event_count": valid_event_count}
+            
+            if valid_event_count >= 5:  # Need a reasonable number of events for quantiles
+                sharpe_array = np.array(event_sharpes)
+                for q in quantiles:
+                    quantile_value = np.nanquantile(sharpe_array, q)
+                    day_results[f"sharpe_q{int(q*100)}"] = quantile_value
+            else:
+                # Not enough events for reliable quantiles
+                for q in quantiles:
+                    day_results[f"sharpe_q{int(q*100)}"] = None
+                    
+            results_data.append(day_results)
+        
+        # Convert results to DataFrame
+        results_df = pd.DataFrame(results_data)
+        
+        # Plot the results
+        try:
+            if 'event_count' in results_df.columns and not results_df.empty:
+                results_df.set_index('days_to_approval', inplace=True)
+                
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+                
+                # Plot quantiles
+                # Colors from light to dark
+                colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(quantiles)))
+                
+                # Need to ensure all required columns exist
+                expected_cols = [f"sharpe_q{int(q*100)}" for q in quantiles]
+                missing_cols = set(expected_cols) - set(results_df.columns)
+                if missing_cols:
+                    print(f"Warning: Missing columns in results: {missing_cols}")
+                    # Filter expected_cols to only include available columns
+                    expected_cols = [col for col in expected_cols if col in results_df.columns]
+                
+                if expected_cols:  # If we have any valid columns
+                    for i, q in enumerate(quantiles):
+                        col_name = f"sharpe_q{int(q*100)}"
+                        if col_name in results_df.columns:
+                            ax1.plot(results_df.index, results_df[col_name], 
+                                    color=colors[i], linewidth=1.5, 
+                                    label=f"{int(q*100)}th percentile", alpha=0.7)
+                
+                # Highlight median more strongly
+                median_col = "sharpe_q50"
+                if median_col in results_df.columns:
+                    ax1.plot(results_df.index, results_df[median_col], 
+                           color='red', linewidth=2.5, 
+                           label=f"Median (50th)", alpha=0.9)
+                           
+                # Add reference lines
+                ax1.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+                ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Approval Day')
+                
+                # Add vertical lines at key periods
+                if analysis_window[0] <= -30 and analysis_window[1] >= 30:
+                    ax1.axvline(x=-30, color='green', linestyle=':', linewidth=1, label='Month Before')
+                    ax1.axvline(x=30, color='purple', linestyle=':', linewidth=1, label='Month After')
+                
+                # Highlight the event window commonly used for volatility analysis
+                event_start, event_end = -2, 2  # Standard event window
+                if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
+                    ax1.axvspan(event_start, event_end, alpha=0.1, color='yellow', label='Event Window (-2 to +2)')
+                
+                ax1.set_title(f'Sharpe Ratio Quantiles Around FDA Approvals (Lookback: {lookback_window} days)')
+                ax1.set_xlabel('Days Relative to Approval')
+                ax1.set_ylabel('Sharpe Ratio')
+                ax1.legend(loc='best')
+                ax1.grid(True, alpha=0.3)
+                
+                # Event count plot
+                if 'event_count' in results_df.columns:
+                    ax2.bar(results_df.index, results_df['event_count'], color='lightblue')
+                    ax2.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
+                    ax2.set_title('Number of Events With Valid Sharpe Ratio')
+                    ax2.set_xlabel('Days Relative to Approval')
+                    ax2.set_ylabel('Event Count')
+                    ax2.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_quantiles.png")
+                plt.savefig(plot_filename)
+                print(f"Saved Sharpe ratio quantiles plot to: {plot_filename}")
+                plt.close(fig)
+                
+                # Create a heat map visualization of the quantiles
+                try:
+                    # Drop the event_count column and transpose
+                    heatmap_data = results_df.drop(columns=['event_count']).T
+                    
+                    # Rename index to more readable percentile names
+                    new_index = [f"{int(q*100)}th" for q in quantiles]
+                    heatmap_data.index = new_index
+                    
+                    fig, ax = plt.subplots(figsize=(16, 8))
+                    
+                    sns.heatmap(heatmap_data, cmap='RdYlGn', center=0, 
+                               ax=ax, cbar_kws={'label': 'Sharpe Ratio'})
+                    
+                    ax.set_title('Sharpe Ratio Quantiles Heatmap')
+                    ax.set_xlabel('Days Relative to Approval')
+                    ax.set_ylabel('Percentile')
+                    
+                    plt.tight_layout()
+                    heatmap_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles_heatmap.png")
+                    plt.savefig(heatmap_filename)
+                    print(f"Saved Sharpe ratio quantiles heatmap to: {heatmap_filename}")
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"Error creating heatmap: {e}")
+            else:
+                print("Warning: No valid data for plotting")
+                
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+            traceback.print_exc()
+        
+        # Save results to CSV
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_quantiles.csv")
+        try:
+            results_df.to_csv(csv_filename)
+            print(f"Saved Sharpe ratio quantiles data to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving quantiles data: {e}")
+        
+        return results_df

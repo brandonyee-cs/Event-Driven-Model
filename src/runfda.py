@@ -11,7 +11,7 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 try:
-    from polars_pre_chunk.fda_processor import DataLoader, FeatureEngineer, Analysis
+    from fda_processor import DataLoader, FeatureEngineer, Analysis
     print("Successfully imported FDA processor classes.")
 except ImportError as e:
     print(f"Error importing from fda_processor: {e}"); sys.exit(1)
@@ -35,13 +35,27 @@ STOCK_FILES = [
 # <<< -------------------------- >>>
 
 # --- Analysis Parameters ---
-RESULTS_DIR = "results_fda" # Directory to save results
-FILE_PREFIX = "fda"         # Prefix for saved files
-WINDOW_DAYS = 60
-SHARPE_ROLLING_WINDOW = 20
-VOL_ROLLING_WINDOW = 5
-VOL_BASELINE_WINDOW = (-60, -11)
-VOL_EVENT_WINDOW = (-2, 2)
+RESULTS_DIR = "results_earnings_polars" # Directory to save results
+FILE_PREFIX = "earnings"       # Prefix for saved files
+WINDOW_DAYS = 30               # Days around event for data loading
+
+# Event Strategy Parameters
+STRATEGY_HOLDING_PERIOD = 20 # Days to hold after entry
+STRATEGY_ENTRY_DAY = 0      # Day relative to event to enter (0=Announcement Day)
+
+# Volatility Analysis Parameters
+VOL_ROLLING_WINDOW = 5     # Days for rolling Volatility calculation (row-based)
+VOL_BASELINE_WINDOW = (-60, 60) # Days relative to event for baseline vol calc
+VOL_EVENT_WINDOW = (-2, 2)       # Days relative to event for event vol calc
+VOL_PRE_DAYS = 60         # Look back 60 days before announcement
+VOL_POST_DAYS = 60        # Look ahead 60 days after announcement
+
+# Sharpe Ratio Time Series Parameters
+SHARPE_TIME_GROUPING = 'quarter'  # 'year', 'quarter', or 'month'
+
+# Rolling Sharpe Time Series Parameters
+ROLLING_SHARPE_WINDOW = 5  # Window size for rolling Sharpe calculation (in days)
+ROLLING_ANALYSIS_WINDOW = (-60, 60)  # Days relative to announcement to analyze
 
 
 def run_analysis():
@@ -73,24 +87,25 @@ def run_analysis():
         print(f"Data loaded successfully. Shape: {analyzer.data.shape}")
         if analyzer.data is None or analyzer.data.empty: print("\n*** Error: Data loading failed. ***"); return
 
-        # --- Run Sharpe Ratio Analysis ---
-        analyzer.analyze_sharpe_ratio_dynamics(
-            results_dir=RESULTS_DIR,
-            file_prefix=FILE_PREFIX,
-            window=SHARPE_ROLLING_WINDOW,
-            pre_days=WINDOW_DAYS,
-            post_days=WINDOW_DAYS
-        )
-
         # --- Run Volatility Spike Analysis ---
         analyzer.analyze_volatility_spikes(
             results_dir=RESULTS_DIR,
             file_prefix=FILE_PREFIX,
             window=VOL_ROLLING_WINDOW,
-            pre_days=WINDOW_DAYS,
-            post_days=WINDOW_DAYS,
+            pre_days=VOL_PRE_DAYS,             # Updated to 60 days
+            post_days=VOL_POST_DAYS,           # Updated to 60 days
             baseline_window=VOL_BASELINE_WINDOW,
             event_window=VOL_EVENT_WINDOW
+        )
+        # --- Run Rolling Sharpe Time Series Analysis ---
+        analyzer.calculate_rolling_sharpe_timeseries(
+            results_dir=RESULTS_DIR,
+            file_prefix=FILE_PREFIX,
+            return_col='ret',
+            analysis_window=ROLLING_ANALYSIS_WINDOW,
+            sharpe_window=ROLLING_SHARPE_WINDOW,
+            annualize=True,
+            # risk_free_rate=0.0  # Optional
         )
 
         print(f"\n--- FDA Sharpe Ratio & Volatility Analysis Finished (Results in '{RESULTS_DIR}') ---")

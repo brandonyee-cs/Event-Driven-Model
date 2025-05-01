@@ -103,15 +103,6 @@ def run_analysis():
         print(f"Data loaded successfully. Shape: {analyzer.data.shape}")
         if analyzer.data is None or analyzer.data.is_empty(): print("\n*** Error: Data loading failed. ***"); return
 
-        # --- Run Event Strategy Sharpe Ratio Analysis ---
-        analyzer.analyze_event_sharpe_ratio(
-            results_dir=RESULTS_DIR,
-            file_prefix=FILE_PREFIX,
-            holding_period=STRATEGY_HOLDING_PERIOD,
-            entry_day=STRATEGY_ENTRY_DAY,
-            # risk_free_rate=0.0 # Optional
-        )
-
         # --- Run Volatility Spike Analysis ---
         analyzer.analyze_volatility_spikes(
             results_dir=RESULTS_DIR,
@@ -122,42 +113,6 @@ def run_analysis():
             baseline_window=VOL_BASELINE_WINDOW,
             event_window=VOL_EVENT_WINDOW
         )
-        ## --- Run Sharpe Ratio Comparison Analysis ---
-        #analyzer.plot_sharpe_ratio_time_series(
-        #    results_dir=RESULTS_DIR,
-        #    file_prefix=FILE_PREFIX,
-        #    entry_day=STRATEGY_ENTRY_DAY,
-        #    holding_period=STRATEGY_HOLDING_PERIOD,
-        #    time_grouping=SHARPE_TIME_GROUPING
-        #    # risk_free_rate=0.0  # Optional
-        #)
- 
-        ## --- Run Event Window Sharpe Ratio Analysis ---
-        #analyzer.analyze_event_window_sharpe(
-        #    results_dir=RESULTS_DIR,
-        #    file_prefix=FILE_PREFIX,
-        #    event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
-        #    # risk_free_rate=0.0  # Optional
-        #)
-
-        ## --- Calculate Average Sharpe Ratio ---
-        #avg_sharpe_results = analyzer.calculate_average_sharpe(
-        #    return_col='ret',
-        #    event_window=VOL_EVENT_WINDOW,  # Using the same window as volatility analysis
-        #    annualize=True,
-        #    # risk_free_rate=0.0  # Optional
-        #)
-
-        #if avg_sharpe_results and 'sharpe_ratio' in avg_sharpe_results:
-        #    # Save results to CSV
-        #    sharpe_results_df = pl.DataFrame([avg_sharpe_results])
-        #    csv_filename = os.path.join(RESULTS_DIR, f"{FILE_PREFIX}_average_sharpe.csv")
-        #    try:
-        #        sharpe_results_df.write_csv(csv_filename)
-        #        print(f"Saved average Sharpe ratio results to: {csv_filename}")
-        #    except Exception as e:
-        #        print(f"Error saving Sharpe ratio results: {e}")
-
 
         # --- Run Rolling Sharpe Time Series Analysis ---
         analyzer.calculate_rolling_sharpe_timeseries(
@@ -169,64 +124,6 @@ def run_analysis():
             annualize=True,
             # risk_free_rate=0.0  # Optional
         )
-        # --- Optional: Run ML Prediction Analysis ---
-        if RUN_ML_ANALYSIS:
-            print("\n--- Running Optional ML Analysis (Polars) ---")
-            # Reload/prepare data including features/target needed for ML
-            print("   Re-preparing data with features and target for ML...")
-            # analyzer.load_and_prepare_data(run_feature_engineering=True) # This will calculate features/target
-
-            # 1. Create target and calculate features (needs to happen before train/eval)
-            print("   Creating target variable for ML...")
-            analyzer.data = analyzer.feature_engineer.create_target(analyzer.data)
-            print("   Calculating features for ML...")
-            # Run feature calculation again, explicitly setting fit_categorical for train later
-            # Note: calculate_features now returns the df, doesn't modify in place implicitly
-            analyzer.data = analyzer.feature_engineer.calculate_features(analyzer.data, fit_categorical=False)
-
-
-            # 2. Train models (Analysis.train_models handles splitting and feature processing)
-            print("   Training ML models...")
-            analyzer.train_models(test_size=ML_TEST_SPLIT_SIZE) # This now handles feature fitting on train split
-
-            # 3. Evaluate models
-            print("   Evaluating ML models...")
-            results_dict = analyzer.evaluate_models() # Uses stored X_test_np, y_test_np
-
-            print("\n--- ML Evaluation Summary ---")
-            # Display results (convert Polars Series/DF to Pandas for display if needed, or print directly)
-            if 'standard' in results_dict and results_dict['standard']:
-                 print("\nStandard Models:")
-                 # Convert dict of dicts to Polars DF for printing
-                 print(pl.DataFrame(results_dict['standard']).transpose(include_header=True, column_names=list(results_dict['standard'].keys())))
-
-            if 'surprise' in results_dict and results_dict['surprise']:
-                 print("\nSurprise Model:")
-                 # Convert dict to Polars Series/DF for printing
-                 print(pl.DataFrame(results_dict.get('surprise', {}))) # Simple dict display
-
-            if 'pead' in results_dict and results_dict['pead']:
-                 print("\nPEAD Model:")
-                 # Convert dict of dicts to Polars DF for printing
-                 print(pl.DataFrame(results_dict.get('pead', {})).transpose(include_header=True, column_names=list(results_dict['pead'].keys())))
-
-
-            # 4. Plot ML-related results (optional)
-            # Ensure plotting functions handle Polars input or convert internally
-            if analyzer.models:
-                model_to_plot_imp = 'XGBoostDecile' if 'XGBoostDecile' in analyzer.models else 'TimeSeriesRidge'
-                if model_to_plot_imp in analyzer.models:
-                    analyzer.plot_feature_importance(results_dir=RESULTS_DIR, file_prefix=FILE_PREFIX, model_name=model_to_plot_imp, top_n=15)
-
-            if analyzer.surprise_model: # Check if surprise model exists
-                 # This plotting function needs access to data, potentially test split
-                 analyzer.analyze_earnings_surprise(results_dir=RESULTS_DIR, file_prefix=FILE_PREFIX) # Plot surprise impact
-
-            if analyzer.pead_model: # Check if pead model exists
-                 analyzer.plot_pead_predictions(results_dir=RESULTS_DIR, file_prefix=FILE_PREFIX, n_events=2) # Plot PEAD
-
-            print("--- Optional ML Analysis Complete ---")
-        # ---------------------------------------------
 
         print(f"\n--- Earnings Analysis Finished (Results in '{RESULTS_DIR}') ---")
 

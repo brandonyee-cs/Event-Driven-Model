@@ -1701,58 +1701,6 @@ class Analysis:
 
         return strategy_returns_agg
 
-    def analyze_event_sharpe_ratio(self, results_dir: str, file_prefix: str = "earnings", holding_period: int = 20, entry_day: int = 0, risk_free_rate: float = 0.0):
-        """Calculates and analyzes the Sharpe Ratio of a simple event-based strategy using Polars."""
-        print(f"\n--- Analyzing Event Strategy Sharpe Ratio (Entry: T{entry_day}, Hold: {holding_period} trading days) ---")
-        strategy_returns_df = self.calculate_event_strategy_returns(holding_period=holding_period, entry_day=entry_day)
-
-        if strategy_returns_df is None or strategy_returns_df.height < 2:
-            num_returns = strategy_returns_df.height if strategy_returns_df is not None else 0
-            print(f"Error: Insufficient valid returns ({num_returns}). Cannot calculate Sharpe.")
-            return None
-        if 'strategy_return' not in strategy_returns_df.columns:
-            print("Error: 'strategy_return' column not found after calculation.")
-            return None
-
-        print(f"Using returns from {strategy_returns_df.height} events for Sharpe calculation.")
-
-        stats = strategy_returns_df.select([
-            pl.mean('strategy_return').alias('mean_ret'),
-            pl.std('strategy_return').alias('std_ret')
-        ]).row(0)
-        mean_ret = stats[0] if stats[0] is not None else np.nan
-        std_ret = stats[1] if stats[1] is not None else np.nan
-
-        sharpe = np.nan
-        if np.isnan(std_ret) or std_ret == 0:
-             print("Warning: Standard deviation of returns is zero or NaN. Sharpe ratio is undefined.")
-        else:
-             period_rf = (1 + risk_free_rate)**(holding_period/252) - 1 if risk_free_rate != 0 else 0
-             sharpe = (mean_ret - period_rf) / (std_ret + 1e-9)
-
-        print(f"  Mean Return: {mean_ret:.4%}, Std Dev: {std_ret:.4%}, Period Sharpe: {sharpe:.4f}")
-
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_strategy_returns_h{holding_period}_e{entry_day}.csv")
-        try:
-            strategy_returns_df.write_csv(csv_filename)
-            print(f"Saved strategy returns to: {csv_filename}")
-        except Exception as e: print(f"Error saving returns data: {e}")
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        returns_pd = strategy_returns_df['strategy_return'].to_pandas()
-        sns.histplot(returns_pd.dropna(), bins=30, kde=True, ax=ax)
-        ax.axvline(mean_ret, color='red', linestyle='--', label=f'Mean ({mean_ret:.2%})')
-        ax.set_title(f'Distribution of {holding_period}-Trading-Day Strategy Returns (Entry T{entry_day}) - Earnings')
-        ax.set_xlabel(f'{holding_period}-Day Return'); ax.set_ylabel('Frequency'); ax.legend()
-        plt.tight_layout()
-        plot_filename = os.path.join(results_dir, f"{file_prefix}_strategy_returns_hist_h{holding_period}_e{entry_day}.png")
-        try: plt.savefig(plot_filename); print(f"Saved returns histogram to: {plot_filename}")
-        except Exception as e: print(f"Error saving histogram: {e}")
-        plt.close(fig)
-
-        return {'mean_return': mean_ret, 'std_dev_return': std_ret, 'period_sharpe': sharpe, 'num_events': strategy_returns_df.height}
-
-
     def analyze_volatility_spikes(self, results_dir: str, file_prefix: str = "earnings", window: int = 5, min_periods: int = 3, pre_days: int = 30, post_days: int = 30, baseline_window=(-60, -11), event_window=(-2, 2)):
         """Calculates, plots, and saves rolling volatility and event vs baseline comparison using Polars."""
         print(f"\n--- Analyzing Rolling Volatility (Window={window} rows) using Polars ---")
@@ -1854,493 +1802,6 @@ class Analysis:
             print("\nCould not calculate volatility ratios (insufficient valid data or aggregation error).")
 
         return aligned_vol
-    def plot_sharpe_ratio_time_series(self, results_dir: str, file_prefix: str = "earnings",
-                                      entry_day: int = 0, holding_period: int = 20,
-                                      time_grouping: str = 'year', risk_free_rate: float = 0.0):
-        """
-        Calculates and plots Sharpe ratio over time for an 'all buy' earnings strategy.
-        
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        entry_day (int): Day relative to announcement to enter positions
-        holding_period (int): Holding period in trading days
-        time_grouping (str): How to group time periods ('year', 'quarter', 'month')
-        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-        
-        Returns:
-        pl.DataFrame: DataFrame containing Sharpe ratios for each time period
-        """
-        print(f"\n--- Analyzing Time Series of Sharpe Ratios (Entry: T{entry_day}, Hold: {holding_period} days) ---")
-        if self.data is None:
-            print("Error: Data not loaded.") 
-            return None
-            
-        # Calculate strategy returns
-        strategy_returns_df = self.calculate_event_strategy_returns(
-            holding_period=holding_period, 
-            entry_day=entry_day
-        )
-        
-        if strategy_returns_df is None or strategy_returns_df.is_empty():
-            print(f"Error: Not enough data for Entry T{entry_day}, Hold {holding_period}")
-            return None
-        
-        # Join returns with event dates
-        event_dates = self.data.filter(pl.col('days_to_announcement') == entry_day).select(['event_id', 'Announcement Date'])
-        event_dates = event_dates.unique(subset=['event_id'], keep='first')
-        
-        returns_with_dates = strategy_returns_df.join(
-            event_dates, 
-            on='event_id', 
-            how='inner'
-        )
-        
-        if returns_with_dates.is_empty():
-            print("Error: Failed to join strategy returns with announcement dates.")
-            return None
-        
-        # Extract time period components
-        returns_with_dates = returns_with_dates.with_columns([
-            pl.col('Announcement Date').dt.year().alias('year'),
-            pl.col('Announcement Date').dt.quarter().alias('quarter'),
-            pl.col('Announcement Date').dt.month().alias('month')
-        ])
-        
-        # Create time period label based on grouping
-        if time_grouping == 'quarter':
-            returns_with_dates = returns_with_dates.with_columns(
-                (pl.col('year').cast(pl.Utf8) + "-Q" + pl.col('quarter').cast(pl.Utf8)).alias('time_period')
-            )
-        elif time_grouping == 'month':
-            returns_with_dates = returns_with_dates.with_columns(
-                (pl.col('year').cast(pl.Utf8) + "-" + pl.col('month').cast(pl.Utf8).str.zfill(2)).alias('time_period')
-            )
-        else:  # Default to year
-            returns_with_dates = returns_with_dates.with_columns(
-                pl.col('year').cast(pl.Utf8).alias('time_period')
-            )
-        
-        # Calculate Sharpe ratio for each time period
-        periods = []
-        sharpes = []
-        counts = []
-        mean_returns = []
-        std_returns = []
-        
-        for period in returns_with_dates['time_period'].unique().sort():
-            period_returns = returns_with_dates.filter(pl.col('time_period') == period)
-            if period_returns.height < 5:  # Skip periods with too few observations
-                continue
-                
-            period_stats = period_returns.select([
-                pl.mean('strategy_return').alias('mean_ret'),
-                pl.std('strategy_return').alias('std_ret'),
-                pl.count().alias('count')
-            ]).row(0)
-            
-            mean_ret = period_stats[0] if period_stats[0] is not None else np.nan
-            std_ret = period_stats[1] if period_stats[1] is not None else np.nan
-            count = period_stats[2]
-            
-            # Annualize the Sharpe ratio
-            sharpe = np.nan
-            if not np.isnan(std_ret) and std_ret > 0:
-                # Annualize returns and volatility
-                ann_factor = 252 / holding_period
-                ann_ret = (1 + mean_ret) ** ann_factor - 1
-                ann_vol = std_ret * np.sqrt(ann_factor)
-                sharpe = (ann_ret - risk_free_rate) / ann_vol
-                
-            periods.append(period)
-            sharpes.append(sharpe)
-            counts.append(count)
-            mean_returns.append(mean_ret)
-            std_returns.append(std_ret)
-        
-        # Create results DataFrame
-        results_df = pl.DataFrame({
-            'time_period': periods,
-            'sharpe_ratio': sharpes,
-            'mean_return': mean_returns,
-            'std_dev': std_returns,
-            'count': counts
-        })
-        
-        # Plot time series
-        try:
-            results_pd = results_df.to_pandas()
-            
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
-            
-            # Sharpe ratio plot
-            color = results_pd['sharpe_ratio'].map(lambda x: 'green' if x >= 0 else 'red')
-            bars1 = ax1.bar(results_pd['time_period'], results_pd['sharpe_ratio'], color=color)
-            ax1.set_title(f'Annualized Sharpe Ratio by {time_grouping.capitalize()} (Entry: T{entry_day}, Hold: {holding_period} days)')
-            ax1.set_ylabel('Annualized Sharpe Ratio')
-            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-            
-            # Add overall average line
-            avg_sharpe = results_pd['sharpe_ratio'].mean()
-            ax1.axhline(y=avg_sharpe, color='blue', linestyle='--', alpha=0.7, label=f'Average: {avg_sharpe:.2f}')
-            ax1.legend()
-            
-            # Rotate x-axis labels if many periods
-            if len(periods) > 8:
-                plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
-            
-            # Add value labels if fewer periods
-            if len(periods) <= 15:
-                for bar in bars1:
-                    height = bar.get_height()
-                    if not np.isnan(height):
-                        ax1.annotate(f'{height:.2f}',
-                                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                                    xytext=(0, 3 if height >= 0 else -10),
-                                    textcoords="offset points",
-                                    ha='center', va='bottom' if height >= 0 else 'top')
-            
-            # Sample count plot
-            bars2 = ax2.bar(results_pd['time_period'], results_pd['count'], color='lightblue')
-            ax2.set_title('Number of Events per Period')
-            ax2.set_ylabel('Count')
-            
-            if len(periods) > 8:
-                plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
-                
-            plt.tight_layout()
-            plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_time_series_{time_grouping}.png")
-            plt.savefig(plot_filename)
-            print(f"Saved Sharpe ratio time series plot to: {plot_filename}")
-            plt.close(fig)
-            
-            # Also create a rolling Sharpe ratio plot if there are enough periods
-            if len(periods) >= 4:
-                fig, ax = plt.subplots(figsize=(14, 6))
-                
-                # Calculate rolling averages
-                roll_window = min(4, len(periods))
-                results_pd['rolling_sharpe'] = results_pd['sharpe_ratio'].rolling(window=roll_window).mean()
-                
-                # Plot
-                ax.plot(results_pd['time_period'], results_pd['sharpe_ratio'], 'o-', label='Period Sharpe')
-                ax.plot(results_pd['time_period'], results_pd['rolling_sharpe'], 'r-', linewidth=2, 
-                       label=f'{roll_window}-Period Rolling Avg')
-                ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-                ax.axhline(y=avg_sharpe, color='blue', linestyle='--', alpha=0.7, label=f'Overall Avg: {avg_sharpe:.2f}')
-                
-                ax.set_title(f'Annualized Sharpe Ratio and Rolling Average (Entry: T{entry_day}, Hold: {holding_period} days)')
-                ax.set_ylabel('Annualized Sharpe Ratio')
-                ax.legend()
-                
-                if len(periods) > 8:
-                    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-                    
-                plt.tight_layout()
-                roll_plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_rolling_{time_grouping}.png")
-                plt.savefig(roll_plot_filename)
-                print(f"Saved rolling Sharpe ratio plot to: {roll_plot_filename}")
-                plt.close(fig)
-            
-        except Exception as e:
-            print(f"Error creating Sharpe ratio time series plots: {e}")
-            traceback.print_exc()
-        
-        # Save results to CSV
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_time_series_{time_grouping}.csv")
-        try:
-            results_df.write_csv(csv_filename)
-            print(f"Saved Sharpe ratio time series data to: {csv_filename}")
-        except Exception as e:
-            print(f"Error saving Sharpe ratio data: {e}")
-        
-        return results_df
-    
-    def analyze_event_window_sharpe(self, results_dir: str, file_prefix: str = "earnings", 
-                               event_window: Tuple[int, int] = (-2, 2), 
-                               risk_free_rate: float = 0.0):
-        """
-        Calculates Sharpe ratio for a strategy that buys at the start of the event window
-        and sells at the end of the event window for each earnings announcement.
-        
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        event_window (Tuple[int, int]): Days relative to announcement (start, end)
-        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-        
-        Returns:
-        Dict: Dictionary containing Sharpe ratio and related statistics
-        """
-        print(f"\n--- Analyzing Event Window Sharpe Ratio (Window: {event_window}) ---")
-        if self.data is None or 'ret' not in self.data.columns:
-            print("Error: Data not loaded or missing return column.")
-            return None
-        
-        # Filter data to include only days within the event window
-        event_data = self.data.filter(
-            (pl.col('days_to_announcement') >= event_window[0]) & 
-            (pl.col('days_to_announcement') <= event_window[1])
-        )
-        
-        if event_data.is_empty():
-            print(f"Error: No data found within event window {event_window}.")
-            return None
-        
-        # Calculate cumulative return for each event
-        # First sort data by event_id and date
-        event_data = event_data.sort(['event_id', 'date'])
-        
-        # Group by event_id and calculate cumulative return for each event
-        event_returns = event_data.group_by('event_id').agg(
-            # Calculate cumulative product of (1 + return)
-            ((pl.col('ret').fill_null(0) + 1).product() - 1).alias('event_return'),
-            # Count days to ensure we have complete window
-            pl.count().alias('days_count'),
-            # Get announcement date
-            pl.first('Announcement Date').alias('announcement_date'),
-            # Get ticker
-            pl.first('ticker').alias('ticker')
-        )
-        
-        # Filter to include only events with complete data (all days in window)
-        window_size = event_window[1] - event_window[0] + 1
-        complete_events = event_returns.filter(pl.col('days_count') == window_size)
-        
-        if complete_events.is_empty() or complete_events.height < 10:
-            print(f"Warning: Insufficient events with complete {window_size}-day window data.")
-            if not complete_events.is_empty():
-                print(f"Found only {complete_events.height} complete events.")
-            return None
-        
-        # Calculate statistics
-        stats = complete_events.select([
-            pl.mean('event_return').alias('mean_return'),
-            pl.std('event_return').alias('std_dev'),
-            pl.count().alias('event_count')
-        ]).row(0)
-        
-        mean_return = stats[0] if stats[0] is not None else np.nan
-        std_dev = stats[1] if stats[1] is not None else np.nan
-        event_count = stats[2]
-        
-        # Calculate annualized figures
-        trading_days_per_year = 252
-        ann_factor = trading_days_per_year / window_size
-        
-        ann_return = (1 + mean_return) ** ann_factor - 1
-        ann_vol = std_dev * np.sqrt(ann_factor)
-        
-        # Calculate Sharpe ratio
-        sharpe_ratio = np.nan
-        if not np.isnan(ann_vol) and ann_vol > 0:
-            sharpe_ratio = (ann_return - risk_free_rate) / ann_vol
-        
-        # Print results
-        print("\nEvent Window Strategy Results:")
-        print(f"  Window: {event_window[0]} to {event_window[1]} days relative to announcement")
-        print(f"  Number of events: {event_count}")
-        print(f"  Average return per event: {mean_return:.4%}")
-        print(f"  Standard deviation: {std_dev:.4%}")
-        print(f"  Annualized return: {ann_return:.4%}")
-        print(f"  Annualized volatility: {ann_vol:.4%}")
-        print(f"  Annualized Sharpe ratio: {sharpe_ratio:.4f}")
-        
-        # Also calculate by year
-        complete_events = complete_events.with_columns(
-            pl.col('announcement_date').dt.year().alias('year')
-        )
-        
-        yearly_stats = complete_events.group_by('year').agg([
-            pl.mean('event_return').alias('mean_return'),
-            pl.std('event_return').alias('std_dev'),
-            pl.count().alias('event_count')
-        ]).sort('year')
-        
-        # Calculate yearly Sharpe ratios
-        yearly_stats = yearly_stats.with_columns([
-            ((1 + pl.col('mean_return')) ** ann_factor - 1).alias('ann_return'),
-            (pl.col('std_dev') * np.sqrt(ann_factor)).alias('ann_vol')
-        ]).with_columns(
-            ((pl.col('ann_return') - risk_free_rate) / pl.col('ann_vol')).alias('sharpe_ratio')
-        )
-        
-        # Create plots
-        try:
-            # Distribution of returns
-            fig, ax = plt.subplots(figsize=(10, 6))
-            returns_pd = complete_events['event_return'].to_pandas()
-            sns.histplot(returns_pd.dropna(), bins=30, kde=True, ax=ax)
-            ax.axvline(mean_return, color='red', linestyle='--', label=f'Mean ({mean_return:.2%})')
-            ax.set_title(f'Distribution of {window_size}-Day Event Window Returns')
-            ax.set_xlabel('Return')
-            ax.set_ylabel('Frequency')
-            ax.legend()
-            
-            plt.tight_layout()
-            hist_filename = os.path.join(results_dir, f"{file_prefix}_event_window_return_dist.png")
-            plt.savefig(hist_filename)
-            print(f"Saved return distribution plot to: {hist_filename}")
-            plt.close(fig)
-            
-            # Yearly Sharpe ratios
-            yearly_stats_pd = yearly_stats.to_pandas()
-            
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
-            
-            # Sharpe ratio by year
-            bars = ax1.bar(yearly_stats_pd['year'].astype(str), yearly_stats_pd['sharpe_ratio'], color=yearly_stats_pd['sharpe_ratio'].map(lambda x: 'green' if x >= 0 else 'red'))
-            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-            ax1.axhline(y=sharpe_ratio, color='blue', linestyle='--', alpha=0.7, label=f'Overall: {sharpe_ratio:.2f}')
-            ax1.set_title(f'Annualized Sharpe Ratio by Year (Event Window: {event_window[0]} to {event_window[1]})')
-            ax1.set_ylabel('Sharpe Ratio')
-            ax1.legend()
-            
-            # Add value labels
-            for bar in bars:
-                height = bar.get_height()
-                if not np.isnan(height):
-                    ax1.annotate(f'{height:.2f}',
-                                xy=(bar.get_x() + bar.get_width() / 2, height),
-                                xytext=(0, 3 if height >= 0 else -10),
-                                textcoords="offset points",
-                                ha='center', va='bottom' if height >= 0 else 'top')
-            
-            # Event count by year
-            ax2.bar(yearly_stats_pd['year'].astype(str), yearly_stats_pd['event_count'], color='lightblue')
-            ax2.set_title('Number of Events per Year')
-            ax2.set_ylabel('Count')
-            
-            plt.tight_layout()
-            year_filename = os.path.join(results_dir, f"{file_prefix}_event_window_sharpe_by_year.png")
-            plt.savefig(year_filename)
-            print(f"Saved yearly Sharpe ratio plot to: {year_filename}")
-            plt.close(fig)
-            
-        except Exception as e:
-            print(f"Error creating plots: {e}")
-            traceback.print_exc()
-        
-        # Save results to CSV
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_event_window_yearly_stats.csv")
-        try:
-            yearly_stats.write_csv(csv_filename)
-            print(f"Saved yearly statistics to: {csv_filename}")
-        except Exception as e:
-            print(f"Error saving yearly stats: {e}")
-        
-        # Also save individual event returns
-        events_csv = os.path.join(results_dir, f"{file_prefix}_event_window_returns.csv")
-        try:
-            complete_events.write_csv(events_csv)
-            print(f"Saved individual event returns to: {events_csv}")
-        except Exception as e:
-            print(f"Error saving event returns: {e}")
-        
-        return {
-            'window': event_window,
-            'mean_return': mean_return,
-            'std_dev': std_dev,
-            'ann_return': ann_return,
-            'ann_vol': ann_vol,
-            'sharpe_ratio': sharpe_ratio,
-            'event_count': event_count
-        }
-    
-    def calculate_average_sharpe(self, return_col: str = 'ret', event_window: Tuple[int, int] = (-2, 2), 
-                           annualize: bool = True, risk_free_rate: float = 0.0) -> Dict[str, Any]:
-        """
-        Calculates the average Sharpe ratio across all earnings events.
-
-        Parameters:
-        return_col (str): Column name containing returns
-        event_window (Tuple[int, int]): Days relative to announcement (start, end) to include
-        annualize (bool): Whether to annualize the Sharpe ratio
-        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-
-        Returns:
-        Dict: Dictionary containing Sharpe ratio and related statistics
-        """
-        print(f"\n--- Calculating Average Sharpe Ratio (Window: {event_window}) ---")
-        if self.data is None or return_col not in self.data.columns:
-            print("Error: Data not loaded or missing return column.")
-            return {'sharpe_ratio': np.nan, 'error': 'Data not available'}
-
-        # Filter data to include only days within the event window
-        event_data = self.data.filter(
-            (pl.col('days_to_announcement') >= event_window[0]) & 
-            (pl.col('days_to_announcement') <= event_window[1])
-        )
-
-        if event_data.is_empty():
-            print(f"Error: No data found within event window {event_window}.")
-            return {'sharpe_ratio': np.nan, 'error': 'No data in window'}
-
-        # Calculate statistics directly on filtered returns
-        stats = event_data.select([
-            pl.mean(return_col).alias('mean_daily_return'),
-            pl.std(return_col).alias('std_daily_return'),
-            pl.count().alias('total_observations')
-        ]).row(0)
-
-        mean_daily_return = stats[0] if stats[0] is not None else np.nan
-        std_daily_return = stats[1] if stats[1] is not None else np.nan
-        total_observations = stats[2]
-
-        # Calculate Sharpe ratio
-        if np.isnan(mean_daily_return) or np.isnan(std_daily_return) or std_daily_return == 0:
-            print("Warning: Cannot calculate Sharpe ratio (insufficient data or zero volatility).")
-            return {
-                'mean_return': mean_daily_return,
-                'std_dev': std_daily_return,
-                'observations': total_observations,
-                'sharpe_ratio': np.nan,
-                'error': 'Calculation failed'
-            }
-
-        # Calculate daily equivalent of risk-free rate if needed
-        daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
-
-        # Calculate daily Sharpe ratio
-        daily_sharpe = (mean_daily_return - daily_rf) / std_daily_return
-
-        # Annualize if requested
-        if annualize:
-            # Standard annualization formula: daily sharpe * sqrt(252)
-            sharpe_ratio = daily_sharpe * np.sqrt(252)
-            ann_return = (1 + mean_daily_return) ** 252 - 1
-            ann_vol = std_daily_return * np.sqrt(252)
-        else:
-            sharpe_ratio = daily_sharpe
-            ann_return = mean_daily_return
-            ann_vol = std_daily_return
-
-        # Collect event count information
-        # Fix the error by using n_unique() instead of unique().height
-        unique_events = event_data['event_id'].n_unique()
-
-        # Print results
-        period_desc = "Annualized" if annualize else "Daily"
-        print(f"\nAverage {period_desc} Sharpe Ratio Results:")
-        print(f"  Window: {event_window[0]} to {event_window[1]} days relative to announcement")
-        print(f"  Unique events: {unique_events}")
-        print(f"  Total observations: {total_observations}")
-        print(f"  Mean return: {mean_daily_return:.6f} (daily)")
-        print(f"  Standard deviation: {std_daily_return:.6f} (daily)")
-        print(f"  {period_desc} return: {ann_return:.4%}")
-        print(f"  {period_desc} volatility: {ann_vol:.4%}")
-        print(f"  {period_desc} Sharpe ratio: {sharpe_ratio:.4f}")
-
-        return {
-            'window': event_window,
-            'mean_daily_return': mean_daily_return,
-            'std_daily_return': std_daily_return,
-            'annualized_return': ann_return,
-            'annualized_volatility': ann_vol,
-            'sharpe_ratio': sharpe_ratio,
-            'unique_events': unique_events,
-            'total_observations': total_observations
-        }
     
     def calculate_rolling_sharpe_timeseries(self, results_dir: str, file_prefix: str = "earnings",
                                       return_col: str = 'ret', 
@@ -2547,3 +2008,230 @@ class Analysis:
             print(f"Error saving time series data: {e}")
         
         return results_with_counts
+    
+    def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "earnings",
+                               return_col: str = 'ret', 
+                               analysis_window: Tuple[int, int] = (-60, 60),
+                               lookback_window: int = 10,
+                               quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
+                               annualize: bool = True, 
+                               risk_free_rate: float = 0.0):
+        """
+        Calculates and plots quantiles of Sharpe ratios across events for each day around earnings.
+
+        Parameters:
+        results_dir (str): Directory to save results
+        file_prefix (str): Prefix for saved files
+        return_col (str): Column name containing returns
+        analysis_window (Tuple[int, int]): Days relative to announcement to analyze (start, end)
+        lookback_window (int): Window size for calculating Sharpe ratios (# of days)
+        quantiles (List[float]): List of quantiles to calculate
+        annualize (bool): Whether to annualize the Sharpe ratio
+        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
+
+        Returns:
+        pl.DataFrame: DataFrame containing Sharpe ratio quantiles by day
+        """
+        print(f"\n--- Calculating Sharpe Ratio Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
+
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or missing return column.")
+            return None
+
+        # Filter data to include only days within the extended analysis window
+        # We'll need extra days before for the lookback window calculations
+        extended_start = analysis_window[0] - lookback_window
+        analysis_data = self.data.filter(
+            (pl.col('days_to_announcement') >= extended_start) & 
+            (pl.col('days_to_announcement') <= analysis_window[1])
+        )
+
+        if analysis_data.is_empty():
+            print(f"Error: No data found within analysis window {analysis_window}.")
+            return None
+
+        # Calculate daily equivalent of risk-free rate if needed
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
+
+        # Initialize results storage
+        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
+        results_data = []
+
+        # For each day in the analysis window
+        print(f"Processing {len(days_range)} days...")
+        for center_day in days_range:
+            # Calculate the window for Sharpe calculation (lookback period)
+            window_start = center_day - lookback_window
+            window_end = center_day
+
+            # Get data for all events in this window period
+            window_data = analysis_data.filter(
+                (pl.col('days_to_announcement') >= window_start) & 
+                (pl.col('days_to_announcement') <= window_end)
+            )
+
+            if window_data.is_empty():
+                # Record empty result and continue if no data for this day
+                empty_results = {"days_to_announcement": center_day, "event_count": 0}
+                for q in quantiles:
+                    empty_results[f"sharpe_q{int(q*100)}"] = None
+                results_data.append(empty_results)
+                continue
+            
+            # Get all unique event IDs for this window
+            event_ids = window_data.get_column('event_id').unique()
+
+            # Calculate Sharpe ratio for each event in this window
+            event_sharpes = []
+            valid_event_count = 0
+
+            for event_id in event_ids:
+                # Get data for this specific event in the window
+                event_data = window_data.filter(pl.col('event_id') == event_id)
+
+                # Need sufficient data points for a meaningful calculation
+                if event_data.height < max(3, lookback_window // 3):
+                    continue
+
+                # Calculate mean return and std dev for this event
+                mean_ret = event_data.get_column(return_col).mean()
+                std_dev = event_data.get_column(return_col).std()
+
+                # Calculate Sharpe ratio for this event
+                if std_dev is not None and std_dev > 0:
+                    sharpe = (mean_ret - daily_rf) / std_dev
+
+                    # Annualize if requested
+                    if annualize:
+                        sharpe = sharpe * np.sqrt(252)
+
+                    event_sharpes.append(sharpe)
+                    valid_event_count += 1
+
+            # Calculate quantiles if we have enough events
+            day_results = {"days_to_announcement": center_day, "event_count": valid_event_count}
+
+            if valid_event_count >= 5:  # Need a reasonable number of events for quantiles
+                sharpe_array = np.array(event_sharpes)
+                for q in quantiles:
+                    quantile_value = np.nanquantile(sharpe_array, q)
+                    day_results[f"sharpe_q{int(q*100)}"] = quantile_value
+            else:
+                # Not enough events for reliable quantiles
+                for q in quantiles:
+                    day_results[f"sharpe_q{int(q*100)}"] = None
+
+            results_data.append(day_results)
+
+        # Convert results to DataFrame
+        results_df = pl.DataFrame(results_data)
+
+        # Plot the results
+        try:
+            if 'event_count' in results_df.columns and not results_df.is_empty():
+                results_pd = results_df.to_pandas().set_index('days_to_announcement')
+
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+
+                # Plot quantiles
+                # Colors from light to dark
+                colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(quantiles)))
+
+                # Need to ensure all required columns exist
+                expected_cols = [f"sharpe_q{int(q*100)}" for q in quantiles]
+                missing_cols = set(expected_cols) - set(results_pd.columns)
+                if missing_cols:
+                    print(f"Warning: Missing columns in results: {missing_cols}")
+                    # Filter expected_cols to only include available columns
+                    expected_cols = [col for col in expected_cols if col in results_pd.columns]
+
+                if expected_cols:  # If we have any valid columns
+                    for i, q in enumerate(quantiles):
+                        if f"sharpe_q{int(q*100)}" in results_pd.columns:
+                            ax1.plot(results_pd.index, results_pd[f"sharpe_q{int(q*100)}"], 
+                                    color=colors[i], linewidth=1.5, 
+                                    label=f"{int(q*100)}th percentile", alpha=0.7)
+
+                # Highlight median more strongly
+                median_col = "sharpe_q50"
+                if median_col in results_pd.columns:
+                    ax1.plot(results_pd.index, results_pd[median_col], 
+                           color='red', linewidth=2.5, 
+                           label=f"Median (50th)", alpha=0.9)
+
+                # Add reference lines
+                ax1.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+                ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Announcement Day')
+
+                # Add vertical lines at key periods
+                if analysis_window[0] <= -30 and analysis_window[1] >= 30:
+                    ax1.axvline(x=-30, color='green', linestyle=':', linewidth=1, label='Month Before')
+                    ax1.axvline(x=30, color='purple', linestyle=':', linewidth=1, label='Month After')
+
+                # Highlight the event window commonly used for volatility analysis
+                event_start, event_end = -2, 2  # Standard event window
+                if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
+                    ax1.axvspan(event_start, event_end, alpha=0.1, color='yellow', label='Event Window (-2 to +2)')
+
+                ax1.set_title(f'Sharpe Ratio Quantiles Around Earnings Announcements (Lookback: {lookback_window} days)')
+                ax1.set_xlabel('Days Relative to Announcement')
+                ax1.set_ylabel('Sharpe Ratio')
+                ax1.legend(loc='best')
+                ax1.grid(True, alpha=0.3)
+
+                # Event count plot
+                if 'event_count' in results_pd.columns:
+                    ax2.bar(results_pd.index, results_pd['event_count'], color='lightblue')
+                    ax2.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
+                    ax2.set_title('Number of Events With Valid Sharpe Ratio')
+                    ax2.set_xlabel('Days Relative to Announcement')
+                    ax2.set_ylabel('Event Count')
+                    ax2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_quantiles.png")
+                plt.savefig(plot_filename)
+                print(f"Saved Sharpe ratio quantiles plot to: {plot_filename}")
+                plt.close(fig)
+
+                # Create a heat map visualization of the quantiles
+                try:
+                    # Drop the event_count column and transpose
+                    heatmap_data = results_pd.drop(columns=['event_count']).T
+
+                    # Rename index to more readable percentile names
+                    new_index = [f"{int(q*100)}th" for q in quantiles]
+                    heatmap_data.index = new_index
+
+                    fig, ax = plt.subplots(figsize=(16, 8))
+
+                    sns.heatmap(heatmap_data, cmap='RdYlGn', center=0, 
+                               ax=ax, cbar_kws={'label': 'Sharpe Ratio'})
+
+                    ax.set_title('Sharpe Ratio Quantiles Heatmap')
+                    ax.set_xlabel('Days Relative to Announcement')
+                    ax.set_ylabel('Percentile')
+
+                    plt.tight_layout()
+                    heatmap_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles_heatmap.png")
+                    plt.savefig(heatmap_filename)
+                    print(f"Saved Sharpe ratio quantiles heatmap to: {heatmap_filename}")
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"Error creating heatmap: {e}")
+            else:
+                print("Warning: No valid data for plotting")
+
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+            traceback.print_exc()
+
+        # Save results to CSV
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_quantiles.csv")
+        try:
+            results_df.write_csv(csv_filename)
+            print(f"Saved Sharpe ratio quantiles data to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving quantiles data: {e}")
+
+        return results_df
