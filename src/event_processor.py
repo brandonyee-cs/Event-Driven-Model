@@ -16,7 +16,7 @@ import pandas as pd  # Required for plotting/CSV saving of some outputs
 # Import shared models (assuming models.py is accessible)
 try:
     # models.py now handles Polars input but uses NumPy internally
-    from models import TimeSeriesRidge, XGBoostDecileModel
+    from src.models import TimeSeriesRidge, XGBoostDecileModel
 except ImportError:
     print("Error: Could not import models from 'models'.")
     print("Ensure models.py is in the same directory or Python path.")
