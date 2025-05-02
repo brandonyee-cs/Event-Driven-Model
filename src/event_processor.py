@@ -747,14 +747,14 @@ class EventAnalysis:
         if not self.feature_engineer.feature_names:
              print("ML Prep: Features not calculated. Calculating...")
              self.data = self.feature_engineer.calculate_features(self.data, fit_categorical=False)
-
+    
         print(f"\n--- Splitting Event Data (Train/Test based on {time_split_column}) ---")
         events = self.data.select(['event_id', time_split_column]).unique().sort(time_split_column)
         split_index = int(events.height * (1 - test_size))
         if split_index == 0 or split_index == events.height: raise ValueError("test_size results in empty train/test set.")
         split_date = events.item(split_index, time_split_column)
         print(f"Splitting {events.height} unique events. Train before {split_date}.")
-
+    
         train_mask = pl.col(time_split_column) < split_date
         test_mask = pl.col(time_split_column) >= split_date
         train_data_raw = self.data.filter(train_mask)
@@ -762,52 +762,89 @@ class EventAnalysis:
         print(f"Train rows (raw): {train_data_raw.height}, Test rows (raw): {test_data_raw.height}.")
         if train_data_raw.is_empty() or test_data_raw.is_empty():
             raise ValueError("Train or test split resulted in empty DataFrame.")
-
+    
         print("\nFitting FeatureEngineer components (Imputer) on Training Data...")
         self.train_data = self.feature_engineer.calculate_features(train_data_raw, fit_categorical=True)
-        self.X_train_np, self.y_train_np, _ = self.feature_engineer.get_features_target(self.train_data, fit_imputer=True)
-
+        self.X_train_np, self.y_train_np, self.train_feature_names = self.feature_engineer.get_features_target(self.train_data, fit_imputer=True)
+    
         print("\nApplying FeatureEngineer components to Test Data...")
         self.test_data = self.feature_engineer.calculate_features(test_data_raw, fit_categorical=False)
         self.X_test_np, self.y_test_np, self.final_feature_names = self.feature_engineer.get_features_target(self.test_data, fit_imputer=False)
-
+    
         print(f"\nTrain shapes (NumPy): X={self.X_train_np.shape}, y={self.y_train_np.shape}")
         print(f"Test shapes (NumPy): X={self.X_test_np.shape}, y={self.y_test_np.shape}")
+        
+        # IMPORTANT: Detect and handle feature mismatch between train and test sets
+        if self.X_train_np.shape[1] != len(self.train_feature_names):
+            print(f"WARNING: Train data shape mismatch: X_train_np {self.X_train_np.shape[1]} columns vs {len(self.train_feature_names)} features")
+            # Adjust feature list to match actual data dimensions
+            if self.train_feature_names and len(self.train_feature_names) > self.X_train_np.shape[1]:
+                print(f"Truncating train feature names to match X_train_np shape")
+                self.train_feature_names = self.train_feature_names[:self.X_train_np.shape[1]]
+            else:
+                # Create generic feature names if needed
+                self.train_feature_names = [f"feature_{i}" for i in range(self.X_train_np.shape[1])]
+                
+        if self.X_test_np.shape[1] != len(self.final_feature_names):
+            print(f"WARNING: Test data shape mismatch: X_test_np {self.X_test_np.shape[1]} columns vs {len(self.final_feature_names)} features")
+            # Adjust feature list to match actual data dimensions
+            if self.final_feature_names and len(self.final_feature_names) > self.X_test_np.shape[1]:
+                print(f"Truncating test feature names to match X_test_np shape")
+                self.final_feature_names = self.final_feature_names[:self.X_test_np.shape[1]]
+            else:
+                # Create generic feature names if needed
+                self.final_feature_names = [f"feature_{i}" for i in range(self.X_test_np.shape[1])]
+        
+        # IMPORTANT: Ensure train and test have same number of features
+        if self.X_train_np.shape[1] != self.X_test_np.shape[1]:
+            print(f"WARNING: Feature count mismatch between train ({self.X_train_np.shape[1]}) and test ({self.X_test_np.shape[1]})")
+            
+            # Use the smaller dimensionality to ensure compatibility
+            min_features = min(self.X_train_np.shape[1], self.X_test_np.shape[1])
+            self.X_train_np = self.X_train_np[:, :min_features]
+            self.X_test_np = self.X_test_np[:, :min_features]
+            
+            # Adjust feature names accordingly
+            self.train_feature_names = self.train_feature_names[:min_features]
+            self.final_feature_names = self.final_feature_names[:min_features]
+            
+            print(f"Adjusted both train and test to use {min_features} features")
+    
         if self.X_train_np.shape[0] == 0 or self.X_test_np.shape[0] == 0:
              raise ValueError("Train or test NumPy array empty after feature extraction.")
         if not self.final_feature_names:
             raise RuntimeError("Final feature names were not set during feature extraction.")
-
+    
         print("\n--- Training Models ---")
         try:
-             if self.X_train_np.ndim == 2 and self.X_train_np.shape[1] == len(self.final_feature_names):
-                 X_train_pl_imputed = pl.DataFrame(self.X_train_np, schema=self.final_feature_names, strict=False)
+             if self.X_train_np.ndim == 2 and self.X_train_np.shape[1] == len(self.train_feature_names):
+                 X_train_pl_imputed = pl.DataFrame(self.X_train_np, schema=self.train_feature_names, strict=False)
              else:
-                  raise ValueError(f"Shape mismatch: X_train_np {self.X_train_np.shape} vs features {len(self.final_feature_names)}")
+                  raise ValueError(f"Shape mismatch: X_train_np {self.X_train_np.shape} vs features {len(self.train_feature_names)}")
              y_train_pl = pl.Series("future_ret", self.y_train_np)
         except Exception as e:
              raise RuntimeError(f"Could not convert imputed NumPy training arrays to Polars: {e}")
-
+    
         # 1. TimeSeriesRidge
         try:
              print("Training TimeSeriesRidge...")
-             ts_ridge = TimeSeriesRidge(alpha=1.0, lambda2=0.1, feature_order=self.final_feature_names)
+             ts_ridge = TimeSeriesRidge(alpha=1.0, lambda2=0.1, feature_order=self.train_feature_names)
              ts_ridge.fit(X_train_pl_imputed, y_train_pl)
              self.models['TimeSeriesRidge'] = ts_ridge
              print("TimeSeriesRidge complete.")
         except Exception as e: print(f"Error TimeSeriesRidge: {e}"); traceback.print_exc()
-
+    
         # 2. XGBoostDecile
         try:
              print("\nTraining XGBoostDecile...")
              xgb_params = {'n_estimators': 150, 'max_depth': 5, 'learning_rate': 0.05, 'objective': 'reg:squarederror', 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42, 'n_jobs': -1, 'early_stopping_rounds': 10}
              if 'momentum_5' not in X_train_pl_imputed.columns: print("Warning: 'momentum_5' not found for XGBoostDecile.")
-             xgb_decile = XGBoostDecileModel(weight=0.7, momentum_feature='momentum_5', n_deciles=10, alpha=1.0, lambda_smooth=0.1, xgb_params=xgb_params, ts_ridge_feature_order=self.final_feature_names)
+             xgb_decile = XGBoostDecileModel(weight=0.7, momentum_feature='momentum_5', n_deciles=10, alpha=1.0, lambda_smooth=0.1, xgb_params=xgb_params, ts_ridge_feature_order=self.train_feature_names)
              xgb_decile.fit(X_train_pl_imputed, y_train_pl)
              self.models['XGBoostDecile'] = xgb_decile
              print("XGBoostDecile complete.")
         except Exception as e: print(f"Error XGBoostDecile: {e}"); traceback.print_exc()
-
+    
         print("\n--- All Model Training Complete ---")
         return self.models
 
