@@ -10,7 +10,7 @@ import polars as pl
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path: sys.path.append(current_dir)
 try: 
-    from event_processor import EventDataLoader, EventFeatureEngineer, EventAnalysis
+    from src.event_processor import EventDataLoader, EventFeatureEngineer, EventAnalysis
     print("Successfully imported Event processor classes.")
 except ImportError as e: 
     print(f"Error importing from event_processor: {e}")
