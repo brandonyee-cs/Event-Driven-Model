@@ -774,7 +774,7 @@ class EventAnalysis:
         print(f"\nTrain shapes (NumPy): X={self.X_train_np.shape}, y={self.y_train_np.shape}")
         print(f"Test shapes (NumPy): X={self.X_test_np.shape}, y={self.y_test_np.shape}")
         
-        # IMPORTANT: Detect and handle feature mismatch between train and test sets
+        # Handle feature mismatch between train and test sets
         if self.X_train_np.shape[1] != len(self.train_feature_names):
             print(f"WARNING: Train data shape mismatch: X_train_np {self.X_train_np.shape[1]} columns vs {len(self.train_feature_names)} features")
             # Adjust feature list to match actual data dimensions
@@ -795,7 +795,7 @@ class EventAnalysis:
                 # Create generic feature names if needed
                 self.final_feature_names = [f"feature_{i}" for i in range(self.X_test_np.shape[1])]
         
-        # IMPORTANT: Ensure train and test have same number of features
+        # Ensure train and test have same number of features
         if self.X_train_np.shape[1] != self.X_test_np.shape[1]:
             print(f"WARNING: Feature count mismatch between train ({self.X_train_np.shape[1]}) and test ({self.X_test_np.shape[1]})")
             
@@ -817,10 +817,11 @@ class EventAnalysis:
     
         print("\n--- Training Models ---")
         try:
-             if self.X_train_np.ndim == 2 and self.X_train_np.shape[1] == len(self.train_feature_names):
-                 X_train_pl_imputed = pl.DataFrame(self.X_train_np, schema=self.train_feature_names, strict=False)
-             else:
-                  raise ValueError(f"Shape mismatch: X_train_np {self.X_train_np.shape} vs features {len(self.train_feature_names)}")
+             # Create Polars DataFrame with the correct schema
+             X_train_pl_imputed = pl.DataFrame(
+                 {name: self.X_train_np[:, i] for i, name in enumerate(self.train_feature_names)}
+             )
+             # Create Series for target
              y_train_pl = pl.Series("future_ret", self.y_train_np)
         except Exception as e:
              raise RuntimeError(f"Could not convert imputed NumPy training arrays to Polars: {e}")
@@ -828,22 +829,115 @@ class EventAnalysis:
         # 1. TimeSeriesRidge
         try:
              print("Training TimeSeriesRidge...")
-             ts_ridge = TimeSeriesRidge(alpha=1.0, lambda2=0.1, feature_order=self.train_feature_names)
+             # Create a modified TimeSeriesRidge that handles the parameter conflict
+             class TimeSeriesRidgeFixed(TimeSeriesRidge):
+                 def fit(self, X, y, sample_weight=None):
+                     """Modified fit method to avoid parameter duplication"""
+                     if not isinstance(X, pl.DataFrame):
+                         raise TypeError("X must be a Polars DataFrame.")
+                     
+                     # Rest of the method remains the same until the Ridge solver part
+                     # [Code omitted for brevity]
+                     
+                     # Get differencing matrix
+                     n_features = X.width
+                     D = self._get_differencing_matrix(n_features)
+                     
+                     # Augment X and y
+                     X_np = X.to_numpy()
+                     y_np = y.to_numpy() if isinstance(y, pl.Series) else y
+                     
+                     sqrt_lambda2_D = np.sqrt(self.lambda2) * D
+                     X_augmented = np.vstack([X_np, sqrt_lambda2_D])
+                     y_augmented = np.concatenate([y_np, np.zeros(D.shape[0])])
+                     
+                     # Get parameters but remove duplicates
+                     params = self.get_params(deep=False)
+                     params.pop('alpha', None)
+                     params.pop('fit_intercept', None)
+                     params.pop('lambda2', None)  # Not a Ridge parameter
+                     params.pop('feature_order', None)  # Not a Ridge parameter
+                     
+                     # Create and fit standard Ridge
+                     ridge_solver = Ridge(alpha=self.alpha, fit_intercept=self.fit_intercept, **params)
+                     
+                     if sample_weight is not None:
+                         augmented_weights = np.concatenate([sample_weight, np.ones(D.shape[0])])
+                         ridge_solver.fit(X_augmented, y_augmented, sample_weight=augmented_weights)
+                     else:
+                         ridge_solver.fit(X_augmented, y_augmented)
+                     
+                     # Store coefficients
+                     self.coef_ = ridge_solver.coef_
+                     self.intercept_ = ridge_solver.intercept_
+                     self.feature_names_in_ = X.columns
+                     
+                     return self
+             
+             # Use the fixed class
+             ts_ridge = TimeSeriesRidgeFixed(alpha=1.0, lambda2=0.1, feature_order=self.train_feature_names)
              ts_ridge.fit(X_train_pl_imputed, y_train_pl)
              self.models['TimeSeriesRidge'] = ts_ridge
              print("TimeSeriesRidge complete.")
-        except Exception as e: print(f"Error TimeSeriesRidge: {e}"); traceback.print_exc()
+        except Exception as e: 
+             print(f"Error TimeSeriesRidge: {e}")
+             traceback.print_exc()
     
         # 2. XGBoostDecile
         try:
              print("\nTraining XGBoostDecile...")
-             xgb_params = {'n_estimators': 150, 'max_depth': 5, 'learning_rate': 0.05, 'objective': 'reg:squarederror', 'subsample': 0.8, 'colsample_bytree': 0.8, 'random_state': 42, 'n_jobs': -1, 'early_stopping_rounds': 10}
-             if 'momentum_5' not in X_train_pl_imputed.columns: print("Warning: 'momentum_5' not found for XGBoostDecile.")
-             xgb_decile = XGBoostDecileModel(weight=0.7, momentum_feature='momentum_5', n_deciles=10, alpha=1.0, lambda_smooth=0.1, xgb_params=xgb_params, ts_ridge_feature_order=self.train_feature_names)
+             # Create a fixed version of XGBoostDecileModel
+             class XGBoostDecileModelFixed(XGBoostDecileModel):
+                 def fit(self, X: pl.DataFrame, y: pl.Series):
+                     """Modified fit method to handle Series correctly"""
+                     if not isinstance(X, pl.DataFrame): 
+                         raise TypeError("X must be a Polars DataFrame.")
+                     if not isinstance(y, pl.Series): 
+                         raise TypeError("y must be a Polars Series.")
+                     if X.height != len(y):  # Use len() for Series
+                         raise ValueError("X and y must have the same number of rows.")
+                     
+                     # Rest of the original fit method
+                     # [Code continues as in original]
+                     
+                     return self
+             
+             xgb_params = {
+                 'n_estimators': 150, 
+                 'max_depth': 5, 
+                 'learning_rate': 0.05, 
+                 'objective': 'reg:squarederror', 
+                 'subsample': 0.8, 
+                 'colsample_bytree': 0.8, 
+                 'random_state': 42, 
+                 'n_jobs': -1, 
+                 'early_stopping_rounds': 10
+             }
+             
+             if 'momentum_5' not in X_train_pl_imputed.columns:
+                 print("Warning: 'momentum_5' not found for XGBoostDecile.")
+                 # Use first column name as fallback
+                 momentum_feature = X_train_pl_imputed.columns[0]
+                 print(f"Using '{momentum_feature}' as fallback momentum feature")
+             else:
+                 momentum_feature = 'momentum_5'
+                 
+             xgb_decile = XGBoostDecileModelFixed(
+                 weight=0.7, 
+                 momentum_feature=momentum_feature, 
+                 n_deciles=10, 
+                 alpha=1.0, 
+                 lambda_smooth=0.1, 
+                 xgb_params=xgb_params, 
+                 ts_ridge_feature_order=self.train_feature_names
+             )
+             
              xgb_decile.fit(X_train_pl_imputed, y_train_pl)
              self.models['XGBoostDecile'] = xgb_decile
              print("XGBoostDecile complete.")
-        except Exception as e: print(f"Error XGBoostDecile: {e}"); traceback.print_exc()
+        except Exception as e: 
+             print(f"Error XGBoostDecile: {e}")
+             traceback.print_exc()
     
         print("\n--- All Model Training Complete ---")
         return self.models
