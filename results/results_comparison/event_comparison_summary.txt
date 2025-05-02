@@ -1,0 +1,39 @@
+Event Study Comparison: FDA Approvals vs Earnings Announcements
+===========================================================
+
+Overview
+--------
+This document summarizes the comparison between FDA approval events and
+earnings announcement events based on their stock price effects.
+
+Analysis Parameters
+-------------------
+Window Days: 60
+Volatility Window: 5
+Volatility Event Window: -2 to 2
+Sharpe Window: 5
+Sharpe Analysis Window: -60 to 60
+
+Key Observations
+--------------
+Volatility Impact:
+- FDA Approvals: Mean Volatility Ratio = 1.30 (Events: 884)
+- Earnings Announcements: Mean Volatility Ratio = 1.47 (Events: 239637)
+
+Sharpe Ratio During Event Window:
+- FDA Approvals: Mean = 0.82
+- Earnings Announcements: Mean = 0.19
+
+Generated Visualizations
+-----------------------
+- volatility_comparison.png: Compares volatility patterns
+- sharpe_ratio_comparison.png: Compares Sharpe ratio trends
+- sharpe_ratio_heatmap.png: Heatmap visualization of Sharpe ratios
+
+Conclusion
+----------
+The comparison shows different market reaction patterns between
+FDA approval events and earnings announcement events. While earnings
+announcements typically show more immediate but shorter-term effects,
+FDA approvals often demonstrate more gradual but potentially longer-lasting
+impacts on stock prices and volatility.
