@@ -55,7 +55,7 @@ class EventDataLoader:
         self.event_date_col = event_date_col
         self.ticker_col = ticker_col
         # Add chunk size parameter for event processing
-        self.event_chunk_size = 5000  # Adjust based on memory capacity
+        self.event_chunk_size = 89500  # Adjust based on memory capacity
 
     def _load_single_stock_parquet(self, stock_path: str) -> Optional[pl.DataFrame]:
         """Load and process a single stock data PARQUET file using Polars."""
