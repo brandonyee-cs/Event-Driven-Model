@@ -164,7 +164,7 @@ def run_fda_analysis():
         if RUN_ML:
             print("\n--- Running FDA ML Analysis ---")
             # Train models
-            analyzer.train_models(test_size=ML_TEST_SPLIT, time_split_column=FDA_EVENT_DATE_COL)
+            analyzer.train_models(test_size=ML_TEST_SPLIT, time_split_column="Event Date")
             
             # Evaluate models
             results = analyzer.evaluate_models()
