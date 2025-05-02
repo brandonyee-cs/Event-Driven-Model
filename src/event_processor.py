@@ -512,7 +512,7 @@ class EventFeatureEngineer:
         shifted_price_log = pl.col(price_col).shift(1).over('event_id')
         feature_expressions.append(
              pl.when(shifted_price_log.is_not_null() & (shifted_price_log > 0) & pl.col(price_col).is_not_null() & (pl.col(price_col) > 0) )
-             .then(pl.ln(pl.col(price_col) / shifted_price_log))
+             .then(pl.log(pl.col(price_col) / shifted_price_log))
              .otherwise(None)
              .alias('log_ret')
         )
