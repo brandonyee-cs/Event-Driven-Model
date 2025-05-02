@@ -73,7 +73,7 @@ SHARPE_LOOKBACK = 10
     
 # Machine learning parameters
 ML_WINDOW = 3
-RUN_ML = True
+RUN_ML = False
 ML_TEST_SPLIT = 0.2
 
 def run_fda_analysis():
