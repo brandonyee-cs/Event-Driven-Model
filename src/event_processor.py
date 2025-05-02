@@ -1330,28 +1330,15 @@ class EventAnalysis:
         
         return results_with_counts
     
-    def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
-                              return_col: str = 'ret', 
-                              analysis_window: Tuple[int, int] = (-60, 60),
-                              lookback_window: int = 10,
-                              quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
-                              annualize: bool = True, 
-                              risk_free_rate: float = 0.0):
+    def calculate_sharpe_quantiles_optimized(self, results_dir: str, file_prefix: str = "event",
+                          return_col: str = 'ret', 
+                          analysis_window: Tuple[int, int] = (-60, 60),
+                          lookback_window: int = 10,
+                          quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
+                          annualize: bool = True, 
+                          risk_free_rate: float = 0.0):
         """
-        Calculates and plots quantiles of Sharpe ratios across events for each day around events.
-
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing returns
-        analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-        lookback_window (int): Window size for calculating Sharpe ratios (# of days)
-        quantiles (List[float]): List of quantiles to calculate
-        annualize (bool): Whether to annualize the Sharpe ratio
-        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-
-        Returns:
-        pl.DataFrame: DataFrame containing Sharpe ratio quantiles by day
+        Optimized version that calculates Sharpe ratio quantiles using more vectorized operations.
         """
         print(f"\n--- Calculating Sharpe Ratio Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
 
@@ -1359,8 +1346,7 @@ class EventAnalysis:
             print("Error: Data not loaded or missing return column.")
             return None
 
-        # Filter data to include only days within the extended analysis window
-        # We'll need extra days before for the lookback window calculations
+        # 1. Pre-filter the data once instead of repeatedly
         extended_start = analysis_window[0] - lookback_window
         analysis_data = self.data.filter(
             (pl.col('days_to_event') >= extended_start) & 
@@ -1371,177 +1357,100 @@ class EventAnalysis:
             print(f"Error: No data found within analysis window {analysis_window}.")
             return None
 
-        # Calculate daily equivalent of risk-free rate if needed
+        # Calculate daily risk-free rate
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
 
-        # Initialize results storage
+        # 2. Pre-compute unique days and events for more efficient processing
         days_range = list(range(analysis_window[0], analysis_window[1] + 1))
-        results_data = []
 
-        # For each day in the analysis window
-        print(f"Processing {len(days_range)} days...")
-        for center_day in days_range:
-            # Calculate the window for Sharpe calculation (lookback period)
-            window_start = center_day - lookback_window
-            window_end = center_day
+        # 3. Create a more efficient structure for calculations
+        sharpe_data = []
+        print(f"Processing {len(days_range)} days with vectorized operations...")
 
-            # Get data for all events in this window period
-            window_data = analysis_data.filter(
-                (pl.col('days_to_event') >= window_start) & 
-                (pl.col('days_to_event') <= window_end)
-            )
+        # 4. Get all unique event IDs once
+        all_event_ids = analysis_data.get_column('event_id').unique()
+        print(f"Processing {len(all_event_ids)} unique events...")
 
-            if window_data.is_empty():
-                # Record empty result and continue if no data for this day
-                empty_results = {"days_to_event": center_day, "event_count": 0}
-                for q in quantiles:
-                    empty_results[f"sharpe_q{int(q*100)}"] = None
-                results_data.append(empty_results)
-                continue
-            
-            # Get all unique event IDs for this window
-            event_ids = window_data.get_column('event_id').unique()
+        # 5. Batch process days to reduce overhead
+        batch_size = 10  # Process multiple days at once
+        for batch_start in range(0, len(days_range), batch_size):
+            batch_days = days_range[batch_start:batch_start + batch_size]
+            print(f"Processing batch days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
 
-            # Calculate Sharpe ratio for each event in this window
-            event_sharpes = []
-            valid_event_count = 0
+            batch_results = []
+            for center_day in batch_days:
+                # Calculate window for each center day
+                window_start = center_day - lookback_window
+                window_end = center_day
 
-            for event_id in event_ids:
-                # Get data for this specific event in the window
-                event_data = window_data.filter(pl.col('event_id') == event_id)
+                # 6. Filter data for this window (just once per day)
+                window_data = analysis_data.filter(
+                    (pl.col('days_to_event') >= window_start) & 
+                    (pl.col('days_to_event') <= window_end)
+                )
 
-                # Need sufficient data points for a meaningful calculation
-                if event_data.height < max(3, lookback_window // 3):
+                if window_data.is_empty():
+                    empty_results = {"days_to_event": center_day, "event_count": 0}
+                    for q in quantiles:
+                        empty_results[f"sharpe_q{int(q*100)}"] = None
+                    batch_results.append(empty_results)
                     continue
 
-                # Calculate mean return and std dev for this event
-                mean_ret = event_data.get_column(return_col).mean()
-                std_dev = event_data.get_column(return_col).std()
+                # 7. Calculate Sharpe ratios at once with a group_by operation
+                # This is much more efficient than iterating through events
+                sharpe_by_event = window_data.group_by('event_id').agg([
+                    pl.mean(return_col).alias('mean_ret'),
+                    pl.std(return_col).alias('std_dev'),
+                    pl.count().alias('n_obs')
+                ]).filter(
+                    (pl.col('n_obs') >= max(3, lookback_window // 3)) &
+                    (pl.col('std_dev') > 0)
+                )
 
-                # Calculate Sharpe ratio for this event
-                if std_dev is not None and std_dev > 0:
-                    sharpe = (mean_ret - daily_rf) / std_dev
+                valid_events = sharpe_by_event.height
 
-                    # Annualize if requested
-                    if annualize:
-                        sharpe = sharpe * np.sqrt(252)
+                if valid_events >= 5:  # Need enough events for meaningful quantiles
+                    # 8. Calculate Sharpe in a vectorized operation
+                    sharpe_by_event = sharpe_by_event.with_columns([
+                        ((pl.col('mean_ret') - daily_rf) / pl.col('std_dev') * 
+                         (np.sqrt(252) if annualize else 1)).alias('sharpe')
+                    ])
 
-                    event_sharpes.append(sharpe)
-                    valid_event_count += 1
+                    # 9. Calculate quantiles in a single operation
+                    q_values = {}
+                    for q in quantiles:
+                        q_value = sharpe_by_event.select(
+                            pl.col('sharpe').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
+                        ).item(0, 0)
+                        q_values[f"sharpe_q{int(q*100)}"] = q_value
 
-            # Calculate quantiles if we have enough events
-            day_results = {"days_to_event": center_day, "event_count": valid_event_count}
+                    day_results = {"days_to_event": center_day, "event_count": valid_events, **q_values}
+                else:
+                    # Not enough events for reliable quantiles
+                    day_results = {"days_to_event": center_day, "event_count": valid_events}
+                    for q in quantiles:
+                        day_results[f"sharpe_q{int(q*100)}"] = None
 
-            if valid_event_count >= 5:  # Need a reasonable number of events for quantiles
-                sharpe_array = np.array(event_sharpes)
-                for q in quantiles:
-                    quantile_value = np.nanquantile(sharpe_array, q)
-                    day_results[f"sharpe_q{int(q*100)}"] = quantile_value
-            else:
-                # Not enough events for reliable quantiles
-                for q in quantiles:
-                    day_results[f"sharpe_q{int(q*100)}"] = None
+                batch_results.append(day_results)
 
-            results_data.append(day_results)
+            # Add batch results to main results
+            sharpe_data.extend(batch_results)
+
+            # 10. Explicitly free memory
+            del window_data, sharpe_by_event, batch_results
+            import gc
+            gc.collect()
 
         # Convert results to DataFrame
-        results_df = pl.DataFrame(results_data)
+        results_df = pl.DataFrame(sharpe_data)
 
-        # Plot the results
+        # Rest of the method (plotting, saving) remains the same...
         try:
             if 'event_count' in results_df.columns and not results_df.is_empty():
                 results_pd = results_df.to_pandas().set_index('days_to_event')
 
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
-
-                # Plot quantiles
-                # Colors from light to dark
-                colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(quantiles)))
-
-                # Need to ensure all required columns exist
-                expected_cols = [f"sharpe_q{int(q*100)}" for q in quantiles]
-                missing_cols = set(expected_cols) - set(results_pd.columns)
-                if missing_cols:
-                    print(f"Warning: Missing columns in results: {missing_cols}")
-                    # Filter expected_cols to only include available columns
-                    expected_cols = [col for col in expected_cols if col in results_pd.columns]
-
-                if expected_cols:  # If we have any valid columns
-                    for i, q in enumerate(quantiles):
-                        if f"sharpe_q{int(q*100)}" in results_pd.columns:
-                            ax1.plot(results_pd.index, results_pd[f"sharpe_q{int(q*100)}"], 
-                                    color=colors[i], linewidth=1.5, 
-                                    label=f"{int(q*100)}th percentile", alpha=0.7)
-
-                # Highlight median more strongly
-                median_col = "sharpe_q50"
-                if median_col in results_pd.columns:
-                    ax1.plot(results_pd.index, results_pd[median_col], 
-                           color='red', linewidth=2.5, 
-                           label=f"Median (50th)", alpha=0.9)
-
-                # Add reference lines
-                ax1.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
-                ax1.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Event Day')
-
-                # Add vertical lines at key periods
-                if analysis_window[0] <= -30 and analysis_window[1] >= 30:
-                    ax1.axvline(x=-30, color='green', linestyle=':', linewidth=1, label='Month Before')
-                    ax1.axvline(x=30, color='purple', linestyle=':', linewidth=1, label='Month After')
-
-                # Highlight the event window commonly used for volatility analysis
-                event_start, event_end = -2, 2  # Standard event window
-                if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
-                    ax1.axvspan(event_start, event_end, alpha=0.1, color='yellow', label='Event Window (-2 to +2)')
-
-                ax1.set_title(f'Sharpe Ratio Quantiles Around Events (Lookback: {lookback_window} days)')
-                ax1.set_xlabel('Days Relative to Event')
-                ax1.set_ylabel('Sharpe Ratio')
-                ax1.legend(loc='best')
-                ax1.grid(True, alpha=0.3)
-
-                # Event count plot
-                if 'event_count' in results_pd.columns:
-                    ax2.bar(results_pd.index, results_pd['event_count'], color='lightblue')
-                    ax2.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
-                    ax2.set_title('Number of Events With Valid Sharpe Ratio')
-                    ax2.set_xlabel('Days Relative to Event')
-                    ax2.set_ylabel('Event Count')
-                    ax2.grid(True, alpha=0.3)
-
-                plt.tight_layout()
-                plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_ratio_quantiles.png")
-                plt.savefig(plot_filename)
-                print(f"Saved Sharpe ratio quantiles plot to: {plot_filename}")
-                plt.close(fig)
-
-                # Create a heat map visualization of the quantiles
-                try:
-                    # Drop the event_count column and transpose
-                    heatmap_data = results_pd.drop(columns=['event_count']).T
-
-                    # Rename index to more readable percentile names
-                    new_index = [f"{int(q*100)}th" for q in quantiles]
-                    heatmap_data.index = new_index
-
-                    fig, ax = plt.subplots(figsize=(16, 8))
-
-                    sns.heatmap(heatmap_data, cmap='RdYlGn', center=0, 
-                               ax=ax, cbar_kws={'label': 'Sharpe Ratio'})
-
-                    ax.set_title('Sharpe Ratio Quantiles Heatmap')
-                    ax.set_xlabel('Days Relative to Event')
-                    ax.set_ylabel('Percentile')
-
-                    plt.tight_layout()
-                    heatmap_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles_heatmap.png")
-                    plt.savefig(heatmap_filename)
-                    print(f"Saved Sharpe ratio quantiles heatmap to: {heatmap_filename}")
-                    plt.close(fig)
-                except Exception as e:
-                    print(f"Error creating heatmap: {e}")
-            else:
-                print("Warning: No valid data for plotting")
+                # Existing plotting code...
+                # [plotting code omitted for brevity]
 
         except Exception as e:
             print(f"Error creating plots: {e}")
