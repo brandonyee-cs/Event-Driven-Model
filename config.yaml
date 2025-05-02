@@ -1,0 +1,65 @@
+# Event Analysis Configuration
+# This file contains shared configuration for event analysis scripts
+
+# Path configuration
+paths:
+  fda_event_file: "/home/d87016661/fda_ticker_list_2000_to_2024.csv"
+  earnings_event_file: "/home/d87016661/detail_history_actuals.csv"
+  stock_files:
+    - "/home/d87016661/crsp_dsf-2000-2001.parquet"
+    - "/home/d87016661/crsp_dsf-2002-2003.parquet"
+    - "/home/d87016661/crsp_dsf-2004-2005.parquet"
+    - "/home/d87016661/crsp_dsf-2006-2007.parquet"
+    - "/home/d87016661/crsp_dsf-2008-2009.parquet"
+    - "/home/d87016661/crsp_dsf-2010-2011.parquet"
+    - "/home/d87016661/crsp_dsf-2016-2017.parquet"
+    - "/home/d87016661/crsp_dsf-2018-2019.parquet"
+    - "/home/d87016661/crsp_dsf-2020-2021.parquet"
+    - "/home/d87016661/crsp_dsf-2022-2023.parquet"
+    - "/home/d87016661/crsp_dsf-2024-2025.parquet"
+  results:
+    fda: "results_fda"
+    earnings: "results_earnings"
+    comparison: "results_comparison"
+
+# Event-specific metadata (only differences between events)
+events:
+  fda:
+    event_date_col: "Approval Date"
+    ticker_col: "ticker"
+    file_prefix: "fda"
+  earnings:
+    event_date_col: "ANNDATS"
+    ticker_col: "ticker"
+    file_prefix: "earnings"
+
+# Shared analysis parameters for all event types
+analysis:
+  # Window settings
+  window_days: 60
+  
+  # Volatility analysis
+  volatility:
+    window: 5
+    pre_days: 60
+    post_days: 60
+    baseline_window:
+      start: -60
+      end: -11
+    event_window:
+      start: -2
+      end: 2
+      
+  # Sharpe ratio analysis
+  sharpe:
+    window: 5
+    analysis_window:
+      start: -60
+      end: 60
+    lookback: 10
+    
+  # Machine learning parameters
+  ml:
+    window: 3
+    run: true
+    test_split: 0.2

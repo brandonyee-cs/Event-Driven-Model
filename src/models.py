@@ -4,6 +4,8 @@ from sklearn.linear_model import Ridge
 import xgboost as xgb
 import warnings
 
+pl.Config.set_engine_affinity(engine="streaming")
+
 class TimeSeriesRidge(Ridge):
     """
     Ridge regression with temporal smoothing penalty.
