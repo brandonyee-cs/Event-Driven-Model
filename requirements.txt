@@ -1,17 +1,15 @@
 # Core data manipulation and analysis
-pandas==1.5.3
-numpy==1.24.3
-polars>=0.20.0,<0.21.0
+pandas>=1.5.3
+numpy>=1.24.3
+polars>=1.0.0,<2.0.0   # Latest Polars 1.x release
 
 # Visualization
-matplotlib==3.7.1
-seaborn==0.12.2
+matplotlib>=3.7.1
+seaborn>=0.12.2
 
-# Machine learning - using specific versions to get binary packages
-scikit-learn==1.2.2  # Using a stable version with pre-built wheels
-xgboost==1.7.6
+# Machine learning - using specific versions to ensure compatibility
+scikit-learn>=1.2.2,<1.4.0  # Using an upper bound for stability
+xgboost>=1.7.6,<2.0.0
 
 # Data reading/processing
-pyarrow==12.0.0  # For Parquet file support
-
-# requirements.txt
+pyarrow>=12.0.0  # For Parquet file support

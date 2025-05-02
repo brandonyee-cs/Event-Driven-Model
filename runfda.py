@@ -38,20 +38,10 @@ STOCK_FILES = [
 
 # FDA event specific parameters
 FDA_EVENT_FILE = "/home/d87016661/fda_ticker_list_2000_to_2024.csv"
-FDA_RESULTS_DIR = "results_fda"
+FDA_RESULTS_DIR = "results/results_fda/"
 FDA_FILE_PREFIX = "fda"
 FDA_EVENT_DATE_COL = "Approval Date"
 FDA_TICKER_COL = "ticker"
-
-# Earnings event specific parameters
-EARNINGS_EVENT_FILE = "/home/d87016661/detail_history_actuals.csv"
-EARNINGS_RESULTS_DIR = "results_earnings"
-EARNINGS_FILE_PREFIX = "earnings"
-EARNINGS_EVENT_DATE_COL = "ANNDATS"
-EARNINGS_TICKER_COL = "ticker"
-
-# Comparison directory
-COMPARISON_DIR = "results_comparison"
 
 # Shared analysis parameters
 WINDOW_DAYS = 60
