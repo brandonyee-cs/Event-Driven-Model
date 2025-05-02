@@ -1330,7 +1330,7 @@ class EventAnalysis:
         
         return results_with_counts
     
-    def calculate_sharpe_quantiles_optimized(self, results_dir: str, file_prefix: str = "event",
+    def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
                           return_col: str = 'ret', 
                           analysis_window: Tuple[int, int] = (-60, 60),
                           lookback_window: int = 10,
