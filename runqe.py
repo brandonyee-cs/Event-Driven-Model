@@ -157,7 +157,7 @@ def run_earnings_analysis():
         if RUN_ML:
             print("\n--- Running Earnings ML Analysis ---")
             # Train models
-            analyzer.train_models(test_size=ML_TEST_SPLIT, time_split_column=EARNINGS_EVENT_DATE_COL)
+            analyzer.train_models(test_size=ML_TEST_SPLIT, time_split_column="Event Date")
             
             # Evaluate models
             results = analyzer.evaluate_models()
