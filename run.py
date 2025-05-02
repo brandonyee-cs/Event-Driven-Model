@@ -642,18 +642,18 @@ def main():
     earnings_success = run_earnings_analysis()
     
     # Run comparison if both analyses succeeded
-    if fda_success and earnings_success:
-        comparison_success = run_comparison()
-        if comparison_success:
-            print("\n=== All analyses completed successfully ===")
-        else:
-            print("\n=== Comparison analysis failed, but FDA and earnings analyses completed ===")
-    elif fda_success:
-        print("\n=== Only FDA analysis completed successfully ===")
-    elif earnings_success:
-        print("\n=== Only earnings analysis completed successfully ===")
-    else:
-        print("\n=== Both analyses failed ===")
+    #if fda_success and earnings_success:
+    #    comparison_success = run_comparison()
+    #    if comparison_success:
+    #        print("\n=== All analyses completed successfully ===")
+    #    else:
+    #        print("\n=== Comparison analysis failed, but FDA and earnings analyses completed ===")
+    #elif fda_success:
+    #    print("\n=== Only FDA analysis completed successfully ===")
+    #elif earnings_success:
+    #    print("\n=== Only earnings analysis completed successfully ===")
+    #else:
+    #    print("\n=== Both analyses failed ===")
 
 if __name__ == "__main__":
     main()
