@@ -166,7 +166,6 @@ def run_fda_analysis():
             file_prefix=FDA_FILE_PREFIX,
             price_col='prc',
             window_days=WINDOW_DAYS,
-            quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
         )
         
         # --- Run ML Analysis if requested ---
@@ -307,7 +306,6 @@ def run_earnings_analysis():
             file_prefix=EARNINGS_FILE_PREFIX,
             price_col='prc',
             window_days=WINDOW_DAYS,
-            quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
         )
         
         # --- Run ML Analysis if requested ---
