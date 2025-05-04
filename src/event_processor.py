@@ -1597,10 +1597,10 @@ class EventAnalysis:
 
         return results_df
 
-    def analyze_price_changes(self, results_dir: str, file_prefix: str = "event", 
+    def analyze_mean_returns(self, results_dir: str, file_prefix: str = "event", 
                         price_col: str = 'prc', window_days: int = 60):
         """
-        Analyzes normalized percentage price changes around event dates within a specified window.
+        Analyzes mean returns around event dates within a specified window.
         
         Parameters:
         results_dir (str): Directory to save results
@@ -1609,15 +1609,23 @@ class EventAnalysis:
         window_days (int): Days before/after event to analyze
         
         Returns:
-        pl.DataFrame: DataFrame containing normalized price change results
+        pl.DataFrame: DataFrame containing mean return results
         """
-        print(f"\n--- Analyzing Normalized Price Changes (Window: ±{window_days} days) ---")
+        print(f"\n--- Analyzing Mean Returns (Window: ±{window_days} days) ---")
         if self.data is None or price_col not in self.data.columns:
             print(f"Error: Data not loaded or missing price column '{price_col}'.")
             return None
     
+        # Calculate daily returns
+        data_with_returns = self.data.with_columns(
+            pl.when(pl.col(price_col).shift(1).is_not_null() & (pl.col(price_col).shift(1) != 0))
+            .then((pl.col(price_col) / pl.col(price_col).shift(1) - 1) * 100)
+            .otherwise(None)
+            .alias('daily_return')
+        )
+    
         # Filter to relevant window
-        window_data = self.data.filter(
+        window_data = data_with_returns.filter(
             (pl.col('days_to_event') >= -window_days) & 
             (pl.col('days_to_event') <= window_days)
         )
@@ -1626,36 +1634,10 @@ class EventAnalysis:
             print(f"Error: No data found within ±{window_days} day window.")
             return None
     
-        # Get baseline (event day) prices for each event
-        event_day_prices = window_data.filter(pl.col('days_to_event') == 0).select(
-            ['event_id', pl.col(price_col).alias('event_day_price')]
-        )
-    
-        # Join event day prices and calculate normalized price change
-        analysis_data = window_data.join(
-            event_day_prices, on='event_id', how='left'
-        ).with_columns(
-            pl.when(pl.col('event_day_price').is_not_null() & (pl.col('event_day_price') != 0))
-            .then((pl.col(price_col) / pl.col('event_day_price') - 1) * 100)
-            .otherwise(None)
-            .alias('pct_change_from_event')
-        )
-    
-        # Normalize price changes by event-level standard deviation
-        event_stats = analysis_data.group_by('event_id').agg(
-            pl.col('pct_change_from_event').std().alias('pct_change_std')
-        )
-        analysis_data = analysis_data.join(event_stats, on='event_id').with_columns(
-            pl.when(pl.col('pct_change_std') > 0)
-            .then(pl.col('pct_change_from_event') / pl.col('pct_change_std'))
-            .otherwise(0)
-            .alias('norm_pct_change')
-        )
-    
-        # Aggregate by days_to_event
-        results = analysis_data.group_by('days_to_event').agg([
-            pl.mean('norm_pct_change').alias('avg_norm_pct_change'),
-            pl.count('norm_pct_change').alias('count')
+        # Aggregate mean returns by days_to_event
+        results = window_data.group_by('days_to_event').agg([
+            pl.mean('daily_return').alias('avg_daily_return'),
+            pl.count('daily_return').alias('count')
         ]).sort('days_to_event')
     
         if results.is_empty():
@@ -1667,23 +1649,23 @@ class EventAnalysis:
             results_pd = results.to_pandas().set_index('days_to_event')
     
             fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(results_pd.index, results_pd['avg_norm_pct_change'], 'b-', linewidth=2)
+            ax.plot(results_pd.index, results_pd['avg_daily_return'], 'b-', linewidth=2)
             ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
             ax.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Event Day')
-            ax.set_title(f'Average Normalized Price Change Around Event (± {window_days} Days)')
+            ax.set_title(f'Average Daily Return Around Event (± {window_days} Days)')
             ax.set_xlabel('Days Relative to Event')
-            ax.set_ylabel('Average Normalized Price Change (Std Units)')
+            ax.set_ylabel('Average Daily Return (%)')
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
     
-            plot_filename = os.path.join(results_dir, f"{file_prefix}_norm_price_change.png")
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_returns.png")
             plt.savefig(plot_filename)
-            print(f"Saved normalized price change plot to: {plot_filename}")
+            print(f"Saved mean returns plot to: {plot_filename}")
             plt.close(fig)
     
-            csv_filename = os.path.join(results_dir, f"{file_prefix}_norm_price_change.csv")
+            csv_filename = os.path.join(results_dir, f"{file_prefix}_mean_returns.csv")
             results.write_csv(csv_filename)
-            print(f"Saved normalized price change data to: {csv_filename}")
+            print(f"Saved mean returns data to: {csv_filename}")
     
         except Exception as e:
             print(f"Error creating plots: {e}")
