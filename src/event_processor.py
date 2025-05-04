@@ -1598,9 +1598,9 @@ class EventAnalysis:
         return results_df
 
     def analyze_price_changes(self, results_dir: str, file_prefix: str = "event", 
-                         price_col: str = 'prc', window_days: int = 60):
+                        price_col: str = 'prc', window_days: int = 60):
         """
-        Analyzes average percentage price changes around event dates within a specified window.
+        Analyzes normalized percentage price changes around event dates within a specified window.
         
         Parameters:
         results_dir (str): Directory to save results
@@ -1609,86 +1609,84 @@ class EventAnalysis:
         window_days (int): Days before/after event to analyze
         
         Returns:
-        pl.DataFrame: DataFrame containing average price change results
+        pl.DataFrame: DataFrame containing normalized price change results
         """
-        print(f"\n--- Analyzing Average Price Changes (Window: ±{window_days} days) ---")
+        print(f"\n--- Analyzing Normalized Price Changes (Window: ±{window_days} days) ---")
         if self.data is None or price_col not in self.data.columns:
             print(f"Error: Data not loaded or missing price column '{price_col}'.")
             return None
-
+    
         # Filter to relevant window
         window_data = self.data.filter(
             (pl.col('days_to_event') >= -window_days) & 
             (pl.col('days_to_event') <= window_days)
         )
-
+    
         if window_data.is_empty():
             print(f"Error: No data found within ±{window_days} day window.")
             return None
-
+    
         # Get baseline (event day) prices for each event
         event_day_prices = window_data.filter(pl.col('days_to_event') == 0).select(
             ['event_id', pl.col(price_col).alias('event_day_price')]
         )
-
-        # Join event day prices to all data points
+    
+        # Join event day prices and calculate normalized price change
         analysis_data = window_data.join(
             event_day_prices, on='event_id', how='left'
-        )
-
-        # Calculate percentage price change from event day
-        analysis_data = analysis_data.with_columns(
+        ).with_columns(
             pl.when(pl.col('event_day_price').is_not_null() & (pl.col('event_day_price') != 0))
             .then((pl.col(price_col) / pl.col('event_day_price') - 1) * 100)
             .otherwise(None)
             .alias('pct_change_from_event')
         )
-
-        # Aggregate by days_to_event, calculating only mean and count
+    
+        # Normalize price changes by event-level standard deviation
+        event_stats = analysis_data.group_by('event_id').agg(
+            pl.col('pct_change_from_event').std().alias('pct_change_std')
+        )
+        analysis_data = analysis_data.join(event_stats, on='event_id').with_columns(
+            pl.when(pl.col('pct_change_std') > 0)
+            .then(pl.col('pct_change_from_event') / pl.col('pct_change_std'))
+            .otherwise(0)
+            .alias('norm_pct_change')
+        )
+    
+        # Aggregate by days_to_event
         results = analysis_data.group_by('days_to_event').agg([
-            pl.mean('pct_change_from_event').alias('avg_pct_change'),
-            pl.count('pct_change_from_event').alias('count')
+            pl.mean('norm_pct_change').alias('avg_norm_pct_change'),
+            pl.count('norm_pct_change').alias('count')
         ]).sort('days_to_event')
-
+    
         if results.is_empty():
             print("Warning: No valid results after aggregation.")
             return None
-
-        # Plot results - simple line chart of average price change
+    
+        # Plot results
         try:
             results_pd = results.to_pandas().set_index('days_to_event')
-
+    
             fig, ax = plt.subplots(figsize=(12, 6))
-
-            # Plot average price change
-            ax.plot(results_pd.index, results_pd['avg_pct_change'], 'b-', linewidth=2)
-
-            # Add reference lines
+            ax.plot(results_pd.index, results_pd['avg_norm_pct_change'], 'b-', linewidth=2)
             ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
             ax.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Event Day')
-
-            # Set labels and title
-            ax.set_title(f'Average Percentage Price Change Around Event (± {window_days} Days)')
+            ax.set_title(f'Average Normalized Price Change Around Event (± {window_days} Days)')
             ax.set_xlabel('Days Relative to Event')
-            ax.set_ylabel('Average Price Change (%)')
+            ax.set_ylabel('Average Normalized Price Change (Std Units)')
             ax.grid(True, alpha=0.3)
-
-            # Enhance appearance
             plt.tight_layout()
-
-            # Save plot
-            plot_filename = os.path.join(results_dir, f"{file_prefix}_avg_price_change.png")
+    
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_norm_price_change.png")
             plt.savefig(plot_filename)
-            print(f"Saved average price change plot to: {plot_filename}")
+            print(f"Saved normalized price change plot to: {plot_filename}")
             plt.close(fig)
-
-            # Save data
-            csv_filename = os.path.join(results_dir, f"{file_prefix}_avg_price_change.csv")
+    
+            csv_filename = os.path.join(results_dir, f"{file_prefix}_norm_price_change.csv")
             results.write_csv(csv_filename)
-            print(f"Saved average price change data to: {csv_filename}")
-
+            print(f"Saved normalized price change data to: {csv_filename}")
+    
         except Exception as e:
             print(f"Error creating plots: {e}")
             traceback.print_exc()
-
+    
         return results
