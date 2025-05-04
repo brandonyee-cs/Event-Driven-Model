@@ -1598,77 +1598,128 @@ class EventAnalysis:
         return results_df
 
     def analyze_mean_returns(self, results_dir: str, file_prefix: str = "event", 
-                        price_col: str = 'prc', window_days: int = 60):
+                                return_col: str = 'ret', window: int = 5, 
+                                min_periods: int = 3, pre_days: int = 30, 
+                                post_days: int = 30, baseline_window=(-60, -11), 
+                                event_window=(-2, 2)):
         """
-        Analyzes mean returns around event dates within a specified window.
-        
+        Calculates, plots, and saves rolling mean returns around events using Polars.
+
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
-        price_col (str): Column name containing price data
-        window_days (int): Days before/after event to analyze
-        
+        return_col (str): Column name containing returns
+        window (int): Size of rolling window for mean calculation
+        min_periods (int): Minimum number of observations in window required to calculate mean
+        pre_days (int): Days before event to analyze
+        post_days (int): Days after event to analyze
+        baseline_window (tuple): (start, end) days for baseline period relative to event
+        event_window (tuple): (start, end) days for event period relative to event
+
         Returns:
         pl.DataFrame: DataFrame containing mean return results
         """
-        print(f"\n--- Analyzing Mean Returns (Window: ±{window_days} days) ---")
-        if self.data is None or price_col not in self.data.columns:
-            print(f"Error: Data not loaded or missing price column '{price_col}'.")
-            return None
-    
-        # Calculate daily returns
-        data_with_returns = self.data.with_columns(
-            pl.when(pl.col(price_col).shift(1).is_not_null() & (pl.col(price_col).shift(1) != 0))
-            .then((pl.col(price_col) / pl.col(price_col).shift(1) - 1) * 100)
-            .otherwise(None)
-            .alias('daily_return')
+        print(f"\n--- Analyzing Rolling Mean Returns (Window={window} rows) using Polars ---")
+        if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
+            print("Error: Data/required columns missing."); return None
+
+        df = self.data.sort(['event_id', 'date'])
+
+        # Calculate rolling mean returns
+        df = df.with_columns(
+            pl.col(return_col).rolling_mean(window_size=window, min_periods=min_periods)
+              .over('event_id').alias('rolling_mean_return')
         )
-    
-        # Filter to relevant window
-        window_data = data_with_returns.filter(
-            (pl.col('days_to_event') >= -window_days) & 
-            (pl.col('days_to_event') <= window_days)
+        df = df.with_columns(
+            (pl.col('rolling_mean_return') * 100).alias('rolling_mean_return_pct')
         )
-    
-        if window_data.is_empty():
-            print(f"Error: No data found within ±{window_days} day window.")
-            return None
-    
+
         # Aggregate mean returns by days_to_event
-        results = window_data.group_by('days_to_event').agg([
-            pl.mean('daily_return').alias('avg_daily_return'),
-            pl.count('daily_return').alias('count')
-        ]).sort('days_to_event')
-    
-        if results.is_empty():
-            print("Warning: No valid results after aggregation.")
-            return None
-    
-        # Plot results
+        aligned_means = df.group_by('days_to_event').agg(
+            pl.mean('rolling_mean_return_pct').alias('avg_rolling_mean_return')
+        ).filter(
+            (pl.col('days_to_event') >= -pre_days) &
+            (pl.col('days_to_event') <= post_days)
+        ).sort('days_to_event').drop_nulls()
+
+        # Plotting & Saving Rolling Mean Returns
+        if not aligned_means.is_empty():
+            aligned_means_pd = aligned_means.to_pandas().set_index('days_to_event')
+            fig1, ax1 = plt.subplots(figsize=(12, 6))
+            aligned_means_pd['avg_rolling_mean_return'].plot(kind='line', marker='.', linestyle='-', ax=ax1)
+            ax1.axvline(0, color='red', linestyle='--', lw=1, label='Event Day')
+            ax1.axhline(0, color='gray', linestyle='-', alpha=0.3)
+            ax1.set_title(f'Average Rolling Mean Return Around Event (Window={window} days)')
+            ax1.set_xlabel('Days Relative to Event'); ax1.set_ylabel('Avg. Rolling Mean Return (%)')
+            ax1.legend(); ax1.grid(True, alpha=0.5); plt.tight_layout()
+            plot_filename_mean = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.png")
+            csv_filename_mean = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d_data.csv")
+            try: plt.savefig(plot_filename_mean); print(f"Saved rolling mean return plot to: {plot_filename_mean}")
+            except Exception as e: print(f"Error saving plot: {e}")
+            try: aligned_means_pd.to_csv(csv_filename_mean); print(f"Saved rolling mean return data to: {csv_filename_mean}")
+            except Exception as e: print(f"Error saving data: {e}")
+            plt.close(fig1)
+        else:
+            print("No data for rolling mean returns plot.")
+
+        # Compare Event vs Baseline Mean Returns
+        print("    Calculating event vs baseline mean returns...")
+        baseline_filter = (
+            (pl.col('days_to_event') >= baseline_window[0]) &
+            (pl.col('days_to_event') <= baseline_window[1])
+        )
+        event_filter = (
+            (pl.col('days_to_event') >= event_window[0]) &
+            (pl.col('days_to_event') <= event_window[1])
+        )
+
         try:
-            results_pd = results.to_pandas().set_index('days_to_event')
-    
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(results_pd.index, results_pd['avg_daily_return'], 'b-', linewidth=2)
-            ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
-            ax.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Event Day')
-            ax.set_title(f'Average Daily Return Around Event (± {window_days} Days)')
-            ax.set_xlabel('Days Relative to Event')
-            ax.set_ylabel('Average Daily Return (%)')
-            ax.grid(True, alpha=0.3)
+            mean_comp = df.group_by('event_id').agg([
+                pl.col(return_col).filter(baseline_filter).mean().alias('mean_baseline'),
+                pl.col(return_col).filter(baseline_filter).count().alias('n_baseline'),
+                pl.col(return_col).filter(event_filter).mean().alias('mean_event'),
+                pl.col(return_col).filter(event_filter).count().alias('n_event'),
+            ]).filter(
+                 (pl.col('n_baseline') >= min_periods) &
+                 (pl.col('n_event') >= min_periods) &
+                 (pl.col('mean_baseline').is_not_null()) &
+                 (pl.col('mean_event').is_not_null())
+            )
+        except Exception as agg_err:
+             print(f"    Error during mean returns comparison aggregation: {agg_err}")
+             traceback.print_exc()
+             mean_comp = pl.DataFrame(schema={'event_id': pl.Utf8, 'mean_baseline': pl.Float64, 'n_baseline': pl.UInt32, 'mean_event': pl.Float64, 'n_event': pl.UInt32})
+
+        if not mean_comp.is_empty():
+            # Calculate mean difference (event - baseline) rather than ratio
+            mean_diff_df = mean_comp.with_columns([
+                (pl.col('mean_event') * 100).alias('mean_event_pct'),
+                (pl.col('mean_baseline') * 100).alias('mean_baseline_pct'),
+                ((pl.col('mean_event') - pl.col('mean_baseline')) * 100).alias('mean_diff_pct')
+            ])
+            avg_diff = mean_diff_df['mean_diff_pct'].mean()
+            med_diff = mean_diff_df['mean_diff_pct'].median()
+            num_valid_diffs = mean_diff_df.height
+            print(f"\nMean Return Difference (Event: {event_window}, Baseline: {baseline_window}): Avg Diff={avg_diff:.4f}%, Median Diff={med_diff:.4f}% ({num_valid_diffs} events)")
+
+            csv_filename_diff = os.path.join(results_dir, f"{file_prefix}_mean_return_diffs.csv")
+            try:
+                mean_diff_df.select(['event_id', 'mean_event_pct', 'mean_baseline_pct', 'mean_diff_pct']).write_csv(csv_filename_diff)
+                print(f"Saved mean return differences to: {csv_filename_diff}")
+            except Exception as e: print(f"Error saving mean diffs: {e}")
+
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            diffs_pd = mean_diff_df['mean_diff_pct'].to_pandas()
+            sns.histplot(diffs_pd.dropna(), bins=30, kde=True, ax=ax2)
+            ax2.axvline(0, c='grey', ls='--', label='Diff = 0')
+            ax2.axvline(avg_diff, c='red', ls=':', label=f'Mean ({avg_diff:.2f}%)')
+            ax2.set_title('Distribution of Mean Return Differences (Event - Baseline)'); ax2.set_xlabel('Mean Return Difference (%)'); ax2.set_ylabel('Frequency'); ax2.legend()
             plt.tight_layout()
-    
-            plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_returns.png")
-            plt.savefig(plot_filename)
-            print(f"Saved mean returns plot to: {plot_filename}")
-            plt.close(fig)
-    
-            csv_filename = os.path.join(results_dir, f"{file_prefix}_mean_returns.csv")
-            results.write_csv(csv_filename)
-            print(f"Saved mean returns data to: {csv_filename}")
-    
-        except Exception as e:
-            print(f"Error creating plots: {e}")
-            traceback.print_exc()
-    
-        return results
+            plot_filename_hist = os.path.join(results_dir, f"{file_prefix}_mean_return_diff_hist.png")
+            try: plt.savefig(plot_filename_hist); print(f"Saved mean return diff hist plot: {plot_filename_hist}")
+            except Exception as e: print(f"Error saving hist: {e}")
+            plt.close(fig2)
+        else:
+            print("\nCould not calculate mean return differences (insufficient valid data or aggregation error).")
+
+        return aligned_means
