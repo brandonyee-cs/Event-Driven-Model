@@ -159,6 +159,15 @@ def run_fda_analysis():
             quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
             annualize=True,
         )
+
+        # --- Run Price Change Analysis ---
+        analyzer.analyze_price_changes(
+            results_dir=FDA_RESULTS_DIR,
+            file_prefix=FDA_FILE_PREFIX,
+            price_col='prc',
+            window_days=WINDOW_DAYS,
+            quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+        )
         
         # --- Run ML Analysis if requested ---
         if RUN_ML:
@@ -290,6 +299,15 @@ def run_earnings_analysis():
             lookback_window=SHARPE_LOOKBACK,
             quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
             annualize=True,
+        )
+
+        # --- Run Price Change Analysis ---
+        analyzer.analyze_price_changes(
+            results_dir=EARNINGS_RESULTS_DIR,
+            file_prefix=EARNINGS_FILE_PREFIX,
+            price_col='prc',
+            window_days=WINDOW_DAYS,
+            quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
         )
         
         # --- Run ML Analysis if requested ---
