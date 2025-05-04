@@ -160,14 +160,17 @@ def run_fda_analysis():
             annualize=True,
         )
 
-        # Analyze mean returns
+        # Add this to run_fda_analysis function, right after the analyze_volatility_spikes call
         analyzer.analyze_mean_returns(
             results_dir=FDA_RESULTS_DIR,
             file_prefix=FDA_FILE_PREFIX,
-            price_col='prc',
-            window_days=WINDOW_DAYS,
+            return_col='ret',
+            window=VOL_WINDOW,
+            pre_days=VOL_PRE_DAYS,
+            post_days=VOL_POST_DAYS,
+            baseline_window=baseline_window,
+            event_window=event_window
         )
-
         
         # --- Run ML Analysis if requested ---
         if RUN_ML:
@@ -301,12 +304,16 @@ def run_earnings_analysis():
             annualize=True,
         )
 
-        # --- Run Price Change Analysis ---
+        # Add this to run_earnings_analysis function, right after the analyze_volatility_spikes call
         analyzer.analyze_mean_returns(
             results_dir=EARNINGS_RESULTS_DIR,
             file_prefix=EARNINGS_FILE_PREFIX,
-            price_col='prc',
-            window_days=WINDOW_DAYS,
+            return_col='ret',
+            window=VOL_WINDOW,
+            pre_days=VOL_PRE_DAYS,
+            post_days=VOL_POST_DAYS,
+            baseline_window=baseline_window,
+            event_window=event_window
         )
         
         # --- Run ML Analysis if requested ---

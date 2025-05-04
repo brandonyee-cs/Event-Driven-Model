@@ -1599,12 +1599,12 @@ class EventAnalysis:
 
     def analyze_mean_returns(self, results_dir: str, file_prefix: str = "event", 
                                 return_col: str = 'ret', window: int = 5, 
-                                min_periods: int = 3, pre_days: int = 30, 
-                                post_days: int = 30, baseline_window=(-60, -11), 
+                                min_periods: int = 3, pre_days: int = 60, 
+                                post_days: int = 60, baseline_window=(-60, -11), 
                                 event_window=(-2, 2)):
         """
         Calculates, plots, and saves rolling mean returns around events using Polars.
-
+        
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
