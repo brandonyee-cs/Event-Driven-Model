@@ -726,58 +726,339 @@ class EventAnalysis:
         pl.DataFrame: Prepared data or None if loading fails
         """
         try:
-            # Load event and stock data
-            event_data = self.data_loader.load_events()
-            stock_data = self.data_loader.load_stock_data()
+            # Load event and stock data using the available load_data method
+            combined_data = self.data_loader.load_data()
             
-            # Combine and preprocess data
-            # (Placeholder for actual data merging logic)
-            combined_data = event_data.join(stock_data, on=['ticker', 'date'], how='inner')
+            if combined_data is None:
+                print("Error: Failed to load data from data loader.")
+                return None
             
             if run_feature_engineering:
-                combined_data = self.feature_engineer.engineer_features(combined_data)
+                # Create target for predictive modeling
+                combined_data = self.feature_engineer.create_target(combined_data)
+                # Calculate features for analysis
+                combined_data = self.feature_engineer.calculate_features(combined_data)
             
             self.data = combined_data
             return combined_data
         except Exception as e:
             print(f"Error loading and preparing data: {e}")
+            traceback.print_exc()
             return None
 
     def train_models(self, test_size: float = 0.2, time_split_column: str = "Event Date"):
         """
-        Placeholder for training machine learning models.
+        Train machine learning models on the prepared data.
+        
+        Parameters:
+        test_size (float): Proportion of data to use for testing
+        time_split_column (str): Column containing dates for time-based splitting
         """
         print("Training models...")
-        # Actual implementation should be here
-        pass
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return
+            
+        try:
+            # Extract features and target
+            X, y, feature_names = self.feature_engineer.get_features_target(self.data, fit_imputer=True)
+            
+            if X.shape[0] == 0 or y.shape[0] == 0:
+                print("Error: No valid features or target extracted.")
+                return
+                
+            print(f"Training models on {X.shape[0]} samples with {X.shape[1]} features.")
+            
+            # Create time-based split if time column provided
+            if time_split_column in self.data.columns:
+                # Sort by time and split
+                dates = self.data.select(time_split_column).to_numpy().flatten()
+                sorted_indices = np.argsort(dates)
+                split_idx = int(len(sorted_indices) * (1 - test_size))
+                train_indices = sorted_indices[:split_idx]
+                test_indices = sorted_indices[split_idx:]
+                
+                X_train, X_test = X[train_indices], X[test_indices]
+                y_train, y_test = y[train_indices], y[test_indices]
+            else:
+                # Random split
+                from sklearn.model_selection import train_test_split
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=test_size, random_state=42
+                )
+            
+            # Initialize and train models
+            from src.models import TimeSeriesRidge, XGBoostDecileModel
+            
+            # TimeSeriesRidge model
+            tsridge_model = TimeSeriesRidge(alpha=0.1, lambda2=0.5)
+            tsridge_model.fit(X_train, y_train)
+            self.models['TimeSeriesRidge'] = {
+                'model': tsridge_model,
+                'X_train': X_train, 'y_train': y_train,
+                'X_test': X_test, 'y_test': y_test,
+                'feature_names': feature_names
+            }
+            
+            # XGBoost model
+            xgb_params = {
+                'n_estimators': 100,
+                'max_depth': 5,
+                'learning_rate': 0.1,
+                'objective': 'reg:squarederror',
+                'random_state': 42
+            }
+            xgb_model = XGBoostDecileModel(weight=0.7, xgb_params=xgb_params)
+            xgb_model.fit(X_train, y_train)
+            self.models['XGBoostDecile'] = {
+                'model': xgb_model,
+                'X_train': X_train, 'y_train': y_train,
+                'X_test': X_test, 'y_test': y_test,
+                'feature_names': feature_names
+            }
+            
+            print(f"Successfully trained {len(self.models)} models.")
+            
+        except Exception as e:
+            print(f"Error training models: {e}")
+            traceback.print_exc()
 
     def evaluate_models(self) -> Dict[str, Any]:
         """
-        Placeholder for evaluating machine learning models.
+        Evaluate trained machine learning models and return performance metrics.
+        
+        Returns:
+        Dict[str, Any]: Dictionary of model evaluation results
         """
         print("Evaluating models...")
-        return {}
+        if not self.models:
+            print("Error: No models trained. Call train_models first.")
+            return {}
+            
+        results = {}
+        
+        try:
+            for model_name, model_info in self.models.items():
+                model = model_info['model']
+                X_test = model_info['X_test']
+                y_test = model_info['y_test']
+                
+                # Make predictions
+                y_pred = model.predict(X_test)
+                
+                # Calculate metrics
+                from sklearn.metrics import mean_squared_error, r2_score
+                mse = mean_squared_error(y_test, y_pred)
+                rmse = np.sqrt(mse)
+                r2 = r2_score(y_test, y_pred)
+                
+                # Store results
+                results[model_name] = {
+                    'mse': mse,
+                    'rmse': rmse,
+                    'r2': r2,
+                    'y_pred': y_pred,
+                    'y_test': y_test
+                }
+                
+                print(f"Model: {model_name}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
+                
+            return results
+            
+        except Exception as e:
+            print(f"Error evaluating models: {e}")
+            traceback.print_exc()
+            return {}
 
     def plot_feature_importance(self, results_dir: str, file_prefix: str, model_name: str):
         """
-        Placeholder for plotting feature importance.
+        Plot feature importance for a specified model.
+        
+        Parameters:
+        results_dir (str): Directory to save the plot
+        file_prefix (str): Prefix for the saved file name
+        model_name (str): Name of the model to plot feature importance for
         """
         print(f"Plotting feature importance for {model_name}...")
-        pass
+        if model_name not in self.models:
+            print(f"Error: Model '{model_name}' not found in trained models.")
+            return
+            
+        try:
+            model_info = self.models[model_name]
+            model = model_info['model']
+            feature_names = model_info['feature_names']
+            
+            if model_name == 'TimeSeriesRidge':
+                # For Ridge models, feature importance is based on coefficient magnitude
+                importances = np.abs(model.coef_)
+                indices = np.argsort(importances)[::-1]
+            elif model_name == 'XGBoostDecile':
+                # For XGBoost models, use built-in feature importance
+                xgb_model = model.xgb_model
+                importances = xgb_model.feature_importances_
+                indices = np.argsort(importances)[::-1]
+            else:
+                print(f"Error: Feature importance not implemented for model type '{model_name}'.")
+                return
+            
+            # Create feature importance plot using Plotly
+            import plotly.graph_objects as go
+            
+            sorted_importances = importances[indices]
+            sorted_features = [feature_names[i] for i in indices]
+            
+            # Limit to top 15 features for readability
+            top_n = min(15, len(sorted_features))
+            
+            fig = go.Figure(go.Bar(
+                x=sorted_importances[:top_n][::-1],
+                y=sorted_features[:top_n][::-1],
+                orientation='h'
+            ))
+            
+            fig.update_layout(
+                title=f'Feature Importance - {model_name}',
+                xaxis_title='Importance',
+                yaxis_title='Feature',
+                template='plotly_white',
+                width=900,
+                height=500
+            )
+            
+            # Save plot
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_feat_importance_{model_name}.png")
+            fig.write_image(plot_filename, format='png', scale=2)
+            print(f"Saved feature importance plot to: {plot_filename}")
+            
+        except Exception as e:
+            print(f"Error plotting feature importance: {e}")
+            traceback.print_exc()
 
     def find_sample_event_ids(self, n: int = 3) -> List[str]:
         """
-        Placeholder for finding sample event IDs.
+        Find sample event IDs for prediction visualization.
+        
+        Parameters:
+        n (int): Number of sample events to return
+        
+        Returns:
+        List[str]: List of event IDs
         """
         print(f"Finding {n} sample event IDs...")
-        return []
+        if self.data is None:
+            print("Error: No data loaded.")
+            return []
+            
+        try:
+            # Get unique event IDs
+            event_ids = self.data.get_column('event_id').unique().to_list()
+            
+            if len(event_ids) <= n:
+                return event_ids
+                
+            # Sample n event IDs
+            import random
+            random.seed(42)  # For reproducibility
+            sample_ids = random.sample(event_ids, n)
+            
+            return sample_ids
+            
+        except Exception as e:
+            print(f"Error finding sample event IDs: {e}")
+            return []
 
     def plot_predictions_for_event(self, results_dir: str, event_id: str, file_prefix: str, model_name: str):
         """
-        Placeholder for plotting predictions for an event.
+        Plot predictions for a specific event using a trained model.
+        
+        Parameters:
+        results_dir (str): Directory to save the plot
+        event_id (str): Event ID to plot predictions for
+        file_prefix (str): Prefix for the saved file name
+        model_name (str): Name of the model to use for predictions
         """
         print(f"Plotting predictions for event {event_id} with {model_name}...")
-        pass
+        if self.data is None:
+            print("Error: No data loaded.")
+            return
+            
+        if model_name not in self.models:
+            print(f"Error: Model '{model_name}' not found in trained models.")
+            return
+            
+        try:
+            # Filter data for the specified event
+            event_data = self.data.filter(pl.col('event_id') == event_id)
+            
+            if event_data.is_empty():
+                print(f"Error: No data found for event ID '{event_id}'.")
+                return
+                
+            # Sort by days_to_event
+            event_data = event_data.sort('days_to_event')
+            
+            # Extract features and target
+            X, y, _ = self.feature_engineer.get_features_target(event_data, fit_imputer=False)
+            
+            if X.shape[0] == 0:
+                print(f"Error: No valid features extracted for event ID '{event_id}'.")
+                return
+                
+            # Make predictions
+            model = self.models[model_name]['model']
+            y_pred = model.predict(X)
+            
+            # Create plot
+            import plotly.graph_objects as go
+            
+            days = event_data.get_column('days_to_event').to_numpy()
+            actual_returns = event_data.get_column('future_ret').to_numpy() * 100  # Convert to percentage
+            
+            fig = go.Figure()
+            
+            # Add actual returns
+            fig.add_trace(go.Scatter(
+                x=days,
+                y=actual_returns,
+                mode='lines+markers',
+                name='Actual Returns (%)',
+                line=dict(color='blue')
+            ))
+            
+            # Add predicted returns
+            fig.add_trace(go.Scatter(
+                x=days,
+                y=y_pred * 100,  # Convert to percentage
+                mode='lines+markers',
+                name='Predicted Returns (%)',
+                line=dict(color='red')
+            ))
+            
+            # Add vertical line at event day
+            fig.add_vline(x=0, line=dict(color='green', dash='dash'), annotation_text='Event Day')
+            
+            ticker = event_data.get_column('ticker').head(1).item()
+            event_date = event_data.get_column('Event Date').head(1).item()
+            
+            fig.update_layout(
+                title=f'Return Predictions - {ticker} Event on {event_date} - {model_name}',
+                xaxis_title='Days Relative to Event',
+                yaxis_title='Returns (%)',
+                showlegend=True,
+                template='plotly_white',
+                width=1000,
+                height=600
+            )
+            
+            # Save plot
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_pred_{model_name}_{event_id}.png")
+            fig.write_image(plot_filename, format='png', scale=2)
+            print(f"Saved prediction plot to: {plot_filename}")
+            
+        except Exception as e:
+            print(f"Error plotting predictions: {e}")
+            traceback.print_exc()
 
     def calculate_rolling_sharpe_timeseries(self, results_dir: str, file_prefix: str = "event",
                                       return_col: str = 'ret', 
@@ -960,7 +1241,7 @@ class EventAnalysis:
             print(f"Error saving time series data: {e}")
         
         return results_with_counts
-
+        
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
                           return_col: str = 'ret', 
                           analysis_window: Tuple[int, int] = (-60, 60),
@@ -1178,361 +1459,3 @@ class EventAnalysis:
             print("No data for rolling volatility plot.")
 
         return aligned_vol
-
-    def calculate_volatility_quantiles(self, results_dir: str, file_prefix: str = "event",
-                                     return_col: str = 'ret', 
-                                     analysis_window: Tuple[int, int] = (-60, 60),
-                                     lookback_window: int = 10,
-                                     quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
-        """
-        Calculates volatility quantiles using vectorized operations.
-        """
-        print(f"\n--- Calculating Volatility Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
-
-        if self.data is None or return_col not in self.data.columns:
-            print("Error: Data not loaded or missing return column.")
-            return None
-
-        extended_start = analysis_window[0] - lookback_window
-        analysis_data = self.data.filter(
-            (pl.col('days_to_event') >= extended_start) & 
-            (pl.col('days_to_event') <= analysis_window[1])
-        )
-
-        if analysis_data.is_empty():
-            print(f"Error: No data found within analysis window {analysis_window}.")
-            return None
-
-        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
-        vol_data = []
-        print(f"Processing {len(days_range)} days with vectorized operations...")
-
-        all_event_ids = analysis_data.get_column('event_id').unique()
-        print(f"Processing {len(all_event_ids)} unique events...")
-
-        batch_size = 10
-        for batch_start in range(0, len(days_range), batch_size):
-            batch_days = days_range[batch_start:batch_start + batch_size]
-            print(f"Processing batch days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
-
-            batch_results = []
-            for center_day in batch_days:
-                window_start = center_day - lookback_window
-                window_end = center_day
-
-                window_data = analysis_data.filter(
-                    (pl.col('days_to_event') >= window_start) & 
-                    (pl.col('days_to_event') <= window_end)
-                )
-
-                if window_data.is_empty():
-                    empty_results = {"days_to_event": center_day, "event_count": 0}
-                    for q in quantiles:
-                        empty_results[f"vol_q{int(q*100)}"] = None
-                    batch_results.append(empty_results)
-                    continue
-
-                vol_by_event = window_data.group_by('event_id').agg([
-                    pl.std(return_col).alias('vol'),
-                    pl.count().alias('n_obs')
-                ]).filter(
-                    (pl.col('n_obs') >= max(3, lookback_window // 3)) &
-                    (pl.col('vol').is_not_null())
-                )
-
-                valid_events = vol_by_event.height
-
-                if valid_events >= 5:
-                    vol_by_event = vol_by_event.with_columns(
-                        (pl.col('vol') * np.sqrt(252) * 100).alias('annualized_vol')
-                    )
-
-                    q_values = {}
-                    for q in quantiles:
-                        q_value = vol_by_event.select(
-                            pl.col('annualized_vol').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
-                        ).item(0, 0)
-                        q_values[f"vol_q{int(q*100)}"] = q_value
-
-                    day_results = {"days_to_event": center_day, "event_count": valid_events, **q_values}
-                else:
-                    day_results = {"days_to_event": center_day, "event_count": valid_events}
-                    for q in quantiles:
-                        day_results[f"vol_q{int(q*100)}"] = None
-
-                batch_results.append(day_results)
-
-            vol_data.extend(batch_results)
-
-            del window_data, vol_by_event, batch_results
-            import gc
-            gc.collect()
-
-        results_df = pl.DataFrame(vol_data)
-
-        # Plot quantiles using Plotly
-        try:
-            results_pd = results_df.to_pandas()
-            fig = go.Figure()
-            for q in quantiles:
-                col = f"vol_q{int(q*100)}"
-                if col in results_pd.columns:
-                    fig.add_trace(go.Scatter(
-                        x=results_pd['days_to_event'],
-                        y=results_pd[col],
-                        mode='lines',
-                        name=f'Q{int(q*100)}',
-                        line=dict(width=2 if q == 0.5 else 1, dash='dash' if q != 0.5 else 'solid')
-                    ))
-            
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
-            if analysis_window[0] <= -30 and analysis_window[1] >= 30:
-                fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
-                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
-            event_start, event_end = -2, 2
-            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
-                fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
-            
-            fig.update_layout(
-                title=f'Volatility Quantiles Around Events (Lookback: {lookback_window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Annualized Volatility (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600
-            )
-            
-            plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.png")
-            fig.write_image(plot_filename, format='png', scale=2)
-            print(f"Saved volatility quantiles plot to: {plot_filename}")
-            
-        except Exception as e:
-            print(f"Error creating plots: {e}")
-            import traceback
-            traceback.print_exc()
-
-        # Save results to CSV
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.csv")
-        try:
-            results_df.write_csv(csv_filename)
-            print(f"Saved volatility quantiles data to: {csv_filename}")
-        except Exception as e:
-            print(f"Error saving quantiles data: {e}")
-
-        return results_df
-
-    def analyze_mean_returns(self, results_dir: str, file_prefix: str = "event", 
-                            return_col: str = 'ret', window: int = 5, 
-                            min_periods: int = 3, pre_days: int = 60, 
-                            post_days: int = 60, baseline_window=(-60, -11), 
-                            event_window=(-2, 2)):
-        """
-        Calculates and plots rolling mean returns using Polars and Plotly.
-        """
-        print(f"\n--- Analyzing Rolling Mean Returns (Window={window} rows) using Polars ---")
-        if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
-            print("Error: Data/required columns missing."); return None
-
-        df = self.data.sort(['event_id', 'date'])
-
-        df = df.with_columns(
-            pl.col(return_col).rolling_mean(window_size=window, min_periods=min_periods)
-              .over('event_id').alias('rolling_mean_return')
-        )
-        df = df.with_columns(
-            (pl.col('rolling_mean_return') * 100).alias('rolling_mean_return_pct')
-        )
-
-        aligned_means = df.group_by('days_to_event').agg(
-            pl.mean('rolling_mean_return_pct').alias('avg_rolling_mean_return')
-        ).filter(
-            (pl.col('days_to_event') >= -pre_days) &
-            (pl.col('days_to_event') <= post_days)
-        ).sort('days_to_event').drop_nulls()
-
-        # Plotting Rolling Mean Returns with Plotly
-        if not aligned_means.is_empty():
-            aligned_means_pd = aligned_means.to_pandas()
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=aligned_means_pd['days_to_event'],
-                y=aligned_means_pd['avg_rolling_mean_return'],
-                mode='lines+markers',
-                name='Avg. Rolling Mean Return',
-                line=dict(color='blue')
-            ))
-            
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
-            fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
-            fig.add_vrect(x0=event_window[0], x1=event_window[1], fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
-            
-            fig.update_layout(
-                title=f'Average Rolling Mean Return Around Event (Window={window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Avg. Rolling Mean Return (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600
-            )
-            
-            plot_filename_mean = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.png")
-            csv_filename_mean = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d_data.csv")
-            try:
-                fig.write_image(plot_filename_mean, format='png', scale=2)
-                print(f"Saved rolling mean return plot to: {plot_filename_mean}")
-            except Exception as e:
-                print(f"Error saving plot: {e}")
-            try:
-                aligned_means_pd.to_csv(csv_filename_mean)
-                print(f"Saved rolling mean return data to: {csv_filename_mean}")
-            except Exception as e:
-                print(f"Error saving data: {e}")
-        else:
-            print("No data for rolling mean returns plot.")
-
-        return aligned_means
-
-    def calculate_mean_returns_quantiles(self, results_dir: str, file_prefix: str = "event",
-                                       return_col: str = 'ret', 
-                                       analysis_window: Tuple[int, int] = (-60, 60),
-                                       lookback_window: int = 10,
-                                       quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
-        """
-        Calculates mean return quantiles using vectorized operations.
-        """
-        print(f"\n--- Calculating Mean Return Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
-
-        if self.data is None or return_col not in self.data.columns:
-            print("Error: Data not loaded or missing return column.")
-            return None
-
-        extended_start = analysis_window[0] - lookback_window
-        analysis_data = self.data.filter(
-            (pl.col('days_to_event') >= extended_start) & 
-            (pl.col('days_to_event') <= analysis_window[1])
-        )
-
-        if analysis_data.is_empty():
-            print(f"Error: No data found within analysis window {analysis_window}.")
-            return None
-
-        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
-        mean_data = []
-        print(f"Processing {len(days_range)} days with vectorized operations...")
-
-        all_event_ids = analysis_data.get_column('event_id').unique()
-        print(f"Processing {len(all_event_ids)} unique events...")
-
-        batch_size = 10
-        for batch_start in range(0, len(days_range), batch_size):
-            batch_days = days_range[batch_start:batch_start + batch_size]
-            print(f"Processing batch days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
-
-            batch_results = []
-            for center_day in batch_days:
-                window_start = center_day - lookback_window
-                window_end = center_day
-
-                window_data = analysis_data.filter(
-                    (pl.col('days_to_event') >= window_start) & 
-                    (pl.col('days_to_event') <= window_end)
-                )
-
-                if window_data.is_empty():
-                    empty_results = {"days_to_event": center_day, "event_count": 0}
-                    for q in quantiles:
-                        empty_results[f"mean_q{int(q*100)}"] = None
-                    batch_results.append(empty_results)
-                    continue
-
-                mean_by_event = window_data.group_by('event_id').agg([
-                    pl.mean(return_col).alias('mean_ret'),
-                    pl.count().alias('n_obs')
-                ]).filter(
-                    (pl.col('n_obs') >= max(3, lookback_window // 3)) &
-                    (pl.col('mean_ret').is_not_null())
-                )
-
-                valid_events = mean_by_event.height
-
-                if valid_events >= 5:
-                    mean_by_event = mean_by_event.with_columns(
-                        (pl.col('mean_ret') * 100).alias('mean_ret_pct')
-                    )
-
-                    q_values = {}
-                    for q in quantiles:
-                        q_value = mean_by_event.select(
-                            pl.col('mean_ret_pct').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
-                        ).item(0, 0)
-                        q_values[f"mean_q{int(q*100)}"] = q_value
-
-                    day_results = {"days_to_event": center_day, "event_count": valid_events, **q_values}
-                else:
-                    day_results = {"days_to_event": center_day, "event_count": valid_events}
-                    for q in quantiles:
-                        day_results[f"mean_q{int(q*100)}"] = None
-
-                batch_results.append(day_results)
-
-            mean_data.extend(batch_results)
-
-            del window_data, mean_by_event, batch_results
-            import gc
-            gc.collect()
-
-        results_df = pl.DataFrame(mean_data)
-
-        # Plot quantiles using Plotly
-        try:
-            results_pd = results_df.to_pandas()
-            fig = go.Figure()
-            for q in quantiles:
-                col = f"mean_q{int(q*100)}"
-                if col in results_pd.columns:
-                    fig.add_trace(go.Scatter(
-                        x=results_pd['days_to_event'],
-                        y=results_pd[col],
-                        mode='lines',
-                        name=f'Q{int(q*100)}',
-                        line=dict(width=2 if q == 0.5 else 1, dash='dash' if q != 0.5 else 'solid')
-                    ))
-            
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
-            if analysis_window[0] <= -30 and analysis_window[1] >= 30:
-                fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
-                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
-            event_start, event_end = -2, 2
-            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
-                fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
-            
-            fig.update_layout(
-                title=f'Mean Return Quantiles Around Events (Lookback: {lookback_window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Mean Return (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600
-            )
-            
-            plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_quantiles.png")
-            fig.write_image(plot_filename, format='png', scale=2)
-            print(f"Saved mean return quantiles plot to: {plot_filename}")
-            
-        except Exception as e:
-            print(f"Error creating plots: {e}")
-            import traceback
-            traceback.print_exc()
-
-        # Save results to CSV
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_quantiles.csv")
-        try:
-            results_df.write_csv(csv_filename)
-            print(f"Saved mean return quantiles data to: {csv_filename}")
-        except Exception as e:
-            print(f"Error saving quantiles data: {e}")
-
-        return results_df
