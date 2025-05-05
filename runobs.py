@@ -408,7 +408,7 @@ def run_earnings_analysis():
         traceback.print_exc()
     
     return False
-
+'''
 def run_comparison():
     """
     Runs a comparison between FDA and earnings event analysis results using Plotly.
@@ -706,7 +706,8 @@ def run_comparison():
         traceback.print_exc()
         print("\n=== Event Comparison Analysis Failed ===")
         return False
-
+'''
+        
 def main():
     # Run FDA analysis
     fda_success = run_fda_analysis()
