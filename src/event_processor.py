@@ -1061,14 +1061,14 @@ class EventAnalysis:
             traceback.print_exc()
 
     def calculate_rolling_sharpe_timeseries(self, results_dir: str, file_prefix: str = "event",
-                                  return_col: str = 'ret', 
-                                  analysis_window: Tuple[int, int] = (-60, 60),
-                                  sharpe_window: int = 5,
-                                  annualize: bool = True, 
-                                  risk_free_rate: float = 0.0):
+                                       return_col: str = 'ret', 
+                                       analysis_window: Tuple[int, int] = (-60, 60),
+                                       sharpe_window: int = 5,  # Increased to 10 for better stability
+                                       annualize: bool = True, 
+                                       risk_free_rate: float = 0.0):
         """
         Calculates a time series of rolling Sharpe ratios around events with improved smoothing.
-        
+
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
@@ -1077,7 +1077,7 @@ class EventAnalysis:
         sharpe_window (int): Size of window for rolling Sharpe calculation in days
         annualize (bool): Whether to annualize the Sharpe ratio
         risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-        
+
         Returns:
         pl.DataFrame: DataFrame containing Sharpe ratio time series
         """
@@ -1085,86 +1085,69 @@ class EventAnalysis:
         if self.data is None or return_col not in self.data.columns:
             print("Error: Data not loaded or missing return column.")
             return None
-        
+
         # Filter data to include only days within the extended analysis window
         analysis_data = self.data.filter(
             (pl.col('days_to_event') >= analysis_window[0]) & 
             (pl.col('days_to_event') <= analysis_window[1])
         )
-        
+
         if analysis_data.is_empty():
             print(f"Error: No data found within analysis window {analysis_window}.")
             return None
-        
+
         # Calculate daily equivalent of risk-free rate if needed
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if risk_free_rate > 0 else 0
-        
-        # Initialize results storage
-        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
-        
-        # CHANGE: Use a larger window for more stability - at least 10 days
-        actual_window = max(sharpe_window, 10)
-        print(f"Using a window size of {actual_window} days for Sharpe calculation (minimum 10 days)")
-        
-        # Half window size for calculations
+
+        # Ensure minimum window size for stability
+        actual_window = max(sharpe_window, 10)  # Minimum 10 days
         half_window = actual_window // 2
-        
-        # Group data by event_id and days_to_event to get aggregate stats
-        # This reduces noise by looking at the average return for each day across all events
+        print(f"Using a window size of {actual_window} days for Sharpe calculation (minimum 10 days)")
+
+        # Group data by days_to_event to get aggregate stats, handling outliers with clipping
         day_stats = analysis_data.group_by(['days_to_event']).agg([
-            pl.mean(return_col).alias('avg_return'),
+            pl.mean(return_col).clip(-0.5, 0.5).alias('avg_return'),  # Clip extreme returns
             pl.std(return_col).alias('std_return'),
             pl.count().alias('sample_size')
         ]).sort('days_to_event')
-        
-        # Ensure we have enough data points
+
         if day_stats.height < 10:
             print("Warning: Not enough data points for reliable Sharpe ratio calculation.")
             return None
-        
-        # Calculate the rolling Sharpe ratio
+
+        # Calculate the rolling Sharpe ratio with robust handling
         sharpe_results = []
+        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
         for center_day in days_range:
             window_start = center_day - half_window
             window_end = center_day + half_window
-            
-            # Filter data for current window
+
             window_data = day_stats.filter(
                 (pl.col('days_to_event') >= window_start) & 
                 (pl.col('days_to_event') <= window_end)
             )
-            
+
             min_required_days = max(5, actual_window // 2)
             if window_data.height < min_required_days:
-                # Skip days with insufficient data
                 continue
             
-            # Calculate average return and volatility in the window
             avg_ret = window_data.select(pl.mean('avg_return')).item(0, 0)
-            
-            # Use pooled standard deviation for more stability
-            # This is more reliable than just averaging standard deviations
             weighted_var = window_data.select(
                 ((pl.col('std_return') ** 2) * (pl.col('sample_size') - 1)).sum() / 
                 ((pl.col('sample_size') - 1).sum())
             ).item(0, 0)
-            
-            if weighted_var is not None and weighted_var > 0:
-                std_dev = np.sqrt(weighted_var)
-            else:
-                # Fallback to simple standard deviation of average returns
-                std_dev = window_data.select(pl.std('avg_return')).item(0, 0)
-            
-            # Calculate Sharpe ratio
+
+            std_dev = np.sqrt(weighted_var) if weighted_var is not None and weighted_var > 0 else \
+                      window_data.select(pl.std('avg_return')).item(0, 0)
+
             sharpe = np.nan
             if not np.isnan(avg_ret) and not np.isnan(std_dev) and std_dev > 0:
                 sharpe = (avg_ret - daily_rf) / std_dev
                 if annualize:
                     sharpe = sharpe * np.sqrt(252)
-                
-                # CHANGE: Winsorize extreme values to reduce noise
-                sharpe = max(min(sharpe, 2.0), -2.0)
-                
+                # Winsorize to limit extreme values
+                sharpe = max(min(sharpe, 3.0), -3.0)  # Adjusted range for more flexibility
+
             sample_count = window_data.select(pl.mean('sample_size')).item(0, 0)
             sharpe_results.append({
                 'days_to_event': center_day,
@@ -1173,64 +1156,46 @@ class EventAnalysis:
                 'sharpe_ratio': sharpe,
                 'num_observations': sample_count
             })
-        
-        # Convert results to DataFrame
+
         results_df = pl.DataFrame(sharpe_results)
-        
+
         if results_df.is_empty():
             print("Error: No valid Sharpe ratios could be calculated.")
             return None
-        
-        # Create a second DataFrame with event counts for each day
+
+        # Join with event counts
         event_counts = analysis_data.group_by('days_to_event').agg(
             pl.n_unique('event_id').alias('unique_events')
         ).sort('days_to_event')
-        
-        # Ensure both DataFrames have the same data type for the join key
-        results_df = results_df.with_columns(
-            pl.col('days_to_event').cast(pl.Int32)
-        )
-        event_counts = event_counts.with_columns(
-            pl.col('days_to_event').cast(pl.Int32)
-        )
-        
-        # Join results with event counts
-        results_with_counts = results_df.join(
-            event_counts, 
-            on='days_to_event', 
-            how='left'
-        ).with_columns(
+        results_df = results_df.join(event_counts, on='days_to_event', how='left').with_columns(
             pl.col('unique_events').fill_null(0)
         )
-        
-        # Plot the results using Plotly
+
+        # Plot the results using Plotly with dynamic y-axis
         try:
-            results_pd = results_with_counts.to_pandas()
-            
-            # CHANGE: Apply additional smoothing using a centered moving average
-            # for better visualization
-            window_size = min(15, len(results_pd) // 6)
+            results_pd = results_df.to_pandas()
+
+            # Apply smoothing with a larger window
+            window_size = min(15, len(results_pd) // 4)
             if window_size % 2 == 0:
-                window_size += 1  # Ensure window size is odd for centered moving average
-                
+                window_size += 1
             results_pd['smooth_sharpe'] = results_pd['sharpe_ratio'].rolling(
                 window=window_size, center=True, min_periods=window_size//2
-            ).mean()
-            
-            # Create line plot for Sharpe ratio
+            ).mean().fillna(method='bfill').fillna(method='ffill')  # Handle edge cases
+
             fig = go.Figure()
-            
-            # Add the raw data with reduced opacity
+
+            # Add raw data with reduced opacity
             fig.add_trace(go.Scatter(
                 x=results_pd['days_to_event'],
                 y=results_pd['sharpe_ratio'],
                 mode='lines',
                 name='Sharpe Ratio',
                 line=dict(color='blue', width=1),
-                opacity=0.5
+                opacity=0.4
             ))
-            
-            # Add the smoothed line with full opacity
+
+            # Add smoothed line
             fig.add_trace(go.Scatter(
                 x=results_pd['days_to_event'],
                 y=results_pd['smooth_sharpe'],
@@ -1238,26 +1203,18 @@ class EventAnalysis:
                 name=f'{window_size}-Day Moving Avg',
                 line=dict(color='red', width=2.5)
             ))
-            
-            # Add vertical lines
+
+            # Add vertical lines and event window
             fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
                 fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
                 fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
-            
-            # Add event window highlight
-            event_start, event_end = -2, 2
-            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
-                fig.add_vrect(
-                    x0=event_start, x1=event_end, 
-                    fillcolor='yellow', opacity=0.2, 
-                    line_width=0, annotation_text='Event Window'
-                )
-            
-            # CHANGE: Add a zero line for reference
-            fig.add_hline(y=0, line=dict(color='black', dash='dot'), opacity=0.3)
-            
-            # CHANGE: Improve the layout with better defaults
+            fig.add_vrect(x0=-2, x1=2, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
+
+            # Dynamic y-axis range based on data
+            y_min = min(results_pd['smooth_sharpe'].min(), results_pd['sharpe_ratio'].min(), -1.0)
+            y_max = max(results_pd['smooth_sharpe'].max(), results_pd['sharpe_ratio'].max(), 1.5)
+            y_range = max(abs(y_min), abs(y_max)) * 1.1  # Add 10% padding
             fig.update_layout(
                 title=f'Rolling Sharpe Ratio Around Events (Window Size: {actual_window} days)',
                 xaxis_title='Days Relative to Event',
@@ -1266,50 +1223,30 @@ class EventAnalysis:
                 template='plotly_white',
                 width=1000,
                 height=600,
-                # Set fixed y-axis range for better comparability between charts
                 yaxis=dict(
-                    range=[-1.0, 1.5],  # Reasonable range for Sharpe ratios
+                    range=[-y_range, y_range],
                     zeroline=True,
                     zerolinewidth=1,
                     zerolinecolor='black',
                     gridcolor='lightgray'
                 ),
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="right",
-                    x=0.99
-                )
+                legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
             )
-            
-            try:
-                # Try to save with kaleido
-                plot_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.png")
-                fig.write_image(plot_filename, format='png', scale=2)
-                print(f"Saved rolling Sharpe time series plot to: {plot_filename}")
-            except Exception as e:
-                # Fall back to saving without image if kaleido is not available
-                print(f"Warning: Could not save plot image: {e}")
-                print("To fix this issue, install the kaleido package: pip install -U kaleido")
-                # Save as HTML as fallback
-                html_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.html")
-                fig.write_html(html_filename)
-                print(f"Saved rolling Sharpe time series as HTML (fallback) to: {html_filename}")
-            
+
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.png")
+            fig.write_image(plot_filename, format='png', scale=2)
+            print(f"Saved rolling Sharpe time series plot to: {plot_filename}")
+
         except Exception as e:
             print(f"Error creating plots: {e}")
             import traceback
             traceback.print_exc()
-        
-        # Save results to CSV
+
         csv_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.csv")
-        try:
-            results_with_counts.write_csv(csv_filename)
-            print(f"Saved rolling Sharpe time series data to: {csv_filename}")
-        except Exception as e:
-            print(f"Error saving time series data: {e}")
-        
-        return results_with_counts
+        results_df.write_csv(csv_filename)
+        print(f"Saved rolling Sharpe time series data to: {csv_filename}")
+
+        return results_df
         
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
                           return_col: str = 'ret', 
