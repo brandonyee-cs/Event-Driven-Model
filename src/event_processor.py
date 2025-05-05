@@ -702,6 +702,83 @@ class EventFeatureEngineer:
         return X_np, y_np, self.final_feature_names
 
 class EventAnalysis:
+    def __init__(self, data_loader: EventDataLoader, feature_engineer: EventFeatureEngineer):
+        """
+        Initialize EventAnalysis with data loader and feature engineer.
+        
+        Parameters:
+        data_loader (EventDataLoader): Instance to load event and stock data
+        feature_engineer (EventFeatureEngineer): Instance to engineer features
+        """
+        self.data_loader = data_loader
+        self.feature_engineer = feature_engineer
+        self.data = None
+        self.models = {}
+
+    def load_and_prepare_data(self, run_feature_engineering: bool = False) -> Optional[pl.DataFrame]:
+        """
+        Loads and prepares data using the data loader and optionally applies feature engineering.
+        
+        Parameters:
+        run_feature_engineering (bool): Whether to run feature engineering
+        
+        Returns:
+        pl.DataFrame: Prepared data or None if loading fails
+        """
+        try:
+            # Load event and stock data
+            event_data = self.data_loader.load_events()
+            stock_data = self.data_loader.load_stock_data()
+            
+            # Combine and preprocess data
+            # (Placeholder for actual data merging logic)
+            combined_data = event_data.join(stock_data, on=['ticker', 'date'], how='inner')
+            
+            if run_feature_engineering:
+                combined_data = self.feature_engineer.engineer_features(combined_data)
+            
+            self.data = combined_data
+            return combined_data
+        except Exception as e:
+            print(f"Error loading and preparing data: {e}")
+            return None
+
+    def train_models(self, test_size: float = 0.2, time_split_column: str = "Event Date"):
+        """
+        Placeholder for training machine learning models.
+        """
+        print("Training models...")
+        # Actual implementation should be here
+        pass
+
+    def evaluate_models(self) -> Dict[str, Any]:
+        """
+        Placeholder for evaluating machine learning models.
+        """
+        print("Evaluating models...")
+        return {}
+
+    def plot_feature_importance(self, results_dir: str, file_prefix: str, model_name: str):
+        """
+        Placeholder for plotting feature importance.
+        """
+        print(f"Plotting feature importance for {model_name}...")
+        pass
+
+    def find_sample_event_ids(self, n: int = 3) -> List[str]:
+        """
+        Placeholder for finding sample event IDs.
+        """
+        print(f"Finding {n} sample event IDs...")
+        return []
+
+    def plot_predictions_for_event(self, results_dir: str, event_id: str, file_prefix: str, model_name: str):
+        """
+        Placeholder for plotting predictions for an event.
+        """
+        print(f"Plotting predictions for event {event_id} with {model_name}...")
+        pass
+
     def calculate_rolling_sharpe_timeseries(self, results_dir: str, file_prefix: str = "event",
                                       return_col: str = 'ret', 
                                       analysis_window: Tuple[int, int] = (-60, 60),
@@ -1426,7 +1503,7 @@ class EventAnalysis:
             fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
                 fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
-                fig.add_vline(x=30, line=dict(color='violet', dash='dot'), annotation_text='Month After')
+                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
             event_start, event_end = -2, 2
             if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
                 fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
