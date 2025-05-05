@@ -2,7 +2,8 @@ import pandas as pd
 import numpy as np
 import os
 import sys
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 import traceback
 import polars as pl
 
@@ -15,7 +16,7 @@ try:
 except ImportError as e: 
     print(f"Error importing from event_processor: {e}")
     print("Ensure 'event_processor.py' and 'models.py' are in the same directory or Python path.")
-    print("Ensure Polars is installed: pip install polars pyarrow")
+    print("Ensure Polars and Plotly are installed: pip install polars pyarrow plotly")
     sys.exit(1)
 
 pl.Config.set_engine_affinity(engine="streaming")
@@ -70,6 +71,10 @@ SHARPE_WINDOW = 5
 SHARPE_ANALYSIS_START = -60
 SHARPE_ANALYSIS_END = 60
 SHARPE_LOOKBACK = 10
+    
+# Quantile analysis
+QUANTILES = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+QUANTILE_LOOKBACK = 10
     
 # Machine learning parameters
 ML_WINDOW = 3
@@ -139,28 +144,17 @@ def run_fda_analysis():
             event_window=event_window
         )
         
-        # --- Run Rolling Sharpe Time Series Analysis ---
-        analyzer.calculate_rolling_sharpe_timeseries(
+        # --- Run Volatility Quantile Analysis ---
+        analyzer.calculate_volatility_quantiles(
             results_dir=FDA_RESULTS_DIR,
             file_prefix=FDA_FILE_PREFIX,
             return_col='ret',
             analysis_window=analysis_window,
-            sharpe_window=SHARPE_WINDOW,
-            annualize=True,
+            lookback_window=QUANTILE_LOOKBACK,
+            quantiles=QUANTILES
         )
         
-        # --- Run Sharpe Ratio Quantile Analysis ---
-        analyzer.calculate_sharpe_quantiles(
-            results_dir=FDA_RESULTS_DIR,
-            file_prefix=FDA_FILE_PREFIX,
-            return_col='ret',
-            analysis_window=analysis_window,
-            lookback_window=SHARPE_LOOKBACK,
-            quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
-            annualize=True,
-        )
-
-        # Add this to run_fda_analysis function, right after the analyze_volatility_spikes call
+        # --- Run Mean Returns Analysis ---
         analyzer.analyze_mean_returns(
             results_dir=FDA_RESULTS_DIR,
             file_prefix=FDA_FILE_PREFIX,
@@ -170,6 +164,37 @@ def run_fda_analysis():
             post_days=VOL_POST_DAYS,
             baseline_window=baseline_window,
             event_window=event_window
+        )
+        
+        # --- Run Mean Returns Quantile Analysis ---
+        analyzer.calculate_mean_returns_quantiles(
+            results_dir=FDA_RESULTS_DIR,
+            file_prefix=FDA_FILE_PREFIX,
+            return_col='ret',
+            analysis_window=analysis_window,
+            lookback_window=QUANTILE_LOOKBACK,
+            quantiles=QUANTILES
+        )
+        
+        # --- Run Rolling Sharpe Time Series Analysis ---
+        analyzer.calculate_rolling_sharpe_timeseries(
+            results_dir=FDA_RESULTS_DIR,
+            file_prefix=FDA_FILE_PREFIX,
+            return_col='ret',
+            analysis_window=analysis_window,
+            sharpe_window=SHARPE_WINDOW,
+            annualize=True
+        )
+        
+        # --- Run Sharpe Ratio Quantile Analysis ---
+        analyzer.calculate_sharpe_quantiles(
+            results_dir=FDA_RESULTS_DIR,
+            file_prefix=FDA_FILE_PREFIX,
+            return_col='ret',
+            analysis_window=analysis_window,
+            lookback_window=SHARPE_LOOKBACK,
+            quantiles=QUANTILES,
+            annualize=True
         )
         
         # --- Run ML Analysis if requested ---
@@ -283,28 +308,17 @@ def run_earnings_analysis():
             event_window=event_window
         )
         
-        # --- Run Rolling Sharpe Time Series Analysis ---
-        analyzer.calculate_rolling_sharpe_timeseries(
+        # --- Run Volatility Quantile Analysis ---
+        analyzer.calculate_volatility_quantiles(
             results_dir=EARNINGS_RESULTS_DIR,
             file_prefix=EARNINGS_FILE_PREFIX,
             return_col='ret',
             analysis_window=analysis_window,
-            sharpe_window=SHARPE_WINDOW,
-            annualize=True,
+            lookback_window=QUANTILE_LOOKBACK,
+            quantiles=QUANTILES
         )
         
-        # --- Run Sharpe Ratio Quantile Analysis ---
-        analyzer.calculate_sharpe_quantiles(
-            results_dir=EARNINGS_RESULTS_DIR,
-            file_prefix=EARNINGS_FILE_PREFIX,
-            return_col='ret',
-            analysis_window=analysis_window,
-            lookback_window=SHARPE_LOOKBACK,
-            quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
-            annualize=True,
-        )
-
-        # Add this to run_earnings_analysis function, right after the analyze_volatility_spikes call
+        # --- Run Mean Returns Analysis ---
         analyzer.analyze_mean_returns(
             results_dir=EARNINGS_RESULTS_DIR,
             file_prefix=EARNINGS_FILE_PREFIX,
@@ -314,6 +328,37 @@ def run_earnings_analysis():
             post_days=VOL_POST_DAYS,
             baseline_window=baseline_window,
             event_window=event_window
+        )
+        
+        # --- Run Mean Returns Quantile Analysis ---
+        analyzer.calculate_mean_returns_quantiles(
+            results_dir=EARNINGS_RESULTS_DIR,
+            file_prefix=EARNINGS_FILE_PREFIX,
+            return_col='ret',
+            analysis_window=analysis_window,
+            lookback_window=QUANTILE_LOOKBACK,
+            quantiles=QUANTILES
+        )
+        
+        # --- Run Rolling Sharpe Time Series Analysis ---
+        analyzer.calculate_rolling_sharpe_timeseries(
+            results_dir=EARNINGS_RESULTS_DIR,
+            file_prefix=EARNINGS_FILE_PREFIX,
+            return_col='ret',
+            analysis_window=analysis_window,
+            sharpe_window=SHARPE_WINDOW,
+            annualize=True
+        )
+        
+        # --- Run Sharpe Ratio Quantile Analysis ---
+        analyzer.calculate_sharpe_quantiles(
+            results_dir=EARNINGS_RESULTS_DIR,
+            file_prefix=EARNINGS_FILE_PREFIX,
+            return_col='ret',
+            analysis_window=analysis_window,
+            lookback_window=SHARPE_LOOKBACK,
+            quantiles=QUANTILES,
+            annualize=True
         )
         
         # --- Run ML Analysis if requested ---
@@ -366,7 +411,7 @@ def run_earnings_analysis():
 
 def run_comparison():
     """
-    Runs a comparison between FDA and earnings event analysis results.
+    Runs a comparison between FDA and earnings event analysis results using Plotly.
     """
     print("\n=== Generating Event Comparison Reports ===")
     
@@ -404,46 +449,54 @@ def run_comparison():
                     fda_vol.set_index('days_to_event', inplace=True)
                     earnings_vol.set_index('days_to_event', inplace=True)
                     
-                    # Plot comparison
-                    plt.figure(figsize=(12, 8))
-                    plt.plot(fda_vol.index, fda_vol['avg_annualized_vol'], 'b-', label='FDA Approvals')
-                    plt.plot(earnings_vol.index, earnings_vol['avg_annualized_vol'], 'r-', label='Earnings Announcements')
-                    plt.axvline(0, color='black', linestyle='--', alpha=0.7, label='Event Day')
-                    plt.title('Volatility Comparison: FDA vs Earnings Events')
-                    plt.xlabel('Days Relative to Event')
-                    plt.ylabel('Average Annualized Volatility (%)')
-                    plt.legend()
-                    plt.grid(alpha=0.3)
-                    
-                    # Show the most relevant window
-                    common_range_min = max(fda_vol.index.min(), earnings_vol.index.min())
-                    common_range_max = min(fda_vol.index.max(), earnings_vol.index.max())
-                    plt.xlim(common_range_min, common_range_max)
+                    # Plot comparison using Plotly
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=fda_vol.index,
+                        y=fda_vol['avg_annualized_vol'],
+                        mode='lines',
+                        name='FDA Approvals',
+                        line=dict(color='blue')
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=earnings_vol.index,
+                        y=earnings_vol['avg_annualized_vol'],
+                        mode='lines',
+                        name='Earnings Announcements',
+                        line=dict(color='red')
+                    ))
+                    fig.add_vline(x=0, line=dict(color='black', dash='dash'), annotation_text='Event Day')
+                    fig.update_layout(
+                        title='Volatility Comparison: FDA vs Earnings Events',
+                        xaxis_title='Days Relative to Event',
+                        yaxis_title='Average Annualized Volatility (%)',
+                        showlegend=True,
+                        template='plotly_white',
+                        width=1000,
+                        height=600
+                    )
                     
                     # Save plot
-                    plt.savefig(os.path.join(COMPARISON_DIR, "volatility_comparison.png"))
-                    plt.close()
+                    plot_filename = os.path.join(COMPARISON_DIR, "volatility_comparison.png")
+                    fig.write_image(plot_filename, format='png', scale=2)
+                    print(f"Saved volatility comparison plot to: {plot_filename}")
                     
-                    # Calculate and save volatility ratio stats
-                    fda_ratios = pd.read_csv(os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_volatility_ratios.csv"))
-                    earnings_ratios = pd.read_csv(os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_volatility_ratios.csv"))
-                    
+                    # Calculate and save volatility stats
                     stats = {
                         'Event Type': ['FDA Approvals', 'Earnings Announcements'],
-                        'Mean Ratio': [fda_ratios['volatility_ratio'].mean(), earnings_ratios['volatility_ratio'].mean()],
-                        'Median Ratio': [fda_ratios['volatility_ratio'].median(), earnings_ratios['volatility_ratio'].median()],
-                        'Max Ratio': [fda_ratios['volatility_ratio'].max(), earnings_ratios['volatility_ratio'].max()],
-                        'Count': [len(fda_ratios), len(earnings_ratios)]
+                        'Mean Volatility': [fda_vol['avg_annualized_vol'].mean(), earnings_vol['avg_annualized_vol'].mean()],
+                        'Median Volatility': [fda_vol['avg_annualized_vol'].median(), earnings_vol['avg_annualized_vol'].median()],
+                        'Max Volatility': [fda_vol['avg_annualized_vol'].max(), earnings_vol['avg_annualized_vol'].max()]
                     }
                     
                     stats_df = pd.DataFrame(stats)
-                    stats_df.to_csv(os.path.join(COMPARISON_DIR, "volatility_ratio_comparison.csv"), index=False)
+                    stats_df.to_csv(os.path.join(COMPARISON_DIR, "volatility_comparison_stats.csv"), index=False)
                     print("Volatility comparison completed.")
                     
                     # Print summary
-                    print("\nVolatility Ratio Summary:")
+                    print("\nVolatility Summary:")
                     for _, row in stats_df.iterrows():
-                        print(f"  {row['Event Type']}: Mean={row['Mean Ratio']:.2f}, Median={row['Median Ratio']:.2f}, Events={row['Count']}")
+                        print(f"  {row['Event Type']}: Mean={row['Mean Volatility']:.2f}, Median={row['Median Volatility']:.2f}")
         except Exception as e:
             print(f"Error comparing volatility: {e}")
             traceback.print_exc()
@@ -469,47 +522,38 @@ def run_comparison():
                     fda_sharpe.set_index('days_to_event', inplace=True)
                     earnings_sharpe.set_index('days_to_event', inplace=True)
                     
-                    # Plot comparison
-                    plt.figure(figsize=(12, 8))
-                    plt.plot(fda_sharpe.index, fda_sharpe['sharpe_ratio'], 'b-', label='FDA Approvals')
-                    plt.plot(earnings_sharpe.index, earnings_sharpe['sharpe_ratio'], 'r-', label='Earnings Announcements')
-                    plt.axvline(0, color='black', linestyle='--', alpha=0.7, label='Event Day')
-                    plt.axhline(0, color='gray', linestyle='-', alpha=0.3)
-                    plt.title('Sharpe Ratio Comparison: FDA vs Earnings Events')
-                    plt.xlabel('Days Relative to Event')
-                    plt.ylabel('Sharpe Ratio')
-                    plt.legend()
-                    plt.grid(alpha=0.3)
-                    
-                    # Show the most relevant window
-                    common_range_min = max(fda_sharpe.index.min(), earnings_sharpe.index.min())
-                    common_range_max = min(fda_sharpe.index.max(), earnings_sharpe.index.max())
-                    plt.xlim(common_range_min, common_range_max)
+                    # Plot comparison using Plotly
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=fda_sharpe.index,
+                        y=fda_sharpe['sharpe_ratio'],
+                        mode='lines',
+                        name='FDA Approvals',
+                        line=dict(color='blue')
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=earnings_sharpe.index,
+                        y=earnings_sharpe['sharpe_ratio'],
+                        mode='lines',
+                        name='Earnings Announcements',
+                        line=dict(color='red')
+                    ))
+                    fig.add_vline(x=0, line=dict(color='black', dash='dash'), annotation_text='Event Day')
+                    fig.add_hline(y=0, line=dict(color='gray', opacity=0.3))
+                    fig.update_layout(
+                        title='Sharpe Ratio Comparison: FDA vs Earnings Events',
+                        xaxis_title='Days Relative to Event',
+                        yaxis_title='Sharpe Ratio',
+                        showlegend=True,
+                        template='plotly_white',
+                        width=1000,
+                        height=600
+                    )
                     
                     # Save plot
-                    plt.savefig(os.path.join(COMPARISON_DIR, "sharpe_ratio_comparison.png"))
-                    plt.close()
-                    
-                    # Create a heatmap comparison if seaborn is available
-                    try:
-                        import seaborn as sns
-                        
-                        # Combine the data for the heatmap
-                        compare_data = pd.DataFrame({
-                            'FDA': fda_sharpe['sharpe_ratio'],
-                            'Earnings': earnings_sharpe['sharpe_ratio']
-                        })
-                        
-                        plt.figure(figsize=(14, 6))
-                        sns.heatmap(compare_data.T, cmap='RdYlGn', center=0, 
-                                   cbar_kws={'label': 'Sharpe Ratio'})
-                        plt.axvline(abs(common_range_min), color='black', linestyle='--', alpha=0.7)
-                        plt.title('Sharpe Ratio Heatmap: FDA vs Earnings Events')
-                        plt.xlabel('Days Relative to Event')
-                        plt.savefig(os.path.join(COMPARISON_DIR, "sharpe_ratio_heatmap.png"))
-                        plt.close()
-                    except ImportError:
-                        print("Warning: seaborn not available. Skipping heatmap creation.")
+                    plot_filename = os.path.join(COMPARISON_DIR, "sharpe_ratio_comparison.png")
+                    fig.write_image(plot_filename, format='png', scale=2)
+                    print(f"Saved Sharpe ratio comparison plot to: {plot_filename}")
                     
                     # Calculate and save summary statistics
                     event_window = (-5, 5)  # Days around event for stats
@@ -599,19 +643,21 @@ def run_comparison():
                 f.write(f"Volatility Window: {VOL_WINDOW}\n")
                 f.write(f"Volatility Event Window: {VOL_EVENT_START} to {VOL_EVENT_END}\n")
                 f.write(f"Sharpe Window: {SHARPE_WINDOW}\n")
-                f.write(f"Sharpe Analysis Window: {SHARPE_ANALYSIS_START} to {SHARPE_ANALYSIS_END}\n\n")
+                f.write(f"Sharpe Analysis Window: {SHARPE_ANALYSIS_START} to {SHARPE_ANALYSIS_END}\n")
+                f.write(f"Quantile Lookback Window: {QUANTILE_LOOKBACK}\n")
+                f.write(f"Quantiles Analyzed: {QUANTILES}\n\n")
                 
                 f.write("Key Observations\n")
                 f.write("--------------\n")
                 
-                # Try to get volatility ratio data
+                # Try to get volatility data
                 try:
-                    vol_stats_file = os.path.join(COMPARISON_DIR, "volatility_ratio_comparison.csv")
+                    vol_stats_file = os.path.join(COMPARISON_DIR, "volatility_comparison_stats.csv")
                     if os.path.exists(vol_stats_file):
                         vol_stats = pd.read_csv(vol_stats_file)
                         f.write("Volatility Impact:\n")
                         for _, row in vol_stats.iterrows():
-                            f.write(f"- {row['Event Type']}: Mean Volatility Ratio = {row['Mean Ratio']:.2f} (Events: {row['Count']})\n")
+                            f.write(f"- {row['Event Type']}: Mean Volatility = {row['Mean Volatility']:.2f}% (Median: {row['Median Volatility']:.2f}%)\n")
                         f.write("\n")
                 except:
                     pass
@@ -630,9 +676,12 @@ def run_comparison():
                 
                 f.write("Generated Visualizations\n")
                 f.write("-----------------------\n")
-                f.write("- volatility_comparison.png: Compares volatility patterns\n")
+                f.write("- volatility_comparison.png: Compares average volatility patterns\n")
                 f.write("- sharpe_ratio_comparison.png: Compares Sharpe ratio trends\n")
-                f.write("- sharpe_ratio_heatmap.png: Heatmap visualization of Sharpe ratios\n\n")
+                f.write("Additional outputs in FDA and Earnings results directories:\n")
+                f.write("- Volatility quantiles plots\n")
+                f.write("- Mean return quantiles plots\n")
+                f.write("- Sharpe ratio quantiles plots\n\n")
                 
                 f.write("Conclusion\n")
                 f.write("----------\n")
@@ -666,18 +715,18 @@ def main():
     earnings_success = run_earnings_analysis()
     
     # Run comparison if both analyses succeeded
-    #if fda_success and earnings_success:
-    #    comparison_success = run_comparison()
-    #    if comparison_success:
-    #        print("\n=== All analyses completed successfully ===")
-    #    else:
-    #        print("\n=== Comparison analysis failed, but FDA and earnings analyses completed ===")
-    #elif fda_success:
-    #    print("\n=== Only FDA analysis completed successfully ===")
-    #elif earnings_success:
-    #    print("\n=== Only earnings analysis completed successfully ===")
-    #else:
-    #    print("\n=== Both analyses failed ===")
+    if fda_success and earnings_success:
+        comparison_success = run_comparison()
+        if comparison_success:
+            print("\n=== All analyses completed successfully ===")
+        else:
+            print("\n=== Comparison analysis failed, but FDA and earnings analyses completed ===")
+    elif fda_success:
+        print("\n=== Only FDA analysis completed successfully ===")
+    elif earnings_success:
+        print("\n=== Only earnings analysis completed successfully ===")
+    else:
+        print("\n=== Both analyses failed ===")
 
 if __name__ == "__main__":
     main()
