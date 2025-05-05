@@ -14,3 +14,4 @@ xgboost>=1.7.6,<2.0.0
 # Data reading/processing
 pyarrow>=12.0.0  # For Parquet file support
 plotly
+kaleido

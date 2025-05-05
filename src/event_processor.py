@@ -1459,3 +1459,234 @@ class EventAnalysis:
             print("No data for rolling volatility plot.")
 
         return aligned_vol
+
+    def calculate_volatility_quantiles(self, results_dir: str, file_prefix: str = "event",
+                                 return_col: str = 'ret', 
+                                 analysis_window: Tuple[int, int] = (-60, 60),
+                                 lookback_window: int = 10,
+                                 quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
+        """
+        Calculates volatility quantiles using vectorized operations.
+        """
+        print(f"\n--- Calculating Volatility Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
+
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or missing return column.")
+            return None
+
+        extended_start = analysis_window[0] - lookback_window
+        analysis_data = self.data.filter(
+            (pl.col('days_to_event') >= extended_start) & 
+            (pl.col('days_to_event') <= analysis_window[1])
+        )
+
+        if analysis_data.is_empty():
+            print(f"Error: No data found within analysis window {analysis_window}.")
+            return None
+
+        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
+        vol_data = []
+        print(f"Processing {len(days_range)} days with vectorized operations...")
+
+        all_event_ids = analysis_data.get_column('event_id').unique()
+        print(f"Processing {len(all_event_ids)} unique events...")
+
+        batch_size = 10
+        for batch_start in range(0, len(days_range), batch_size):
+            batch_days = days_range[batch_start:batch_start + batch_size]
+            print(f"Processing batch days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
+
+            batch_results = []
+            for center_day in batch_days:
+                window_start = center_day - lookback_window
+                window_end = center_day
+
+                window_data = analysis_data.filter(
+                    (pl.col('days_to_event') >= window_start) & 
+                    (pl.col('days_to_event') <= window_end)
+                )
+
+                if window_data.is_empty():
+                    empty_results = {"days_to_event": center_day, "event_count": 0}
+                    for q in quantiles:
+                        empty_results[f"vol_q{int(q*100)}"] = None
+                    batch_results.append(empty_results)
+                    continue
+
+                vol_by_event = window_data.group_by('event_id').agg([
+                    pl.std(return_col).alias('vol'),
+                    pl.count().alias('n_obs')
+                ]).filter(
+                    (pl.col('n_obs') >= max(3, lookback_window // 3)) &
+                    (pl.col('vol').is_not_null())
+                )
+
+                valid_events = vol_by_event.height
+
+                if valid_events >= 5:
+                    vol_by_event = vol_by_event.with_columns(
+                        (pl.col('vol') * np.sqrt(252) * 100).alias('annualized_vol')
+                    )
+
+                    q_values = {}
+                    for q in quantiles:
+                        q_value = vol_by_event.select(
+                            pl.col('annualized_vol').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
+                        ).item(0, 0)
+                        q_values[f"vol_q{int(q*100)}"] = q_value
+
+                    day_results = {"days_to_event": center_day, "event_count": valid_events, **q_values}
+                else:
+                    day_results = {"days_to_event": center_day, "event_count": valid_events}
+                    for q in quantiles:
+                        day_results[f"vol_q{int(q*100)}"] = None
+
+                batch_results.append(day_results)
+
+            vol_data.extend(batch_results)
+
+            del window_data, vol_by_event, batch_results
+            import gc
+            gc.collect()
+
+        results_df = pl.DataFrame(vol_data)
+
+        # Plot quantiles using Plotly
+        try:
+            results_pd = results_df.to_pandas()
+            fig = go.Figure()
+            for q in quantiles:
+                col = f"vol_q{int(q*100)}"
+                if col in results_pd.columns:
+                    fig.add_trace(go.Scatter(
+                        x=results_pd['days_to_event'],
+                        y=results_pd[col],
+                        mode='lines',
+                        name=f'Q{int(q*100)}',
+                        line=dict(width=2 if q == 0.5 else 1, dash='dash' if q != 0.5 else 'solid')
+                    ))
+
+            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
+            if analysis_window[0] <= -30 and analysis_window[1] >= 30:
+                fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
+                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
+            event_start, event_end = -2, 2
+            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
+                fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
+
+            fig.update_layout(
+                title=f'Volatility Quantiles Around Events (Lookback: {lookback_window} days)',
+                xaxis_title='Days Relative to Event',
+                yaxis_title='Annualized Volatility (%)',
+                showlegend=True,
+                template='plotly_white',
+                width=1000,
+                height=600
+            )
+
+            try:
+                # Try to save with kaleido
+                plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.png")
+                fig.write_image(plot_filename, format='png', scale=2)
+                print(f"Saved volatility quantiles plot to: {plot_filename}")
+            except Exception as e:
+                # Fall back to saving without image if kaleido is not available
+                print(f"Warning: Could not save plot image: {e}")
+                print("To fix this issue, install the kaleido package: pip install -U kaleido")
+                # Save as HTML as fallback
+                html_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.html")
+                fig.write_html(html_filename)
+                print(f"Saved volatility quantiles as HTML (fallback) to: {html_filename}")
+
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Save results to CSV (this will work even if plotting fails)
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.csv")
+        try:
+            results_df.write_csv(csv_filename)
+            print(f"Saved volatility quantiles data to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving quantiles data: {e}")
+
+        return results_df
+
+    def analyze_mean_returns(self, results_dir: str, file_prefix: str = "event", 
+                            return_col: str = 'ret', window: int = 5, 
+                            min_periods: int = 3, pre_days: int = 60, 
+                            post_days: int = 60, baseline_window=(-60, -11), 
+                            event_window=(-2, 2)):
+        """
+        Calculates and plots rolling mean returns using Polars and Plotly.
+        """
+        print(f"\n--- Analyzing Rolling Mean Returns (Window={window} rows) using Polars ---")
+        if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
+            print("Error: Data/required columns missing."); return None
+    
+        df = self.data.sort(['event_id', 'date'])
+    
+        df = df.with_columns(
+            pl.col(return_col).rolling_mean(window_size=window, min_periods=min_periods)
+              .over('event_id').alias('rolling_mean_return')
+        )
+        df = df.with_columns(
+            (pl.col('rolling_mean_return') * 100).alias('rolling_mean_return_pct')
+        )
+    
+        aligned_means = df.group_by('days_to_event').agg(
+            pl.mean('rolling_mean_return_pct').alias('avg_rolling_mean_return')
+        ).filter(
+            (pl.col('days_to_event') >= -pre_days) &
+            (pl.col('days_to_event') <= post_days)
+        ).sort('days_to_event').drop_nulls()
+    
+        # Plotting Rolling Mean Returns with Plotly
+        if not aligned_means.is_empty():
+            aligned_means_pd = aligned_means.to_pandas()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=aligned_means_pd['days_to_event'],
+                y=aligned_means_pd['avg_rolling_mean_return'],
+                mode='lines+markers',
+                name='Avg. Rolling Mean Return',
+                line=dict(color='blue')
+            ))
+            
+            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
+            fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
+            fig.add_vrect(x0=event_window[0], x1=event_window[1], fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
+            
+            fig.update_layout(
+                title=f'Average Rolling Mean Return Around Event (Window={window} days)',
+                xaxis_title='Days Relative to Event',
+                yaxis_title='Avg. Rolling Mean Return (%)',
+                showlegend=True,
+                template='plotly_white',
+                width=1000,
+                height=600
+            )
+            
+            plot_filename_mean = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.png")
+            csv_filename_mean = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d_data.csv")
+            try:
+                fig.write_image(plot_filename_mean, format='png', scale=2)
+                print(f"Saved rolling mean return plot to: {plot_filename_mean}")
+            except Exception as e:
+                print(f"Warning: Could not save plot image: {e}")
+                print("To fix this issue, install the kaleido package: pip install -U kaleido")
+                # Save as HTML as fallback
+                html_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.html")
+                fig.write_html(html_filename)
+                print(f"Saved mean return plot as HTML (fallback) to: {html_filename}")
+                
+            try:
+                aligned_means_pd.to_csv(csv_filename_mean)
+                print(f"Saved rolling mean return data to: {csv_filename_mean}")
+            except Exception as e:
+                print(f"Error saving data: {e}")
+        else:
+            print("No data for rolling mean returns plot.")
+    
+        return aligned_means
