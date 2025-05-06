@@ -30,7 +30,6 @@ def run_rtv_analysis(event_file: str,
                     ticker_col: str,
                     window_days: int = 60,
                     return_col: str = "ret",
-                    rolling_window: int = 5,
                     delta_days: int = 10) -> Dict[str, Any]:
     """
     Run the return-to-variance analysis to test Hypothesis 1.
@@ -44,7 +43,6 @@ def run_rtv_analysis(event_file: str,
     ticker_col (str): Column name containing ticker symbols
     window_days (int): Days before/after event to include
     return_col (str): Column name containing returns
-    rolling_window (int): Window size for rolling calculations
     delta_days (int): Parameter δ from the paper (post-event rising phase duration)
     
     Returns:
@@ -77,17 +75,16 @@ def run_rtv_analysis(event_file: str,
         # Initialize return-to-variance analysis
         rtv_analysis = ReturnToVarianceAnalysis(event_analysis)
         
-        # Run hypothesis test
-        print(f"\nRunning hypothesis test with delta = {delta_days} days...")
-        results = rtv_analysis.run_hypothesis_1_test(
+        # Run hypothesis test using the actual values approach (which is implemented)
+        print(f"\nRunning actual-values hypothesis test with delta = {delta_days} days...")
+        results = rtv_analysis.run_actual_hypothesis_1_test(
             return_col=return_col,
-            rolling_window=rolling_window,
             delta_days=delta_days,
             results_dir=results_dir,
             file_prefix=file_prefix
         )
         
-        print("\n=== Hypothesis 1 Test Completed ===")
+        print("\n=== Hypothesis 1 Test (Actual Values) Completed ===")
         print(f"Results saved to: {os.path.abspath(results_dir)}")
         print(f"Hypothesis Supported: {results['hypothesis_supported']}")
         
@@ -134,7 +131,6 @@ def main():
     # Analysis parameters
     WINDOW_DAYS = 60
     RETURN_COL = "ret"
-    ROLLING_WINDOW = 5
     DELTA_DAYS = 10  # δ parameter from the paper
     
     # Create results directories
@@ -142,7 +138,7 @@ def main():
     os.makedirs(EARNINGS_RESULTS_DIR, exist_ok=True)
     
     # Run FDA analysis
-    print("\n=== Starting FDA Approval Event RTV Analysis ===")
+    print("\n=== Starting FDA Approval Event RTV Analysis (Actual Values) ===")
     fda_results = run_rtv_analysis(
         event_file=FDA_EVENT_FILE,
         stock_files=FDA_STOCK_FILES,
@@ -152,12 +148,11 @@ def main():
         ticker_col=FDA_TICKER_COL,
         window_days=WINDOW_DAYS,
         return_col=RETURN_COL,
-        rolling_window=ROLLING_WINDOW,
         delta_days=DELTA_DAYS
     )
     
     # Run Earnings analysis
-    print("\n=== Starting Earnings Announcement Event RTV Analysis ===")
+    print("\n=== Starting Earnings Announcement Event RTV Analysis (Actual Values) ===")
     earnings_results = run_rtv_analysis(
         event_file=EARNINGS_EVENT_FILE,
         stock_files=EARNINGS_STOCK_FILES,
@@ -167,9 +162,53 @@ def main():
         ticker_col=EARNINGS_TICKER_COL,
         window_days=WINDOW_DAYS,
         return_col=RETURN_COL,
-        rolling_window=ROLLING_WINDOW,
         delta_days=DELTA_DAYS
     )
+    
+    # Create comparison report
+    comparison_dir = "results/rtv_analysis/comparison"
+    os.makedirs(comparison_dir, exist_ok=True)
+    
+    try:
+        with open(os.path.join(comparison_dir, "rtv_actual_values_comparison.txt"), "w") as f:
+            f.write("===== Hypothesis 1 Test Results (Actual Values) =====\n\n")
+            f.write(f"Parameter δ (post-event rising phase duration): {DELTA_DAYS} days\n\n")
+            
+            f.write("--- FDA Approval Events ---\n")
+            if fda_results['pre_event']:
+                f.write(f"Pre-Event Phase: Mean RTV = {fda_results['pre_event']['mean_rtv'][0]:.4f}\n")
+            if fda_results['post_event_rising']:
+                f.write(f"Post-Event Rising Phase: Mean RTV = {fda_results['post_event_rising']['mean_rtv'][0]:.4f}\n")
+            if fda_results['post_event_decay']:
+                f.write(f"Post-Event Decay Phase: Mean RTV = {fda_results['post_event_decay']['mean_rtv'][0]:.4f}\n")
+            f.write(f"Hypothesis Supported: {fda_results['hypothesis_supported']}\n\n")
+            
+            f.write("--- Earnings Announcement Events ---\n")
+            if earnings_results['pre_event']:
+                f.write(f"Pre-Event Phase: Mean RTV = {earnings_results['pre_event']['mean_rtv'][0]:.4f}\n")
+            if earnings_results['post_event_rising']:
+                f.write(f"Post-Event Rising Phase: Mean RTV = {earnings_results['post_event_rising']['mean_rtv'][0]:.4f}\n")
+            if earnings_results['post_event_decay']:
+                f.write(f"Post-Event Decay Phase: Mean RTV = {earnings_results['post_event_decay']['mean_rtv'][0]:.4f}\n")
+            f.write(f"Hypothesis Supported: {earnings_results['hypothesis_supported']}\n\n")
+            
+            f.write("=== Conclusion ===\n")
+            if fda_results['hypothesis_supported'] and earnings_results['hypothesis_supported']:
+                f.write("Hypothesis 1 is strongly supported by both FDA Approval and Earnings Announcement events.\n")
+                f.write("The return-to-variance ratio consistently peaks during the post-event rising phase.\n")
+            elif fda_results['hypothesis_supported']:
+                f.write("Hypothesis 1 is supported by FDA Approval events but not by Earnings Announcement events.\n")
+                f.write("This suggests differences in market behavior between regulatory and financial events.\n") 
+            elif earnings_results['hypothesis_supported']:
+                f.write("Hypothesis 1 is supported by Earnings Announcement events but not by FDA Approval events.\n")
+                f.write("This suggests differences in market behavior between financial and regulatory events.\n")
+            else:
+                f.write("Hypothesis 1 is not supported by either FDA Approval or Earnings Announcement events.\n")
+                f.write("This suggests that the hypothesized return-to-variance pattern may not be consistent.\n")
+        
+        print(f"\nComparison report saved to: {os.path.join(comparison_dir, 'rtv_actual_values_comparison.txt')}")
+    except Exception as e:
+        print(f"Error creating comparison report: {e}")
 
 if __name__ == "__main__":
     main()
