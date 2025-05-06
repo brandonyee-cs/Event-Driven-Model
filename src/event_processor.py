@@ -1065,7 +1065,7 @@ class EventAnalysis:
         file_prefix: str = "event",
         return_col: str = 'ret', 
         analysis_window: Tuple[int, int] = (-60, 60),
-        sharpe_window: int = 10,
+        sharpe_window: int = 5,
         annualize: bool = True, 
         risk_free_rate: float = 0.0
     ) -> Optional[pl.DataFrame]:
@@ -1116,17 +1116,16 @@ class EventAnalysis:
 
         # Calculate cumulative returns for naive buy strategy
         # For each event and day, compute return from (day - sharpe_window) to day
-        returns_data = analysis_data.group_by(['event_id', 'days_to_event']).agg(
-            returns=pl.col(return_col).fill_null(0)  # Replace null returns with 0 for compounding
-        ).with_columns(
-            # Calculate cumulative return over the lookback window
-            cum_return=pl.col('returns').rolling_apply(
-                lambda x: float(np.prod(1 + np.array(x)) - 1) if len(x) >= 3 else None,
-                window_size=sharpe_window,
-                min_periods=3
-            ).over('event_id')
-        ).filter(
-            pl.col('days_to_event').is_in(range(analysis_window[0], analysis_window[1] + 1))
+        returns_data = analysis_data.with_columns(
+            # Fill null returns with 0 for compounding
+            returns=pl.col(return_col).fill_null(0)
+        ).group_by('event_id').map_groups(
+            lambda df: df.with_columns(
+                # Calculate cumulative return over the lookback window
+                cum_return=pl.col('returns').shift(sharpe_window).cum_prod().shift(-sharpe_window) - 1
+            ).filter(
+                pl.col('days_to_event').is_in(range(analysis_window[0], analysis_window[1] + 1))
+            )
         )
 
         # Aggregate returns across events for each day
@@ -1262,7 +1261,7 @@ class EventAnalysis:
 
         print(f"Completed Sharpe ratio calculation. Valid days: {valid_days}/{daily_stats.height}")
         return daily_stats
-        
+
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
                           return_col: str = 'ret', 
                           analysis_window: Tuple[int, int] = (-60, 60),
