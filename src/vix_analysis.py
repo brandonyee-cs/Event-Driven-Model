@@ -8,27 +8,15 @@ import pandas as pd
 from typing import List, Optional, Tuple, Dict, Any
 from scipy.stats import pearsonr, spearmanr
 
-# Import from existing modules
-try:
-    from src.event_processor import EventDataLoader, EventAnalysis
-    from src.models import TimeSeriesRidge, XGBoostDecileModel
-except ImportError:
-    print("Error: Could not import required modules.")
-    print("Make sure src/event_processor.py and src/models.py are in the correct path.")
-    import sys
-    sys.exit(1)
-
-pl.Config.set_engine_affinity(engine="streaming")
-
 class VIXImpactAnalysis:
     """Analyzes the relationship between VIX changes and returns to test Hypothesis 2."""
     
-    def __init__(self, event_analysis: EventAnalysis):
+    def __init__(self, event_analysis):
         """
         Initialize with an existing EventAnalysis instance.
         
         Parameters:
-        event_analysis (EventAnalysis): An initialized and data-loaded EventAnalysis instance
+        event_analysis: An initialized and data-loaded EventAnalysis instance
         """
         self.event_analysis = event_analysis
         self.data = event_analysis.data
@@ -329,18 +317,34 @@ class VIXImpactAnalysis:
         # Convert to pandas for plotting
         scatter_data_pd = scatter_data.to_pandas()
         
-        # Create scatter plot
-        fig = px.scatter(
-            scatter_data_pd, 
-            x='vix_pct_change', 
-            y='cum_return',
-            title='Pre-Event VIX Changes vs. Post-Event Returns',
-            labels={
-                'vix_pct_change': 'Pre-Event VIX Change (%)',
-                'cum_return': 'Post-Event Cumulative Return'
-            },
-            trendline='ols'
-        )
+        # Create scatter plot without trendline to avoid statsmodels dependency
+        try:
+            # First try with trendline if statsmodels is available
+            import statsmodels.api as sm
+            fig = px.scatter(
+                scatter_data_pd, 
+                x='vix_pct_change', 
+                y='cum_return',
+                title='Pre-Event VIX Changes vs. Post-Event Returns',
+                labels={
+                    'vix_pct_change': 'Pre-Event VIX Change (%)',
+                    'cum_return': 'Post-Event Cumulative Return'
+                },
+                trendline='ols'
+            )
+        except (ImportError, ModuleNotFoundError):
+            # Fall back to scatter plot without trendline
+            print("Note: statsmodels package not found. Creating scatter plot without trendline.")
+            fig = px.scatter(
+                scatter_data_pd, 
+                x='vix_pct_change', 
+                y='cum_return',
+                title='Pre-Event VIX Changes vs. Post-Event Returns',
+                labels={
+                    'vix_pct_change': 'Pre-Event VIX Change (%)',
+                    'cum_return': 'Post-Event Cumulative Return'
+                }
+            )
         
         # Add annotation with correlation values
         if results['pearson_corr'] is not None:
@@ -530,7 +534,10 @@ class VIXImpactAnalysis:
             part1_supported = False
         else:
             part1_supported = pre_event_results.get('hypothesis_supported', False)
-            self.plot_pre_event_relationship(pre_event_results, results_dir, file_prefix)
+            try:
+                self.plot_pre_event_relationship(pre_event_results, results_dir, file_prefix)
+            except Exception as e:
+                print(f"Warning: Failed to create pre-event plot: {e}")
         
         # Test second part of hypothesis: Post-event VIX spikes correlate with elevated returns
         post_event_results = self.analyze_post_event_vix_return_relationship(
@@ -545,7 +552,10 @@ class VIXImpactAnalysis:
             part2_supported = False
         else:
             part2_supported = post_event_results.get('hypothesis_supported', False)
-            self.plot_post_event_correlations(post_event_results, results_dir, file_prefix)
+            try:
+                self.plot_post_event_correlations(post_event_results, results_dir, file_prefix)
+            except Exception as e:
+                print(f"Warning: Failed to create post-event plot: {e}")
         
         # Overall hypothesis is supported if both parts are supported
         hypothesis_supported = part1_supported and part2_supported
