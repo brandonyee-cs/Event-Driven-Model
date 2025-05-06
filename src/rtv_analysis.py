@@ -148,50 +148,60 @@ class ReturnToVarianceAnalysis:
             return None
 
         # Calculate statistics for each phase
-        pre_event_stats = rtv_data.filter(pl.col('is_pre_event')).select(
+        pre_event_data = rtv_data.filter(pl.col('is_pre_event'))
+        post_rising_data = rtv_data.filter(pl.col('is_post_event_rising'))
+        post_decay_data = rtv_data.filter(pl.col('is_post_event_decay'))
+
+        # Check if we have any data for each phase
+        has_pre_event = not pre_event_data.is_empty()
+        has_post_rising = not post_rising_data.is_empty()
+        has_post_decay = not post_decay_data.is_empty()
+
+        pre_event_stats = pre_event_data.select(
             pl.mean('rtv_ratio').alias('mean_rtv'),
             pl.median('rtv_ratio').alias('median_rtv'),
             pl.std('rtv_ratio').alias('std_rtv'),
             pl.count('rtv_ratio').alias('count')
-        )
+        ) if has_pre_event else None
 
-        post_rising_stats = rtv_data.filter(pl.col('is_post_event_rising')).select(
+        post_rising_stats = post_rising_data.select(
             pl.mean('rtv_ratio').alias('mean_rtv'),
             pl.median('rtv_ratio').alias('median_rtv'),
             pl.std('rtv_ratio').alias('std_rtv'),
             pl.count('rtv_ratio').alias('count')
-        )
+        ) if has_post_rising else None
 
-        post_decay_stats = rtv_data.filter(pl.col('is_post_event_decay')).select(
+        post_decay_stats = post_decay_data.select(
             pl.mean('rtv_ratio').alias('mean_rtv'),
             pl.median('rtv_ratio').alias('median_rtv'),
             pl.std('rtv_ratio').alias('std_rtv'),
             pl.count('rtv_ratio').alias('count')
-        )
+        ) if has_post_decay else None
 
-        # Check if hypothesis is supported
+        # Extract mean values safely with fallbacks
+        pre_mean = pre_event_stats.select('mean_rtv').item(0, 0) if (has_pre_event and not pre_event_stats.is_empty()) else 0
+        post_rising_mean = post_rising_stats.select('mean_rtv').item(0, 0) if (has_post_rising and not post_rising_stats.is_empty()) else 0
+        post_decay_mean = post_decay_stats.select('mean_rtv').item(0, 0) if (has_post_decay and not post_decay_stats.is_empty()) else 0
+
+        # Additional safety check for None values
+        pre_mean = 0 if pre_mean is None else pre_mean
+        post_rising_mean = 0 if post_rising_mean is None else post_rising_mean
+        post_decay_mean = 0 if post_decay_mean is None else post_decay_mean
+
+        # Check if hypothesis is supported (only if we have all three phases)
         is_supported = False
-        if (not pre_event_stats.is_empty() and not post_rising_stats.is_empty() and 
-            not post_decay_stats.is_empty()):
-            pre_mean = pre_event_stats.select('mean_rtv').item(0, 0)
-            post_rising_mean = post_rising_stats.select('mean_rtv').item(0, 0)
-            post_decay_mean = post_decay_stats.select('mean_rtv').item(0, 0)
-
+        if has_pre_event and has_post_rising and has_post_decay:
             is_supported = (post_rising_mean > pre_mean) and (post_rising_mean > post_decay_mean)
 
         results = {
-            'pre_event': pre_event_stats.to_dict(as_series=False) if not pre_event_stats.is_empty() else None,
-            'post_event_rising': post_rising_stats.to_dict(as_series=False) if not post_rising_stats.is_empty() else None,
-            'post_event_decay': post_decay_stats.to_dict(as_series=False) if not post_decay_stats.is_empty() else None,
+            'pre_event': pre_event_stats.to_dict(as_series=False) if pre_event_stats is not None and not pre_event_stats.is_empty() else None,
+            'post_event_rising': post_rising_stats.to_dict(as_series=False) if post_rising_stats is not None and not post_rising_stats.is_empty() else None,
+            'post_event_decay': post_decay_stats.to_dict(as_series=False) if post_decay_stats is not None and not post_decay_stats.is_empty() else None,
             'hypothesis_supported': is_supported,
             'delta_days': delta_days
         }
 
         # Print summary
-        pre_mean = pre_event_stats.select('mean_rtv').item(0, 0) if not pre_event_stats.is_empty() else 0
-        post_rising_mean = post_rising_stats.select('mean_rtv').item(0, 0) if not post_rising_stats.is_empty() else 0
-        post_decay_mean = post_decay_stats.select('mean_rtv').item(0, 0) if not post_decay_stats.is_empty() else 0
-        
         print("\nActual Return-to-Variance Ratio by Phase:")
         print(f"Pre-Event Phase: Mean={pre_mean:.4f}")
         print(f"Post-Event Rising Phase (1 to {delta_days} days): Mean={post_rising_mean:.4f}")
