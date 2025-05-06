@@ -309,3 +309,197 @@ class ReturnToVarianceAnalysis:
             print(f"Error creating bar chart: {e}")
 
         return phase_results
+
+    def calculate_rtv_timeseries(self, 
+                           return_col: str = 'ret',
+                           pre_days: int = 60,
+                           post_days: int = 60,
+                           window_size: int = 5,
+                           min_periods: int = 3,
+                           results_dir: str = "results/rtv_timeseries",
+                           file_prefix: str = "event") -> pl.DataFrame:
+        """
+        Calculate return-to-variance ratio as a time series around events.
+        
+        Parameters:
+        return_col (str): Column name containing daily returns
+        pre_days (int): Days before event to analyze
+        post_days (int): Days after event to analyze
+        window_size (int): Window size for rolling calculations
+        min_periods (int): Minimum number of observations in window
+        results_dir (str): Directory to save results
+        file_prefix (str): Prefix for saved files
+        
+        Returns:
+        pl.DataFrame: DataFrame containing RTV time series
+        """
+        print(f"\n--- Calculating Return-to-Variance Time Series ---")
+        print(f"Using {window_size}-day window with minimum {min_periods} periods")
+        
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or missing required columns.")
+            return None
+        
+        # Filter data to analysis period
+        df = self.data.filter(
+            (pl.col('days_to_event') >= -pre_days) & 
+            (pl.col('days_to_event') <= post_days)
+        ).sort(['event_id', 'days_to_event'])
+        
+        # Clip extreme returns to prevent outliers from skewing results
+        # More aggressive outlier handling with asymmetric clipping
+        df = df.with_columns(
+            pl.col(return_col).clip(-0.15, 0.30).alias('clipped_return')
+        )
+        
+        # Calculate rolling return (mean) and variance for each event
+        df = df.with_columns([
+            pl.col('clipped_return').rolling_mean(
+                window_size=window_size, 
+                min_periods=min_periods
+            ).over('event_id').alias('rolling_mean_return'),
+            
+            pl.col('clipped_return').rolling_var(
+                window_size=window_size, 
+                min_periods=min_periods
+            ).over('event_id').alias('rolling_variance')
+        ])
+        
+        # Calculate return-to-variance ratio
+        df = df.with_columns(
+            pl.when(pl.col('rolling_variance') > 0)
+            .then(pl.col('rolling_mean_return') / pl.col('rolling_variance'))
+            .otherwise(None)
+            .alias('rtv_ratio')
+        )
+        
+        # Aggregate across events for each day relative to event
+        rtv_by_day = df.group_by('days_to_event').agg([
+            pl.mean('rtv_ratio').alias('mean_rtv'),
+            pl.median('rtv_ratio').alias('median_rtv'),
+            pl.std('rtv_ratio').alias('std_rtv'),
+            pl.count('rtv_ratio').alias('event_count')
+        ]).sort('days_to_event')
+        
+        # Create a full range of days to ensure continuity
+        all_days = pl.DataFrame({
+            'days_to_event': list(range(-pre_days, post_days + 1))
+        })
+        
+        # Join with all_days to ensure we have all days in the range
+        rtv_by_day = all_days.join(
+            rtv_by_day, on='days_to_event', how='left'
+        ).sort('days_to_event')
+        
+        # Simple linear interpolation for missing days
+        rtv_by_day = rtv_by_day.with_columns(
+            pl.col('mean_rtv').interpolate().alias('mean_rtv_interp')
+        )
+        
+        # Add smoothed version for visualization
+        smooth_window = min(7, window_size)
+        rtv_by_day = rtv_by_day.with_columns(
+            pl.col('mean_rtv').rolling_mean(
+                window_size=smooth_window, 
+                min_periods=smooth_window // 2,
+                center=True
+            ).alias('mean_rtv_smooth')
+        )
+        
+        # Plot the time series
+        try:
+            # Convert to pandas for plotting with Plotly
+            rtv_pd = rtv_by_day.to_pandas()
+            
+            import plotly.graph_objects as go
+            
+            fig = go.Figure()
+            
+            # Add raw RTV time series
+            fig.add_trace(go.Scatter(
+                x=rtv_pd['days_to_event'],
+                y=rtv_pd['mean_rtv'],
+                mode='lines',
+                name='Raw RTV Ratio',
+                line=dict(color='blue', width=1),
+                opacity=0.5
+            ))
+            
+            # Add smoothed RTV time series
+            fig.add_trace(go.Scatter(
+                x=rtv_pd['days_to_event'],
+                y=rtv_pd['mean_rtv_smooth'],
+                mode='lines',
+                name=f'{smooth_window}-Day Smoothed RTV',
+                line=dict(color='red', width=2.5)
+            ))
+            
+            # Add vertical line at event day
+            fig.add_vline(x=0, line=dict(color='green', dash='dash'), annotation_text='Event Day')
+            
+            # Add zero line
+            fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
+            
+            # Determine appropriate y-axis range
+            y_min = rtv_pd['mean_rtv_smooth'].min()
+            y_max = rtv_pd['mean_rtv_smooth'].max()
+            
+            # Add some padding to the y-axis range
+            padding = 0.1 * (y_max - y_min)
+            y_min -= padding
+            y_max += padding
+            
+            # Set layout
+            fig.update_layout(
+                title='Return-to-Variance Ratio Time Series Around Events',
+                xaxis_title='Days Relative to Event',
+                yaxis_title='Return-to-Variance Ratio',
+                showlegend=True,
+                template='plotly_white',
+                width=1000,
+                height=600,
+                xaxis=dict(
+                    tickmode='linear',
+                    tick0=-pre_days,
+                    dtick=10,
+                    gridcolor='lightgray',
+                    zeroline=True,
+                    zerolinewidth=1,
+                    zerolinecolor='black'
+                ),
+                yaxis=dict(
+                    range=[y_min, y_max],
+                    gridcolor='lightgray',
+                    zeroline=True,
+                    zerolinewidth=1,
+                    zerolinecolor='black'
+                )
+            )
+            
+            # Create the output directory if it doesn't exist
+            os.makedirs(results_dir, exist_ok=True)
+            
+            # Save the plot
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_rtv_timeseries.png")
+            fig.write_image(plot_filename, format='png', scale=2)
+            print(f"Saved RTV time series plot to: {plot_filename}")
+            
+            # Save as interactive HTML
+            html_filename = os.path.join(results_dir, f"{file_prefix}_rtv_timeseries.html")
+            fig.write_html(html_filename)
+            print(f"Saved interactive plot to: {html_filename}")
+            
+        except Exception as e:
+            print(f"Error creating plot: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Save results to CSV
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_rtv_timeseries.csv")
+        try:
+            rtv_by_day.write_csv(csv_filename)
+            print(f"Saved RTV time series data to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving data: {e}")
+        
+        return rtv_by_day

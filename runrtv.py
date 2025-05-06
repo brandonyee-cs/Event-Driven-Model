@@ -82,9 +82,32 @@ def run_rtv_analysis(event_file: str,
             delta_days=delta_days,
             results_dir=results_dir,
             file_prefix=file_prefix
-        )  # Fixed: Added closing parenthesis
+        )
         
-        print("\n=== Hypothesis 1 Test (Actual Values) Completed ===")
+        # Create a subdirectory for time series analysis
+        timeseries_dir = os.path.join(results_dir, "timeseries")
+        os.makedirs(timeseries_dir, exist_ok=True)
+        
+        # Run RTV time series analysis
+        print("\nRunning RTV time series analysis...")
+        rtv_timeseries = rtv_analysis.calculate_rtv_timeseries(
+            return_col=return_col,
+            pre_days=window_days,
+            post_days=window_days,
+            window_size=5,  # 5-day rolling window for calculations
+            min_periods=3,  # minimum 3 observations for calculations
+            results_dir=timeseries_dir,
+            file_prefix=file_prefix
+        )
+        
+        # Add time series results to the main results dictionary
+        if rtv_timeseries is not None:
+            results['rtv_timeseries'] = {
+                'directory': timeseries_dir,
+                'file_prefix': file_prefix
+            }
+        
+        print("\n=== Hypothesis 1 Test (Actual Values) and Time Series Analysis Completed ===")
         print(f"Results saved to: {os.path.abspath(results_dir)}")
         print(f"Hypothesis Supported: {results['hypothesis_supported']}")
         
@@ -136,6 +159,10 @@ def main():
     # Create results directories
     os.makedirs(FDA_RESULTS_DIR, exist_ok=True)
     os.makedirs(EARNINGS_RESULTS_DIR, exist_ok=True)
+    
+    # Create additional directories for time series analysis
+    os.makedirs(os.path.join(FDA_RESULTS_DIR, "timeseries"), exist_ok=True)
+    os.makedirs(os.path.join(EARNINGS_RESULTS_DIR, "timeseries"), exist_ok=True)
     
     # Run FDA analysis
     print("\n=== Starting FDA Approval Event RTV Analysis (Actual Values) ===")
@@ -205,6 +232,13 @@ def main():
             else:
                 f.write("Hypothesis 1 is not supported by either FDA Approval or Earnings Announcement events.\n")
                 f.write("This suggests that the hypothesized return-to-variance pattern may not be consistent.\n")
+            
+            # Add time series analysis information
+            f.write("\n--- Time Series Analysis ---\n")
+            f.write("In addition to phase-based analysis, a time series analysis of RTV ratio was conducted\n")
+            f.write("to provide a more granular view of changes around events. Time series plots are available in\n")
+            f.write(f"the respective 'timeseries' subdirectories for FDA ({FDA_RESULTS_DIR}/timeseries) and\n")
+            f.write(f"Earnings ({EARNINGS_RESULTS_DIR}/timeseries) events.\n")
         
         print(f"\nComparison report saved to: {os.path.join(comparison_dir, 'rtv_actual_values_comparison.txt')}")
     except Exception as e:
