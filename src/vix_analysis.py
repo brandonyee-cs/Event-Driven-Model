@@ -242,17 +242,19 @@ class RefinedVIXAnalysis:
             return None
         
         # Analyze correlation distribution
-        correlation_stats = event_corrs.select([
-            pl.mean('vix_return_correlation').alias('mean_correlation'),
-            pl.median('vix_return_correlation').alias('median_correlation'),
-            pl.sum(pl.col('vix_return_correlation') > 0).alias('positive_correlations'),
-            pl.count().alias('total_events')
-        ])
+        # FIX: Use correct method to count positive correlations
+        mean_corr = event_corrs['vix_return_correlation'].mean()
+        median_corr = event_corrs['vix_return_correlation'].median()
+        total_events = event_corrs.height
+        # Count positive correlations correctly
+        pos_corr = event_corrs.filter(pl.col('vix_return_correlation') > 0).height
         
-        mean_corr = correlation_stats.select('mean_correlation').item(0, 0)
-        median_corr = correlation_stats.select('median_correlation').item(0, 0)
-        pos_corr = correlation_stats.select('positive_correlations').item(0, 0)
-        total_events = correlation_stats.select('total_events').item(0, 0)
+        correlation_stats = {
+            'mean_correlation': mean_corr,
+            'median_correlation': median_corr,
+            'positive_correlations': pos_corr,
+            'total_events': total_events
+        }
         
         print(f"Mean correlation: {mean_corr:.4f}")
         print(f"Median correlation: {median_corr:.4f}")
