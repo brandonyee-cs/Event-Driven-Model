@@ -242,7 +242,6 @@ class RefinedVIXAnalysis:
             return None
         
         # Analyze correlation distribution
-        # FIX: Use correct method to count positive correlations
         mean_corr = event_corrs['vix_return_correlation'].mean()
         median_corr = event_corrs['vix_return_correlation'].median()
         total_events = event_corrs.height
