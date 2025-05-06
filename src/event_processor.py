@@ -1186,9 +1186,9 @@ class EventAnalysis:
             
             # Calculate summary statistics across all events
             if event_sharpe.height > 0:
-                # Clip extreme Sharpe values
+                # Clip extreme Sharpe values to a reasonable range
                 event_sharpe = event_sharpe.with_columns(
-                    pl.col('sharpe_ratio').clip(-10, 10).alias('sharpe_ratio')
+                    pl.col('sharpe_ratio').clip(-5, 5).alias('sharpe_ratio')
                 )
                 
                 # Calculate mean and median Sharpe ratios
@@ -1260,6 +1260,24 @@ class EventAnalysis:
             # Convert to pandas for plotting with Plotly
             results_pd = sharpe_df.to_pandas()
             
+            # Determine appropriate y-axis range
+            y_min = results_pd['sharpe_ratio'].min()
+            y_max = results_pd['sharpe_ratio'].max()
+            
+            # If the data is all within a reasonable range, use a fixed scale
+            if -5 <= y_min <= 5 and -5 <= y_max <= 5:
+                y_range = [-3, 3]  # Standard range for typical Sharpe ratios
+            else:
+                # Pad by 10% on each side
+                padding = 0.1 * (y_max - y_min)
+                y_range = [y_min - padding, y_max + padding]
+                
+                # Ensure zero is in the range
+                if y_range[0] > 0:
+                    y_range[0] = 0
+                if y_range[1] < 0:
+                    y_range[1] = 0
+            
             # Create Plotly figure
             fig = go.Figure()
             
@@ -1300,8 +1318,7 @@ class EventAnalysis:
             fig.add_vrect(x0=-2, x1=2, fillcolor='yellow', opacity=0.2, 
                          line_width=0, annotation_text='Event Window')
             
-            # Set layout with reasonable y-axis range
-            y_range = 5.0  # Reasonable range for Sharpe ratios
+            # Set layout with appropriate y-axis range
             fig.update_layout(
                 title=f'Rolling Sharpe Ratio vs. Days to Event ({sharpe_window}-Day Window)',
                 xaxis_title='Days Relative to Event',
@@ -1320,13 +1337,26 @@ class EventAnalysis:
                     zerolinecolor='black'
                 ),
                 yaxis=dict(
-                    range=[-y_range, y_range],
+                    range=y_range,
                     gridcolor='lightgray',
                     zeroline=True,
                     zerolinewidth=1,
                     zerolinecolor='black',
-                    tickformat='.1f'  # Show one decimal place
+                    tickformat='.2f'  # Show two decimal places
                 )
+            )
+            
+            # Add annotation with Sharpe statistics
+            fig.add_annotation(
+                x=analysis_window[0] + 5,
+                y=y_range[1] - 0.1 * (y_range[1] - y_range[0]),
+                text=f"Mean: {sharpe_stats['Mean Sharpe']:.2f}, Median: {sharpe_stats['Median Sharpe']:.2f}",
+                showarrow=False,
+                align="left",
+                bordercolor="black",
+                borderwidth=1,
+                bgcolor="white",
+                opacity=0.8
             )
             
             # Save plot
