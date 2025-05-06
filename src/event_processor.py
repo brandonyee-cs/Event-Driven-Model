@@ -2273,7 +2273,7 @@ class EventAnalysis:
         """
         Analyzes the Return-to-Variance Ratio (RVR) across event phases to test if RVR peaks
         during the post-event rising phase due to high volatility and optimistic bias.
-    
+
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
@@ -2283,29 +2283,32 @@ class EventAnalysis:
         lookback_window (int): Lookback window for calculating mean return and volatility
         optimistic_bias (float): Bias added to expected returns in post-event rising phase
         min_periods (int): Minimum observations for rolling calculations
-    
+
         Returns:
-        pl.DataFrame: DataFrame containing RVR data across phases
+        pl.DataFrame or None: DataFrame containing RVR data across phases, or None if analysis fails
         """
         print(f"\n--- Analyzing Return-to-Variance Ratio (RVR) ---")
         print(f"Analysis Window: {analysis_window}, Post-Event Delta: {post_event_delta} days, Lookback: {lookback_window} days")
-    
+
+        # Initialize rvr_daily to None
+        rvr_daily = None
+
         # Validate inputs
         if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
             print("Error: Data not loaded or missing required columns.")
-            return None
-    
+            return rvr_daily
+
         if post_event_delta <= 0 or post_event_delta > analysis_window[1]:
             print(f"Error: post_event_delta ({post_event_delta}) must be positive and within analysis window.")
-            return None
-    
+            return rvr_daily
+
         # Define event phases
         phases = {
             'pre_event': (analysis_window[0], -1),
             'post_event_rising': (0, post_event_delta),
             'late_post_event': (post_event_delta + 1, analysis_window[1])
         }
-    
+
         # Filter data to extended analysis period
         extended_start = analysis_window[0] - lookback_window
         analysis_data = self.data.filter(
@@ -2314,16 +2317,16 @@ class EventAnalysis:
         ).with_columns(
             pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return')
         ).sort(['event_id', 'days_to_event'])
-    
+
         if analysis_data.is_empty():
             print(f"Error: No data found within extended analysis window [{extended_start}, {analysis_window[1]}].")
-            return None
-    
+            return rvr_daily
+
         # Check if returns are in percentage form
         sample_returns = analysis_data.select(pl.col(return_col)).sample(n=min(100, analysis_data.height))
         avg_abs_return = sample_returns.mean_horizontal().abs()[0]
         returns_in_pct = avg_abs_return > 0.05
-    
+
         if returns_in_pct:
             print("Converting percentage returns to decimal form for RVR calculation")
             analysis_data = analysis_data.with_columns(
@@ -2332,7 +2335,7 @@ class EventAnalysis:
             calc_return_col = 'decimal_return'
         else:
             calc_return_col = return_col
-    
+
         # Calculate rolling mean return and volatility for each event
         analysis_data = analysis_data.with_columns([
             pl.col(calc_return_col).clip(-0.05, 0.05).rolling_mean(
@@ -2344,7 +2347,7 @@ class EventAnalysis:
                 min_periods=min_periods
             ).over('event_id').alias('volatility')
         ])
-    
+
         # Apply optimistic bias to expected returns in post-event rising phase
         analysis_data = analysis_data.with_columns(
             pl.when(
@@ -2355,12 +2358,12 @@ class EventAnalysis:
             .otherwise(pl.col('mean_return'))
             .alias('expected_return')
         )
-    
+
         # Calculate variance (square of volatility)
         analysis_data = analysis_data.with_columns(
             (pl.col('volatility') ** 2).alias('variance')
         )
-    
+
         # Calculate RVR (Expected Return / Variance)
         analysis_data = analysis_data.with_columns(
             pl.when(pl.col('variance') > 0)
@@ -2368,7 +2371,7 @@ class EventAnalysis:
             .otherwise(None)
             .alias('rvr')
         )
-    
+
         # Aggregate RVR across events for each day
         rvr_daily = analysis_data.group_by('days_to_event').agg([
             pl.col('rvr').mean().alias('avg_rvr'),
@@ -2377,7 +2380,7 @@ class EventAnalysis:
             pl.col('variance').mean().alias('avg_variance'),
             pl.col('rvr').count().alias('event_count')
         ]).sort('days_to_event')
-    
+
         # Summarize RVR by phase
         phase_summaries = []
         for phase_name, (start_day, end_day) in phases.items():
@@ -2408,7 +2411,7 @@ class EventAnalysis:
                     'avg_variance': None,
                     'event_count': 0
                 })
-    
+
         phase_df = pl.DataFrame(phase_summaries)
         print("\nRVR by Phase:")
         for row in phase_df.iter_rows(named=True):
@@ -2418,12 +2421,12 @@ class EventAnalysis:
             print(f"  Avg Expected Return: {row['avg_expected_return']:.4f}")
             print(f"  Avg Variance: {row['avg_variance']:.6f}")
             print(f"  Events: {row['event_count']}")
-    
+
         # Plot RVR time series
         try:
             rvr_pd = rvr_daily.to_pandas()
             fig = go.Figure()
-    
+
             # Add average RVR line
             fig.add_trace(go.Scatter(
                 x=rvr_pd['days_to_event'],
@@ -2432,12 +2435,12 @@ class EventAnalysis:
                 name='Avg RVR',
                 line=dict(color='blue', width=2)
             ))
-    
+
             # Add phase boundaries
             fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
             fig.add_vline(x=post_event_delta, line=dict(color='purple', dash='dot'),
                           annotation_text='End of Post-Event Rising')
-    
+
             # Highlight post-event rising phase
             fig.add_vrect(
                 x0=phases['post_event_rising'][0],
@@ -2447,7 +2450,7 @@ class EventAnalysis:
                 line_width=0,
                 annotation_text='Post-Event Rising'
             )
-    
+
             # Determine y-axis range
             valid_rvr = rvr_pd['avg_rvr'].dropna()
             if not valid_rvr.empty:
@@ -2456,7 +2459,7 @@ class EventAnalysis:
                 y_range = [y_min - y_padding, y_max + y_padding]
             else:
                 y_range = [-1, 1]
-    
+
             fig.update_layout(
                 title=f'Return-to-Variance Ratio Around Events (Lookback: {lookback_window} days)',
                 xaxis_title='Days Relative to Event',
@@ -2477,7 +2480,7 @@ class EventAnalysis:
                     tickformat='.2f'
                 )
             )
-    
+
             # Add phase RVR annotations
             for row in phase_df.iter_rows(named=True):
                 if row['avg_rvr'] is not None:
@@ -2491,7 +2494,7 @@ class EventAnalysis:
                         ax=20 if row['phase'] == 'pre_event' else -20,
                         ay=-30
                     )
-    
+
             # Save plot
             plot_filename = os.path.join(results_dir, f"{file_prefix}_rvr_timeseries.png")
             try:
@@ -2502,20 +2505,21 @@ class EventAnalysis:
                 html_filename = os.path.join(results_dir, f"{file_prefix}_rvr_timeseries.html")
                 fig.write_html(html_filename)
                 print(f"Saved as HTML (fallback) to: {html_filename}")
-    
+
         except Exception as e:
             print(f"Error creating RVR plot: {e}")
             import traceback
             traceback.print_exc()
-    
+
         # Save daily RVR data
-        csv_filename = os.path.join(results_dir, f"{file_prefix}_rvr_daily.csv")
-        try:
-            rvr_daily.write_csv(csv_filename)
-            print(f"Saved daily RVR data to: {csv_filename}")
-        except Exception as e:
-            print(f"Error saving daily RVR data: {e}")
-    
+        if rvr_daily is not None:
+            csv_filename = os.path.join(results_dir, f"{file_prefix}_rvr_daily.csv")
+            try:
+                rvr_daily.write_csv(csv_filename)
+                print(f"Saved daily RVR data to: {csv_filename}")
+            except Exception as e:
+                print(f"Error saving daily RVR data: {e}")
+
         # Save phase summary
         phase_csv_filename = os.path.join(results_dir, f"{file_prefix}_rvr_phase_summary.csv")
         try:
@@ -2523,9 +2527,9 @@ class EventAnalysis:
             print(f"Saved RVR phase summary to: {phase_csv_filename}")
         except Exception as e:
             print(f"Error saving phase summary: {e}")
-    
+
         # Clean up
-        del analysis_data, rvr_daily, phase_df
+        del analysis_data, phase_df
         gc.collect()
-    
+
         return rvr_daily
