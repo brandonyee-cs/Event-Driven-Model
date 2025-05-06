@@ -31,7 +31,8 @@ def run_rtv_analysis(event_file: str,
                     window_days: int = 60,
                     return_col: str = "ret",
                     rolling_window: int = 5,
-                    delta_days: int = 10) -> Dict[str, Any]:
+                    delta_days: int = 10,
+                    use_actual_values: bool = False) -> Dict[str, Any]:
     """
     Run the return-to-variance analysis to test Hypothesis 1.
     
@@ -46,6 +47,7 @@ def run_rtv_analysis(event_file: str,
     return_col (str): Column name containing returns
     rolling_window (int): Window size for rolling calculations
     delta_days (int): Parameter δ from the paper (post-event rising phase duration)
+    use_actual_values (bool): Whether to use actual values instead of rolling windows
     
     Returns:
     Dict[str, Any]: Results of the hypothesis test
@@ -77,18 +79,32 @@ def run_rtv_analysis(event_file: str,
         # Initialize return-to-variance analysis
         rtv_analysis = ReturnToVarianceAnalysis(event_analysis)
         
-        # Run hypothesis test
-        print(f"\nRunning hypothesis test with delta = {delta_days} days...")
-        results = rtv_analysis.run_hypothesis_1_test(
-            return_col=return_col,
-            rolling_window=rolling_window,
-            delta_days=delta_days,
-            results_dir=results_dir,
-            file_prefix=file_prefix
-        )
+        # Create appropriate results directory based on method
+        method_dir = os.path.join(results_dir, "actual" if use_actual_values else "rolling")
+        os.makedirs(method_dir, exist_ok=True)
         
-        print("\n=== Hypothesis 1 Test Completed ===")
-        print(f"Results saved to: {os.path.abspath(results_dir)}")
+        # Run hypothesis test with appropriate method
+        if use_actual_values:
+            print(f"\nRunning actual-value hypothesis test with delta = {delta_days} days...")
+            results = rtv_analysis.run_actual_hypothesis_1_test(
+                return_col=return_col,
+                delta_days=delta_days,
+                results_dir=method_dir,
+                file_prefix=file_prefix
+            )
+        else:
+            print(f"\nRunning rolling-window hypothesis test with delta = {delta_days} days...")
+            results = rtv_analysis.run_hypothesis_1_test(
+                return_col=return_col,
+                rolling_window=rolling_window,
+                delta_days=delta_days,
+                results_dir=method_dir,
+                file_prefix=file_prefix
+            )
+        
+        method_name = "Actual Values" if use_actual_values else "Rolling Window"
+        print(f"\n=== Hypothesis 1 Test ({method_name}) Completed ===")
+        print(f"Results saved to: {os.path.abspath(method_dir)}")
         print(f"Hypothesis Supported: {results['hypothesis_supported']}")
         
         return results
@@ -141,9 +157,9 @@ def main():
     os.makedirs(FDA_RESULTS_DIR, exist_ok=True)
     os.makedirs(EARNINGS_RESULTS_DIR, exist_ok=True)
     
-    # Run FDA analysis
-    print("\n=== Starting FDA Approval Event RTV Analysis ===")
-    fda_results = run_rtv_analysis(
+    # Run FDA analysis with rolling windows
+    print("\n=== Starting FDA Approval Event RTV Analysis (Rolling Window) ===")
+    fda_rolling_results = run_rtv_analysis(
         event_file=FDA_EVENT_FILE,
         stock_files=FDA_STOCK_FILES,
         results_dir=FDA_RESULTS_DIR,
@@ -153,12 +169,29 @@ def main():
         window_days=WINDOW_DAYS,
         return_col=RETURN_COL,
         rolling_window=ROLLING_WINDOW,
-        delta_days=DELTA_DAYS
+        delta_days=DELTA_DAYS,
+        use_actual_values=False
     )
     
-    # Run Earnings analysis
-    print("\n=== Starting Earnings Announcement Event RTV Analysis ===")
-    earnings_results = run_rtv_analysis(
+    # Run FDA analysis with actual values
+    print("\n=== Starting FDA Approval Event RTV Analysis (Actual Values) ===")
+    fda_actual_results = run_rtv_analysis(
+        event_file=FDA_EVENT_FILE,
+        stock_files=FDA_STOCK_FILES,
+        results_dir=FDA_RESULTS_DIR,
+        file_prefix=FDA_FILE_PREFIX,
+        event_date_col=FDA_EVENT_DATE_COL,
+        ticker_col=FDA_TICKER_COL,
+        window_days=WINDOW_DAYS,
+        return_col=RETURN_COL,
+        rolling_window=ROLLING_WINDOW,
+        delta_days=DELTA_DAYS,
+        use_actual_values=True
+    )
+    
+    # Run Earnings analysis with rolling windows
+    print("\n=== Starting Earnings Announcement Event RTV Analysis (Rolling Window) ===")
+    earnings_rolling_results = run_rtv_analysis(
         event_file=EARNINGS_EVENT_FILE,
         stock_files=EARNINGS_STOCK_FILES,
         results_dir=EARNINGS_RESULTS_DIR,
@@ -168,8 +201,67 @@ def main():
         window_days=WINDOW_DAYS,
         return_col=RETURN_COL,
         rolling_window=ROLLING_WINDOW,
-        delta_days=DELTA_DAYS
+        delta_days=DELTA_DAYS,
+        use_actual_values=False
     )
+    
+    # Run Earnings analysis with actual values
+    print("\n=== Starting Earnings Announcement Event RTV Analysis (Actual Values) ===")
+    earnings_actual_results = run_rtv_analysis(
+        event_file=EARNINGS_EVENT_FILE,
+        stock_files=EARNINGS_STOCK_FILES,
+        results_dir=EARNINGS_RESULTS_DIR,
+        file_prefix=EARNINGS_FILE_PREFIX,
+        event_date_col=EARNINGS_EVENT_DATE_COL,
+        ticker_col=EARNINGS_TICKER_COL,
+        window_days=WINDOW_DAYS,
+        return_col=RETURN_COL,
+        rolling_window=ROLLING_WINDOW,
+        delta_days=DELTA_DAYS,
+        use_actual_values=True
+    )
+    
+    # Create comparison summary
+    comparison_dir = "results/rtv_analysis/comparison"
+    os.makedirs(comparison_dir, exist_ok=True)
+    
+    try:
+        with open(os.path.join(comparison_dir, "rtv_method_comparison.txt"), "w") as f:
+            f.write("===== Hypothesis 1 Test Comparison: Rolling Window vs Actual Values =====\n\n")
+            f.write(f"Parameter δ (post-event rising phase duration): {DELTA_DAYS} days\n\n")
+            
+            f.write("--- FDA Approval Events ---\n")
+            f.write(f"Rolling Window Method: Hypothesis Supported = {fda_rolling_results.get('hypothesis_supported', False)}\n")
+            f.write(f"Actual Values Method: Hypothesis Supported = {fda_actual_results.get('hypothesis_supported', False)}\n\n")
+            
+            f.write("--- Earnings Announcement Events ---\n")
+            f.write(f"Rolling Window Method: Hypothesis Supported = {earnings_rolling_results.get('hypothesis_supported', False)}\n")
+            f.write(f"Actual Values Method: Hypothesis Supported = {earnings_actual_results.get('hypothesis_supported', False)}\n\n")
+            
+            f.write("=== Conclusion ===\n")
+            f.write("This comparison assesses whether Hypothesis 1 (return-to-variance ratio peaks during post-event\n")
+            f.write("rising phase) holds when using both methodologies: rolling windows and actual values.\n")
+            
+            # Determine overall conclusion based on results
+            rolling_supported = fda_rolling_results.get('hypothesis_supported', False) or earnings_rolling_results.get('hypothesis_supported', False)
+            actual_supported = fda_actual_results.get('hypothesis_supported', False) or earnings_actual_results.get('hypothesis_supported', False)
+            
+            if rolling_supported and actual_supported:
+                f.write("\nBoth methodologies support Hypothesis 1, indicating robust evidence that the\n")
+                f.write("return-to-variance ratio indeed peaks during the post-event rising phase.\n")
+            elif rolling_supported:
+                f.write("\nOnly the rolling window methodology supports Hypothesis 1, suggesting that the pattern\n")
+                f.write("may be more apparent when using smoothed metrics than when using raw event-phase values.\n")
+            elif actual_supported:
+                f.write("\nOnly the actual values methodology supports Hypothesis 1, indicating that the pattern\n")
+                f.write("exists in the raw data but may be diluted by the smoothing effect of rolling windows.\n")
+            else:
+                f.write("\nNeither methodology fully supports Hypothesis 1, suggesting that the hypothesized\n")
+                f.write("return-to-variance pattern may not be consistent across the analyzed events.\n")
+        
+        print(f"\nComparison summary saved to: {os.path.join(comparison_dir, 'rtv_method_comparison.txt')}")
+    except Exception as e:
+        print(f"Error creating comparison summary: {e}")
 
 if __name__ == "__main__":
     main()
