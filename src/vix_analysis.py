@@ -187,7 +187,7 @@ class VIXImpactAnalysis:
         results['scatter_data'] = vix_return_data_valid
         
         return results
-    
+        
     def analyze_post_event_vix_return_relationship(self, 
                                                  vix_data: pl.DataFrame,
                                                  vix_col: str = 'vix',
@@ -227,22 +227,23 @@ class VIXImpactAnalysis:
             day_data = post_event_data.filter(pl.col('days_to_event') == day)
             
             if day_data.height >= 10:  # Ensure enough data points
-                vix_values = day_data[vix_col].drop_nulls().to_numpy()
-                ret_values = day_data[return_col].drop_nulls().to_numpy()
-                
-                # Match up valid data points
-                valid_indices = np.logical_and(
-                    np.isfinite(vix_values),
-                    np.isfinite(ret_values)
+                # Filter for rows where both VIX and return values are valid
+                valid_data = day_data.filter(
+                    pl.col(vix_col).is_not_null() & 
+                    pl.col(return_col).is_not_null() &
+                    pl.col(vix_col).is_finite() &
+                    pl.col(return_col).is_finite()
                 )
-                valid_vix = vix_values[valid_indices]
-                valid_ret = ret_values[valid_indices]
                 
-                if len(valid_vix) >= 10:
+                if valid_data.height >= 10:
                     try:
+                        # Extract values as NumPy arrays from the same filtered DataFrame
+                        vix_values = valid_data[vix_col].to_numpy()
+                        ret_values = valid_data[return_col].to_numpy()
+                        
                         # Calculate correlation
-                        pearson_corr, pearson_p = pearsonr(valid_vix, valid_ret)
-                        spearman_corr, spearman_p = spearmanr(valid_vix, valid_ret)
+                        pearson_corr, pearson_p = pearsonr(vix_values, ret_values)
+                        spearman_corr, spearman_p = spearmanr(vix_values, ret_values)
                         
                         daily_corrs.append({
                             'day': day,
@@ -250,10 +251,12 @@ class VIXImpactAnalysis:
                             'pearson_p': pearson_p,
                             'spearman_corr': spearman_corr,
                             'spearman_p': spearman_p,
-                            'n_observations': len(valid_vix)
+                            'n_observations': len(vix_values)
                         })
                     except Exception as e:
                         print(f"Error calculating correlation for day {day}: {e}")
+            else:
+                print(f"Skipping day {day}: Not enough data points ({day_data.height} < 10)")
         
         if not daily_corrs:
             print("Error: Could not calculate correlations for any post-event days.")
