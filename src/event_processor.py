@@ -1071,11 +1071,11 @@ class EventAnalysis:
     ) -> Optional[pl.DataFrame]:
         """
         Calculates a time series of rolling Sharpe ratios around events.
-    
+
         For each day relative to the event, computes the Sharpe ratio using returns
         within the specified lookback window. Sharpe ratios are calculated for each event
         and then summarized across all events for each relative day.
-    
+
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
@@ -1084,60 +1084,60 @@ class EventAnalysis:
         sharpe_window (int): Lookback window (days) for calculating Sharpe ratio
         annualize (bool): Whether to annualize the Sharpe ratio
         risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-    
+
         Returns:
         pl.DataFrame: DataFrame containing Sharpe ratio time series or None if calculation fails
         """
         print(f"\n--- Calculating Rolling Sharpe Ratio Time Series ---")
         print(f"Analysis Window: {analysis_window}, Sharpe Window: {sharpe_window} days")
-    
+
         # Input validation
         if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
             print("Error: Data not loaded or missing required columns (return_col, days_to_event).")
             return None
-    
+
         if sharpe_window < 3:
             print("Warning: Sharpe window too small (<3 days). Setting to 3.")
             sharpe_window = 3
-    
+
         # Calculate daily risk-free rate
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if annualize and risk_free_rate > 0 else 0
-    
+
         # Extend analysis window to include lookback period
         extended_start = analysis_window[0] - sharpe_window
         analysis_data = self.data.filter(
             (pl.col('days_to_event') >= extended_start) & 
             (pl.col('days_to_event') <= analysis_window[1])
         ).sort(['event_id', 'days_to_event'])
-    
+
         if analysis_data.is_empty():
             print(f"Error: No data found within extended analysis window [{extended_start}, {analysis_window[1]}].")
             return None
-    
+
         # Ensure all days in analysis window are present
         all_days = pl.DataFrame({
             'days_to_event': range(analysis_window[0], analysis_window[1] + 1)
         })
-    
+
         # Clip extreme returns to prevent outliers from skewing results
         analysis_data = analysis_data.with_columns(
             pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return')
         )
-    
+
         # Create rolling window calculations for each event_id
         # For each day in the analysis window, calculate the Sharpe ratio using the previous sharpe_window days
         sharpe_data = []
-        
+
         for day in range(analysis_window[0], analysis_window[1] + 1):
             window_start = day - sharpe_window
             window_end = day - 1  # Only use data up to the previous day
-            
+
             # Get data for the current rolling window
             window_data = analysis_data.filter(
                 (pl.col('days_to_event') >= window_start) & 
                 (pl.col('days_to_event') <= window_end)
             )
-            
+
             if window_data.is_empty():
                 sharpe_data.append({
                     'days_to_event': day,
@@ -1160,17 +1160,24 @@ class EventAnalysis:
                 (pl.col('std_return') > 0)
             ).with_columns(
                 # Calculate Sharpe ratio
-                ((pl.col('mean_return') - daily_rf) / pl.col('std_return') * 
-                 (np.sqrt(252) if annualize else 1)).alias('sharpe_ratio')
+                avg_ret_magnitude = window_data['clipped_return'].abs().mean()
+                is_percentage = avg_ret_magnitude > 0.05  # Heuristic to detect if returns are in percentage form
+
+                # Apply appropriate scaling
+                event_sharpe = event_sharpe.with_columns(
+                    ((pl.col('mean_return') - daily_rf) / pl.col('std_return') * 
+                     (np.sqrt(252) if annualize else 1) *
+                     (0.01 if is_percentage else 1)).alias('sharpe_ratio')
+                )
             )
-            
+
             # Calculate summary statistics across all events
             if event_sharpe.height > 0:
                 # Clip extreme Sharpe values
                 event_sharpe = event_sharpe.with_columns(
                     pl.col('sharpe_ratio').clip(-10, 10).alias('sharpe_ratio')
                 )
-                
+
                 # Calculate mean and median Sharpe ratios
                 day_stats = {
                     'days_to_event': day,
@@ -1191,24 +1198,24 @@ class EventAnalysis:
                     'event_count': 0,
                     'valid_returns': 0
                 }
-            
+
             sharpe_data.append(day_stats)
-        
+
         # Convert to DataFrame
         sharpe_df = pl.DataFrame(sharpe_data)
-        
+
         # Join with all_days to ensure full range
         sharpe_df = all_days.join(
             sharpe_df, on='days_to_event', how='left'
         ).sort('days_to_event')
-        
+
         # Interpolate missing values
         sharpe_df = sharpe_df.with_columns([
             pl.col('sharpe_ratio').interpolate(),
             pl.col('mean_return').interpolate(),
             pl.col('std_return').interpolate()
         ])
-        
+
         # Add smoothed Sharpe ratio for visualization
         smooth_window = min(7, sharpe_window)
         sharpe_df = sharpe_df.with_columns(
@@ -1218,20 +1225,20 @@ class EventAnalysis:
                 center=True
             ).alias('smooth_sharpe')
         )
-    
+
         # Check valid days
         valid_days = sharpe_df.filter(pl.col('sharpe_ratio').is_not_null()).height
         if valid_days < (analysis_window[1] - analysis_window[0]) / 2:
             print(f"Warning: Only {valid_days} days have valid Sharpe ratios. Results may be unreliable.")
-        
+
         # Plot the results
         try:
             # Convert to pandas for plotting with Plotly
             results_pd = sharpe_df.to_pandas()
-            
+
             # Create Plotly figure
             fig = go.Figure()
-            
+
             # Add raw Sharpe ratio
             fig.add_trace(go.Scatter(
                 x=results_pd['days_to_event'],
@@ -1241,7 +1248,7 @@ class EventAnalysis:
                 line=dict(color='blue', width=1),
                 opacity=0.3
             ))
-            
+
             # Add smoothed Sharpe ratio
             fig.add_trace(go.Scatter(
                 x=results_pd['days_to_event'],
@@ -1250,25 +1257,25 @@ class EventAnalysis:
                 name=f'{smooth_window}-Day Smoothed',
                 line=dict(color='red', width=2)
             ))
-            
+
             # Add event day line
             fig.add_vline(x=0, line=dict(color='red', dash='dash'), 
                          annotation_text='Event Day')
-            
+
             # Add month boundaries if applicable
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
                 fig.add_vline(x=-30, line=dict(color='green', dash='dot'), 
                              annotation_text='Month Before')
                 fig.add_vline(x=30, line=dict(color='purple', dash='dot'), 
                              annotation_text='Month After')
-            
+
             # Add zero line
             fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
-            
+
             # Highlight event window
             fig.add_vrect(x0=-2, x1=2, fillcolor='yellow', opacity=0.2, 
                          line_width=0, annotation_text='Event Window')
-            
+
             # Set layout with reasonable y-axis range
             y_range = 5.0  # Reasonable range for Sharpe ratios
             fig.update_layout(
@@ -1297,7 +1304,7 @@ class EventAnalysis:
                     tickformat='.1f'  # Show one decimal place
                 )
             )
-            
+
             # Save plot
             plot_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.png")
             try:
@@ -1309,12 +1316,12 @@ class EventAnalysis:
                 html_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.html")
                 fig.write_html(html_filename)
                 print(f"Saved as HTML (fallback) to: {html_filename}")
-        
+
         except Exception as e:
             print(f"Error creating plot: {e}")
             import traceback
             traceback.print_exc()
-        
+
         # Save data to CSV
         csv_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.csv")
         try:
@@ -1322,7 +1329,7 @@ class EventAnalysis:
             print(f"Saved rolling Sharpe time series data to: {csv_filename}")
         except Exception as e:
             print(f"Error saving data: {e}")
-        
+
         print(f"Completed Sharpe ratio calculation. Valid days: {valid_days}/{sharpe_df.height}")
         return sharpe_df
 
