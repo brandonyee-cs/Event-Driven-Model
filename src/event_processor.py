@@ -1061,97 +1061,115 @@ class EventAnalysis:
             traceback.print_exc()
 
     def calculate_rolling_sharpe_timeseries(self, 
-    results_dir: str, 
-    file_prefix: str = "event",
-    return_col: str = 'ret', 
-    analysis_window: Tuple[int, int] = (-60, 60),
-    sharpe_window: int = 10,
-    annualize: bool = True, 
-    risk_free_rate: float = 0.0) -> Optional[pl.DataFrame]:
+        results_dir: str, 
+        file_prefix: str = "event",
+        return_col: str = 'ret', 
+        analysis_window: Tuple[int, int] = (-60, 60),
+        sharpe_window: int = 10,
+        annualize: bool = True, 
+        risk_free_rate: float = 0.0
+    ) -> Optional[pl.DataFrame]:
         """
-        Calculates a time series of rolling Sharpe ratios around events using Polars.
+        Calculates a time series of rolling Sharpe ratios around events using a naive buy strategy.
+
+        For each day relative to the event, computes returns as if buying at the start of the
+        lookback window (sharpe_window days before) and holding until that day. Sharpe ratios
+        are calculated across all events for each day.
 
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing returns
+        return_col (str): Column name containing daily returns
         analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-        sharpe_window (int): Size of window for rolling Sharpe calculation in days
+        sharpe_window (int): Lookback window (days) for calculating returns
         annualize (bool): Whether to annualize the Sharpe ratio
         risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
 
         Returns:
         pl.DataFrame: DataFrame containing Sharpe ratio time series or None if calculation fails
         """
-        print(f"\n--- Calculating Rolling Sharpe Ratio Time Series ---")
-        print(f"Analysis Window: {analysis_window}, Sharpe Window: {sharpe_window} days")
+        print(f"\n--- Calculating Rolling Sharpe Ratio Time Series (Naive Buy Strategy) ---")
+        print(f"Analysis Window: {analysis_window}, Lookback Window: {sharpe_window} days")
 
         # Input validation
-        if self.data is None or return_col not in self.data.columns:
-            print("Error: Data not loaded or missing return column.")
+        if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
+            print("Error: Data not loaded or missing required columns (return_col, days_to_event).")
             return None
 
-        if sharpe_window < 5:
-            print("Warning: Sharpe window too small (<5 days). Setting to 5.")
-            sharpe_window = 5
+        if sharpe_window < 3:
+            print("Warning: Lookback window too small (<3 days). Setting to 3.")
+            sharpe_window = 3
 
         # Calculate daily risk-free rate
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if annualize and risk_free_rate > 0 else 0
 
-        # Filter data within analysis window
+        # Extend analysis window to include lookback period
+        extended_start = analysis_window[0] - sharpe_window
         analysis_data = self.data.filter(
-            (pl.col('days_to_event') >= analysis_window[0]) & 
+            (pl.col('days_to_event') >= extended_start) & 
             (pl.col('days_to_event') <= analysis_window[1])
         ).sort(['event_id', 'days_to_event'])
 
         if analysis_data.is_empty():
-            print(f"Error: No data found within analysis window {analysis_window}.")
+            print(f"Error: No data found within extended analysis window [{extended_start}, {analysis_window[1]}].")
             return None
 
-        # Calculate rolling statistics per event
-        min_periods = max(3, sharpe_window // 2)
-        rolling_stats = analysis_data.group_by(['event_id', 'days_to_event']).agg(
-            mean_ret=pl.col(return_col).mean(),
-            std_ret=pl.col(return_col).std(),
-            n_obs=pl.col(return_col).count()
-        ).filter(
-            pl.col('n_obs') >= min_periods
+        # Calculate cumulative returns for naive buy strategy
+        # For each event and day, compute return from (day - sharpe_window) to day
+        returns_data = analysis_data.group_by(['event_id', 'days_to_event']).agg(
+            returns=pl.col(return_col).fill_null(0)  # Replace null returns with 0 for compounding
         ).with_columns(
-            sharpe_ratio=pl.when(pl.col('std_ret') > 0)
-                         .then((pl.col('mean_ret') - daily_rf) / pl.col('std_ret'))
-                         .otherwise(None)
+            # Calculate cumulative return over the lookback window
+            cum_return=pl.col('returns').rolling_apply(
+                lambda x: float(np.prod(1 + np.array(x)) - 1) if len(x) >= 3 else None,
+                window_size=sharpe_window,
+                min_periods=3
+            ).over('event_id')
+        ).filter(
+            pl.col('days_to_event').is_in(range(analysis_window[0], analysis_window[1] + 1))
         )
 
-        # Aggregate across events by day
-        daily_stats = rolling_stats.group_by('days_to_event').agg(
-            avg_sharpe=pl.col('sharpe_ratio').mean(),
-            std_sharpe=pl.col('sharpe_ratio').std(),
+        # Aggregate returns across events for each day
+        daily_stats = returns_data.group_by('days_to_event').agg(
+            mean_return=pl.col('cum_return').mean(),
+            std_return=pl.col('cum_return').std(),
             event_count=pl.col('event_id').count(),
-            avg_return=pl.col('mean_ret').mean(),
-            avg_std=pl.col('std_ret').mean()
+            valid_returns=pl.col('cum_return').is_not_null().sum()
         ).sort('days_to_event')
+
+        # Calculate Sharpe ratio
+        daily_stats = daily_stats.with_columns(
+            sharpe_ratio=pl.when(
+                (pl.col('std_return') > 0) & (pl.col('valid_returns') >= 5)  # Require at least 5 valid returns
+            ).then(
+                (pl.col('mean_return') - (daily_rf * sharpe_window)) / pl.col('std_return')
+            ).otherwise(None)
+        )
 
         # Apply annualization if requested
         if annualize:
             daily_stats = daily_stats.with_columns(
-                avg_sharpe=pl.col('avg_sharpe') * np.sqrt(252),
-                avg_return=pl.col('avg_return') * 252,
-                avg_std=pl.col('avg_std') * np.sqrt(252)
+                sharpe_ratio=pl.col('sharpe_ratio') * np.sqrt(252 / sharpe_window),
+                mean_return=pl.col('mean_return') * (252 / sharpe_window),
+                std_return=pl.col('std_return') * np.sqrt(252 / sharpe_window)
             )
 
         # Smooth the Sharpe ratio for visualization
-        smooth_window = min(7, sharpe_window)  # Use a smaller smoothing window
+        smooth_window = min(7, sharpe_window)  # Smaller smoothing window for responsiveness
         daily_stats = daily_stats.with_columns(
-            smooth_sharpe=pl.col('avg_sharpe').rolling_mean(
+            smooth_sharpe=pl.col('sharpe_ratio').rolling_mean(
                 window_size=smooth_window,
                 min_periods=smooth_window // 2,
                 center=True
             )
         )
 
-        # Ensure we have enough data
-        if daily_stats.height < 5:
-            print("Error: Insufficient data points for reliable Sharpe ratio calculation.")
+        # Check if we have enough data
+        valid_days = daily_stats.filter(pl.col('sharpe_ratio').is_not_null()).height
+        if valid_days < 5:
+            print(f"Warning: Only {valid_days} days have valid Sharpe ratios. Results may be unreliable.")
+        elif valid_days == 0:
+            print("Error: No days have valid Sharpe ratios. Check data availability.")
             return None
 
         # Convert to pandas for plotting
@@ -1164,7 +1182,7 @@ class EventAnalysis:
             # Add raw Sharpe ratio
             fig.add_trace(go.Scatter(
                 x=results_pd['days_to_event'],
-                y=results_pd['avg_sharpe'],
+                y=results_pd['sharpe_ratio'],
                 mode='lines',
                 name='Raw Sharpe Ratio',
                 line=dict(color='blue', width=1),
@@ -1180,18 +1198,14 @@ class EventAnalysis:
                 line=dict(color='red', width=2)
             ))
 
-            # Add annotations and formatting
+            # Add annotations
             fig.add_vline(x=0, line=dict(color='red', dash='dash'), 
                          annotation_text='Event Day')
-
-            # Add month markers if window is wide enough
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
                 fig.add_vline(x=-30, line=dict(color='green', dash='dot'), 
                              annotation_text='Month Before')
                 fig.add_vline(x=30, line=dict(color='purple', dash='dot'), 
                              annotation_text='Month After')
-
-            # Add event window highlight
             fig.add_vrect(x0=-2, x1=2, fillcolor='yellow', opacity=0.2, 
                          line_width=0, annotation_text='Event Window')
 
@@ -1205,7 +1219,7 @@ class EventAnalysis:
                 y_range = 1.0
 
             fig.update_layout(
-                title=f'Rolling Sharpe Ratio Around Events (Window: {sharpe_window} days)',
+                title=f'Rolling Sharpe Ratio Around Events (Naive Buy, {sharpe_window}-Day Lookback)',
                 xaxis_title='Days Relative to Event',
                 yaxis_title='Sharpe Ratio (Annualized)' if annualize else 'Sharpe Ratio',
                 showlegend=True,
@@ -1246,7 +1260,7 @@ class EventAnalysis:
         except Exception as e:
             print(f"Error saving data: {e}")
 
-        print(f"Completed Sharpe ratio calculation. Data points: {daily_stats.height}")
+        print(f"Completed Sharpe ratio calculation. Valid days: {valid_days}/{daily_stats.height}")
         return daily_stats
         
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
