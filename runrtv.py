@@ -20,6 +20,8 @@ except ImportError as e:
     print("Ensure all required files are in the correct path.")
     sys.exit(1)
 
+pl.Config.set_engine_affinity(engine="streaming")
+
 def run_rtv_analysis(event_file: str,
                     stock_files: list,
                     results_dir: str,

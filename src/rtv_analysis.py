@@ -17,6 +17,8 @@ except ImportError:
     import sys
     sys.exit(1)
 
+pl.Config.set_engine_affinity(engine="streaming")
+
 class ReturnToVarianceAnalysis:
     """Extends event analysis to calculate return-to-variance ratios for testing Hypothesis 1."""
     
