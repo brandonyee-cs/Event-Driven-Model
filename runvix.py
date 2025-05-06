@@ -173,7 +173,7 @@ def run_refined_vix_analysis(event_file: str,
                     window_days: int = 60,
                     delta_days: int = 10) -> Dict[str, Any]:
     """
-    Run the refined VIX analysis to test the revised Hypothesis 2.
+    Run the refined VIX analysis to test the revised Hypothesis 2 using actual values.
     
     Parameters:
     event_file (str): Path to event data file (CSV)
@@ -185,7 +185,7 @@ def run_refined_vix_analysis(event_file: str,
     ticker_col (str): Column name containing ticker symbols
     return_col (str): Column name containing returns
     window_days (int): Days before/after event to include
-    delta_days (int): Parameter δ from the paper (post-event rising phase duration)
+    delta_days (int): Parameter δ defining the post-event rising phase
     
     Returns:
     Dict[str, Any]: Results of the hypothesis test
@@ -231,17 +231,19 @@ def run_refined_vix_analysis(event_file: str,
         # Initialize RefinedVIXAnalysis
         refined_vix_analysis = RefinedVIXAnalysis(event_analysis)
         
-        # Run refined hypothesis test
-        print(f"\nRunning Refined Hypothesis 2 test with delta = {delta_days} days...")
-        results = refined_vix_analysis.run_refined_hypothesis_2_test(
+        # Run refined hypothesis test with actual values
+        print(f"\nRunning Refined Hypothesis 2 test (Actual Values) with delta = {delta_days} days...")
+        results = refined_vix_analysis.run_actual_refined_hypothesis_2_test(
             vix_col='vix',  # Use standardized column name
             return_col=return_col,
+            pre_days=window_days,
+            post_days=window_days,
             delta_days=delta_days,
             results_dir=results_dir,
             file_prefix=file_prefix
         )
         
-        print("\n=== Refined Hypothesis 2 Test Completed ===")
+        print("\n=== Refined Hypothesis 2 Test (Actual Values) Completed ===")
         print(f"Results saved to: {os.path.abspath(results_dir)}")
         print(f"Hypothesis Supported: {results['hypothesis_supported']}")
         
@@ -275,7 +277,7 @@ def main():
         "/home/d87016661/crsp_dsf-2022-2023.parquet",
         "/home/d87016661/crsp_dsf-2024-2025.parquet"
     ]
-    FDA_RESULTS_DIR = "results/refined_vix_analysis/fda"
+    FDA_RESULTS_DIR = "results/refined_vix_analysis_actual/fda"
     FDA_FILE_PREFIX = "fda"
     FDA_EVENT_DATE_COL = "Approval Date"
     FDA_TICKER_COL = "ticker"
@@ -283,7 +285,7 @@ def main():
     # Earnings event specific parameters
     EARNINGS_EVENT_FILE = "/home/d87016661/detail_history_actuals.csv"
     EARNINGS_STOCK_FILES = FDA_STOCK_FILES  # Using the same stock files
-    EARNINGS_RESULTS_DIR = "results/refined_vix_analysis/earnings"
+    EARNINGS_RESULTS_DIR = "results/refined_vix_analysis_actual/earnings"
     EARNINGS_FILE_PREFIX = "earnings"
     EARNINGS_EVENT_DATE_COL = "ANNDATS"
     EARNINGS_TICKER_COL = "ticker"
@@ -298,7 +300,7 @@ def main():
     os.makedirs(EARNINGS_RESULTS_DIR, exist_ok=True)
     
     # Run FDA analysis
-    print("\n=== Starting FDA Approval Event VIX Analysis (Refined) ===")
+    print("\n=== Starting FDA Approval Event VIX Analysis (Actual Values) ===")
     fda_results = run_refined_vix_analysis(
         event_file=FDA_EVENT_FILE,
         stock_files=FDA_STOCK_FILES,
@@ -313,7 +315,7 @@ def main():
     )
     
     # Run Earnings analysis
-    print("\n=== Starting Earnings Announcement Event VIX Analysis (Refined) ===")
+    print("\n=== Starting Earnings Announcement Event VIX Analysis (Actual Values) ===")
     earnings_results = run_refined_vix_analysis(
         event_file=EARNINGS_EVENT_FILE,
         stock_files=EARNINGS_STOCK_FILES,
@@ -328,9 +330,98 @@ def main():
     )
     
     # Compare and summarize results
-    print("\n=== Refined Hypothesis 2 Test Results Summary ===")
+    print("\n=== Refined Hypothesis 2 Test Results Summary (Actual Values) ===")
     print(f"FDA Approval Events: Hypothesis Supported = {fda_results.get('hypothesis_supported', False)}")
     print(f"Earnings Announcement Events: Hypothesis Supported = {earnings_results.get('hypothesis_supported', False)}")
+    
+    # Save comparison summary
+    comparison_dir = "results/refined_vix_analysis_actual/comparison"
+    os.makedirs(comparison_dir, exist_ok=True)
+    summary_file = os.path.join(comparison_dir, "refined_vix_hypothesis_actual_summary.txt")
+    
+    try:
+        with open(summary_file, 'w') as f:
+            f.write("===== Refined Hypothesis 2 Test Summary (Actual Values) =====\n\n")
+            f.write("Refined Hypothesis 2: VIX dynamics around events reflect differentiated uncertainty profiles:\n")
+            f.write("  1. Pre-event VIX changes reflect market sentiment rather than directly predicting return magnitudes\n")
+            f.write("  2. Post-event VIX movements correlate with contemporaneous returns confirming impact uncertainty's resolution\n")
+            f.write(f"Delta (post-event rising phase duration): {DELTA_DAYS} days\n\n")
+            
+            f.write("--- FDA Approval Events ---\n")
+            if 'error' in fda_results:
+                f.write(f"Error: {fda_results['error']}\n")
+            else:
+                f.write(f"Overall Hypothesis Supported: {fda_results.get('hypothesis_supported', False)}\n")
+                f.write(f"Part 1 (Sentiment Indicator): {fda_results.get('sentiment_indicator', False)}\n")
+                f.write(f"Part 2 (Post-event Correlation): {fda_results.get('postevent_correlation', False)}\n")
+                
+                if 'pre_event_results' in fda_results and fda_results['pre_event_results'] is not None:
+                    pre_results = fda_results['pre_event_results']
+                    f.write(f"Pre-event avg Pearson correlation: {pre_results.get('avg_pearson', 'N/A'):.4f}\n")
+                    f.write(f"Pre-event avg Spearman correlation: {pre_results.get('avg_spearman', 'N/A'):.4f}\n")
+                    f.write(f"Pre-event days with significant Pearson correlation: {pre_results.get('significant_days_pearson', 'N/A')}/{len(pre_results.get('daily_correlations', []))}\n")
+                
+                if 'post_event_results' in fda_results and fda_results['post_event_results'] is not None:
+                    post_results = fda_results['post_event_results']
+                    f.write(f"Post-event mean correlation: {post_results.get('mean_correlation', 'N/A'):.4f}\n")
+                    f.write(f"Post-event median correlation: {post_results.get('median_correlation', 'N/A'):.4f}\n")
+                    f.write(f"Events with positive correlation: {post_results.get('positive_correlations', 'N/A')}/{post_results.get('total_events', 'N/A')}\n")
+            
+            f.write("\n--- Earnings Announcement Events ---\n")
+            if 'error' in earnings_results:
+                f.write(f"Error: {earnings_results['error']}\n")
+            else:
+                f.write(f"Overall Hypothesis Supported: {earnings_results.get('hypothesis_supported', False)}\n")
+                f.write(f"Part 1 (Sentiment Indicator): {earnings_results.get('sentiment_indicator', False)}\n")
+                f.write(f"Part 2 (Post-event Correlation): {earnings_results.get('postevent_correlation', False)}\n")
+                
+                if 'pre_event_results' in earnings_results and earnings_results['pre_event_results'] is not None:
+                    pre_results = earnings_results['pre_event_results']
+                    f.write(f"Pre-event avg Pearson correlation: {pre_results.get('avg_pearson', 'N/A'):.4f}\n")
+                    f.write(f"Pre-event avg Spearman correlation: {pre_results.get('avg_spearman', 'N/A'):.4f}\n")
+                    f.write(f"Pre-event days with significant Pearson correlation: {pre_results.get('significant_days_pearson', 'N/A')}/{len(pre_results.get('daily_correlations', []))}\n")
+                
+                if 'post_event_results' in earnings_results and earnings_results['post_event_results'] is not None:
+                    post_results = earnings_results['post_event_results']
+                    f.write(f"Post-event mean correlation: {post_results.get('mean_correlation', 'N/A'):.4f}\n")
+                    f.write(f"Post-event median correlation: {post_results.get('median_correlation', 'N/A'):.4f}\n")
+                    f.write(f"Events with positive correlation: {post_results.get('positive_correlations', 'N/A')}/{post_results.get('total_events', 'N/A')}\n")
+            
+            f.write("\n=== Conclusion ===\n")
+            fda_supported = fda_results.get('hypothesis_supported', False)
+            earnings_supported = earnings_results.get('hypothesis_supported', False)
+            
+            if fda_supported and earnings_supported:
+                f.write("The refined Hypothesis 2 is strongly supported by both FDA Approval and Earnings Announcement events.\n")
+                f.write("VIX dynamics around events reflect differentiated uncertainty profiles as hypothesized.\n")
+            elif fda_supported:
+                f.write("The refined Hypothesis 2 is supported by FDA Approval events but not by Earnings Announcement events.\n")
+                f.write("This may suggest that uncertainty profiles differ between regulatory and financial reporting events.\n")
+            elif earnings_supported:
+                f.write("The refined Hypothesis 2 is supported by Earnings Announcement events but not by FDA Approval events.\n")
+                f.write("This may suggest that uncertainty profiles differ between financial reporting and regulatory events.\n")
+            else:
+                f.write("The refined Hypothesis 2 is not fully supported by either FDA Approval or Earnings Announcement events.\n")
+                
+                # Check which part may be supported
+                fda_sentiment = fda_results.get('sentiment_indicator', False)
+                fda_postevent = fda_results.get('postevent_correlation', False)
+                earnings_sentiment = earnings_results.get('sentiment_indicator', False)
+                earnings_postevent = earnings_results.get('postevent_correlation', False)
+                
+                if (fda_sentiment or earnings_sentiment) and not (fda_postevent or earnings_postevent):
+                    f.write("The sentiment indicator aspect of the hypothesis is partially supported, suggesting that\n")
+                    f.write("pre-event VIX does reflect market sentiment, but post-event correlations are not significant.\n")
+                elif (fda_postevent or earnings_postevent) and not (fda_sentiment or earnings_sentiment):
+                    f.write("The post-event correlation aspect of the hypothesis is partially supported, suggesting that\n")
+                    f.write("post-event VIX does correlate with returns, but pre-event VIX is not a clear sentiment indicator.\n")
+                else:
+                    f.write("Neither aspect of the hypothesis is consistently supported across event types.\n")
+                    f.write("Further refinement of the hypothesis or analysis methods may be required.\n")
+        
+        print(f"Summary saved to: {os.path.abspath(summary_file)}")
+    except Exception as e:
+        print(f"Error saving summary: {e}")
 
 if __name__ == "__main__":
     main()
