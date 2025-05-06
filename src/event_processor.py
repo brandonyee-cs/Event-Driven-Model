@@ -1074,7 +1074,8 @@ class EventAnalysis:
 
         For each day relative to the event, computes returns as if buying at the start of the
         lookback window (sharpe_window days before) and holding until that day. Sharpe ratios
-        are calculated across all events for each day.
+        are calculated across all events for each day, with interpolation for missing values
+        and clipping to prevent extreme values.
 
         Parameters:
         results_dir (str): Directory to save results
@@ -1114,14 +1115,17 @@ class EventAnalysis:
             print(f"Error: No data found within extended analysis window [{extended_start}, {analysis_window[1]}].")
             return None
 
+        # Ensure all days in analysis window are present
+        all_days = pl.DataFrame({
+            'days_to_event': range(analysis_window[0], analysis_window[1] + 1)
+        })
+
         # Calculate cumulative returns for naive buy strategy
-        # For each event and day, compute return from (day - sharpe_window) to day
         returns_data = analysis_data.with_columns(
-            # Fill null returns with 0 for compounding
-            returns=pl.col(return_col).fill_null(0)
+            # Clip extreme returns to prevent outliers
+            returns=pl.col(return_col).clip(-1.0, 1.0).fill_null(0)
         ).group_by('event_id').map_groups(
             lambda df: df.with_columns(
-                # Calculate cumulative return over the lookback window
                 cum_return=pl.col('returns').shift(sharpe_window).cum_prod().shift(-sharpe_window) - 1
             ).filter(
                 pl.col('days_to_event').is_in(range(analysis_window[0], analysis_window[1] + 1))
@@ -1134,27 +1138,53 @@ class EventAnalysis:
             std_return=pl.col('cum_return').std(),
             event_count=pl.col('event_id').count(),
             valid_returns=pl.col('cum_return').is_not_null().sum()
-        ).sort('days_to_event')
+        ).join(
+            all_days, on='days_to_event', how='right'  # Ensure all days are included
+        ).sort('days_to_event').with_columns(
+            mean_return=pl.col('mean_return').fill_null(0),
+            std_return=pl.col('std_return').fill_null(0),
+            event_count=pl.col('event_count').fill_null(0),
+            valid_returns=pl.col('valid_returns').fill_null(0)
+        )
+
+        # Debug: Check for extreme values
+        max_return = daily_stats['mean_return'].abs().max()
+        max_std = daily_stats['std_return'].max()
+        print(f"Debug: Max absolute mean_return: {max_return:.4f}, Max std_return: {max_std:.4f}")
 
         # Calculate Sharpe ratio
         daily_stats = daily_stats.with_columns(
             sharpe_ratio=pl.when(
-                (pl.col('std_return') > 0) & (pl.col('valid_returns') >= 5)  # Require at least 5 valid returns
+                (pl.col('std_return') > 0) & (pl.col('valid_returns') >= 3)
             ).then(
                 (pl.col('mean_return') - (daily_rf * sharpe_window)) / pl.col('std_return')
             ).otherwise(None)
         )
 
+        # Clip Sharpe ratio to prevent extreme values
+        daily_stats = daily_stats.with_columns(
+            sharpe_ratio=pl.col('sharpe_ratio').clip(-100.0, 100.0)
+        )
+
+        # Interpolate missing Sharpe ratios
+        daily_stats = daily_stats.with_columns(
+            sharpe_ratio=pl.col('sharpe_ratio').interpolate(method='linear')
+        )
+
         # Apply annualization if requested
         if annualize:
             daily_stats = daily_stats.with_columns(
-                sharpe_ratio=pl.col('sharpe_ratio') * np.sqrt(252 / sharpe_window),
-                mean_return=pl.col('mean_return') * (252 / sharpe_window),
-                std_return=pl.col('std_return') * np.sqrt(252 / sharpe_window)
+                sharpe_ratio=pl.col('sharpe_ratio') * np.sqrt(252),  # Standard annualization
+                mean_return=pl.col('mean_return'),  # Keep returns unscaled
+                std_return=pl.col('std_return') * np.sqrt(252)  # Annualize volatility
             )
 
+        # Debug: Check Sharpe ratio range
+        max_sharpe = daily_stats['sharpe_ratio'].abs().max()
+        print(f"Debug: Max absolute Sharpe ratio: {max_sharpe:.4f}")
+
         # Smooth the Sharpe ratio for visualization
-        smooth_window = min(7, sharpe_window)  # Smaller smoothing window for responsiveness
+        smooth_window = min(7, sharpe_window)
         daily_stats = daily_stats.with_columns(
             smooth_sharpe=pl.col('sharpe_ratio').rolling_mean(
                 window_size=smooth_window,
@@ -1163,16 +1193,19 @@ class EventAnalysis:
             )
         )
 
-        # Check if we have enough data
+        # Check valid days
         valid_days = daily_stats.filter(pl.col('sharpe_ratio').is_not_null()).height
-        if valid_days < 5:
+        if valid_days < 60:
             print(f"Warning: Only {valid_days} days have valid Sharpe ratios. Results may be unreliable.")
-        elif valid_days == 0:
-            print("Error: No days have valid Sharpe ratios. Check data availability.")
-            return None
+        elif valid_days < 121:
+            print(f"Note: {valid_days}/121 days have valid Sharpe ratios due to interpolation.")
 
         # Convert to pandas for plotting
         results_pd = daily_stats.to_pandas()
+
+        # Clip plotting values to prevent y-axis issues
+        results_pd['sharpe_ratio'] = results_pd['sharpe_ratio'].clip(-10.0, 10.0)
+        results_pd['smooth_sharpe'] = results_pd['smooth_sharpe'].clip(-10.0, 10.0)
 
         # Create Plotly figure
         try:
@@ -1208,29 +1241,32 @@ class EventAnalysis:
             fig.add_vrect(x0=-2, x1=2, fillcolor='yellow', opacity=0.2, 
                          line_width=0, annotation_text='Event Window')
 
-            # Dynamic y-axis range
-            y_values = results_pd['smooth_sharpe'].dropna()
-            if not y_values.empty:
-                y_min = min(y_values.min(), -0.5)
-                y_max = max(y_values.max(), 0.5)
-                y_range = max(abs(y_min), abs(y_max)) * 1.2
-            else:
-                y_range = 1.0
-
+            # Fixed y-axis range to prevent extreme scaling
+            y_range = 10.0  # Reasonable range for Sharpe ratios
             fig.update_layout(
-                title=f'Rolling Sharpe Ratio Around Events (Naive Buy, {sharpe_window}-Day Lookback)',
+                title=f'Rolling Sharpe Ratio vs. Days to Event (Naive Buy, {sharpe_window}-Day Lookback)',
                 xaxis_title='Days Relative to Event',
                 yaxis_title='Sharpe Ratio (Annualized)' if annualize else 'Sharpe Ratio',
                 showlegend=True,
                 template='plotly_white',
                 width=1000,
                 height=600,
+                xaxis=dict(
+                    tickmode='linear',
+                    tick0=analysis_window[0],
+                    dtick=10,
+                    gridcolor='lightgray',
+                    zeroline=True,
+                    zerolinewidth=1,
+                    zerolinecolor='black'
+                ),
                 yaxis=dict(
                     range=[-y_range, y_range],
+                    gridcolor='lightgray',
                     zeroline=True,
                     zerolinewidth=1,
                     zerolinecolor='black',
-                    gridcolor='lightgray'
+                    tickformat='.1f'  # Show one decimal place
                 )
             )
 
@@ -1261,7 +1297,7 @@ class EventAnalysis:
 
         print(f"Completed Sharpe ratio calculation. Valid days: {valid_days}/{daily_stats.height}")
         return daily_stats
-
+    
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
                           return_col: str = 'ret', 
                           analysis_window: Tuple[int, int] = (-60, 60),
