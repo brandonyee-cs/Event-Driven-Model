@@ -1,0 +1,21 @@
+===== Refined Hypothesis 2 Test Summary (Actual Values) =====
+
+Refined Hypothesis 2: VIX dynamics around events reflect differentiated uncertainty profiles:
+  1. Pre-event VIX changes reflect market sentiment rather than directly predicting return magnitudes
+  2. Post-event VIX movements correlate with contemporaneous returns confirming impact uncertainty's resolution
+Delta (post-event rising phase duration): 10 days
+
+--- FDA Approval Events ---
+Error: invalid input for `col`
+
+Expected `str` or `DataType`, got 'Expr'.
+
+--- Earnings Announcement Events ---
+Error: invalid input for `col`
+
+Expected `str` or `DataType`, got 'Expr'.
+
+=== Conclusion ===
+The refined Hypothesis 2 is not fully supported by either FDA Approval or Earnings Announcement events.
+Neither aspect of the hypothesis is consistently supported across event types.
+Further refinement of the hypothesis or analysis methods may be required.
