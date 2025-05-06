@@ -1,0 +1,14 @@
+===== Hypothesis 1 Test Report =====
+
+Hypothesis 1: The return-to-variance ratio peaks during the post-event rising phase
+Delta (post-event rising phase duration): 10 days
+
+Return-to-Variance Ratio by Phase:
+Pre-Event Phase: Mean=3436.9322, Median=1.8440, N=36286
+Post-Event Rising Phase (1 to 10 days): Mean=8.5278, Median=2.3929, N=5761
+Post-Event Decay Phase (>10 days): Mean=2.8512, Median=0.7018, N=30711
+
+Hypothesis 1 Supported: False
+
+Conclusion: The results do not support Hypothesis 1. The return-to-variance ratio
+does not peak during the post-event rising phase (1 to 10 days after the event).
