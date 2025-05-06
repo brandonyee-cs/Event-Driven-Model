@@ -1396,10 +1396,10 @@ class EventAnalysis:
                           risk_free_rate: float = 0.0):
         """
         Calculates Sharpe ratio quantiles for each day relative to events.
-        
+
         For each day, computes Sharpe ratios using the lookback window and calculates
         quantiles across all events.
-        
+
         Parameters:
         results_dir (str): Directory to save results
         file_prefix (str): Prefix for saved files
@@ -1409,19 +1409,19 @@ class EventAnalysis:
         quantiles (List[float]): List of quantiles to calculate
         annualize (bool): Whether to annualize the Sharpe ratio
         risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-        
+
         Returns:
         pl.DataFrame: DataFrame containing Sharpe ratio quantiles
         """
         print(f"\n--- Calculating Sharpe Ratio Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
-    
+
         if self.data is None or return_col not in self.data.columns:
             print("Error: Data not loaded or missing return column.")
             return None
-    
+
         # Calculate daily risk-free rate
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if annualize and risk_free_rate > 0 else 0
-    
+
         # Pre-filter the data
         extended_start = analysis_window[0] - lookback_window
         # Check if returns are likely in percentage form (sample a few values)
@@ -1431,11 +1431,11 @@ class EventAnalysis:
         )
         sample_returns = sample_data.select(pl.col(return_col)).sample(n=min(100, sample_data.height))
         avg_abs_return = sample_returns.mean_horizontal().abs()[0]
-        
+
         # If average absolute return is > 0.05, returns are likely in percentage form (e.g., 2.5 instead of 0.025)
         returns_in_pct = avg_abs_return > 0.05
         print(f"Detected returns format: {'Percentage form' if returns_in_pct else 'Decimal form'} (avg abs: {avg_abs_return:.4f})")
-        
+
         # Convert returns to decimal form if needed for consistent calculation
         if returns_in_pct:
             print("Converting percentage returns to decimal form for Sharpe calculation")
@@ -1452,44 +1452,44 @@ class EventAnalysis:
                 (pl.col('days_to_event') <= analysis_window[1])
             )
             return_col_for_calc = return_col
-    
+
         # Clip extreme returns to prevent outliers from skewing results
         analysis_data = analysis_data.with_columns(
             pl.col(return_col_for_calc).clip(-0.05, 0.05).alias('clipped_return')
         )
-    
+
         if analysis_data.is_empty():
             print(f"Error: No data found within analysis window {analysis_window}.")
             return None
-    
+
         days_range = list(range(analysis_window[0], analysis_window[1] + 1))
         sharpe_data = []
         print(f"Processing {len(days_range)} days...")
-    
+
         # Process in batches for memory efficiency
         batch_size = 10
         for batch_start in range(0, len(days_range), batch_size):
             batch_days = days_range[batch_start:batch_start + batch_size]
             print(f"Processing days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
-    
+
             batch_results = []
             for day in batch_days:
                 window_start = day - lookback_window
                 window_end = day - 1  # Use data up to previous day
-    
+
                 # Get data for the current lookback window
                 window_data = analysis_data.filter(
                     (pl.col('days_to_event') >= window_start) & 
                     (pl.col('days_to_event') <= window_end)
                 )
-    
+
                 if window_data.is_empty():
                     empty_results = {"days_to_event": day, "event_count": 0}
                     for q in quantiles:
                         empty_results[f"sharpe_q{int(q*100)}"] = None
                     batch_results.append(empty_results)
                     continue
-                
+
                 # Calculate Sharpe ratio for each event
                 sharpe_by_event = window_data.group_by('event_id').agg([
                     pl.mean('clipped_return').alias('mean_ret'),
@@ -1499,21 +1499,21 @@ class EventAnalysis:
                     (pl.col('n_obs') >= max(3, lookback_window // 3)) &
                     (pl.col('std_dev') > 0)
                 )
-    
+
                 valid_events = sharpe_by_event.height
-    
+
                 if valid_events >= 5:
                     # Calculate Sharpe ratio for each event
                     sharpe_by_event = sharpe_by_event.with_columns(
                         ((pl.col('mean_ret') - daily_rf) / pl.col('std_dev') * 
                          (np.sqrt(252) if annualize else 1)).alias('sharpe')
                     )
-    
+
                     # Clip extreme Sharpe values to a reasonable range but allow for wider distribution
                     sharpe_by_event = sharpe_by_event.with_columns(
                         pl.col('sharpe').clip(-10, 10).alias('sharpe')
                     )
-    
+
                     # Calculate quantiles
                     q_values = {}
                     for q in quantiles:
@@ -1521,24 +1521,24 @@ class EventAnalysis:
                             pl.col('sharpe').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
                         ).item(0, 0)
                         q_values[f"sharpe_q{int(q*100)}"] = q_value
-    
+
                     day_results = {"days_to_event": day, "event_count": valid_events, **q_values}
                 else:
                     day_results = {"days_to_event": day, "event_count": valid_events}
                     for q in quantiles:
                         day_results[f"sharpe_q{int(q*100)}"] = None
-    
+
                 batch_results.append(day_results)
-    
+
             sharpe_data.extend(batch_results)
-    
+
             # Clean up for memory efficiency
             del window_data, sharpe_by_event, batch_results
             import gc
             gc.collect()
-    
+
         results_df = pl.DataFrame(sharpe_data)
-    
+
         # Collect statistics for display and scaling
         min_value = float('inf')
         max_value = float('-inf')
@@ -1551,16 +1551,16 @@ class EventAnalysis:
                     min_value = col_min
                 if col_max is not None and col_max > max_value:
                     max_value = col_max
-        
+
         # If values are outside normal Sharpe range, print details
         if min_value < -5 or max_value > 5:
             print(f"Note: Wide range of Sharpe values detected: [{min_value:.2f}, {max_value:.2f}]")
-        
+
         # Plot quantiles using Plotly
         try:
             results_pd = results_df.to_pandas()
             fig = go.Figure()
-            
+
             # Add quantile lines
             for q in quantiles:
                 col = f"sharpe_q{int(q*100)}"
@@ -1574,21 +1574,21 @@ class EventAnalysis:
                         name=f'Q{int(q*100)}',
                         line=dict(width=line_width, dash=line_dash)
                     ))
-            
+
             # Add reference lines
             fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
                 fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
                 fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
-            
+
             # Add zero line
             fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
-            
+
             # Highlight event window
             event_start, event_end = -2, 2
             if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
                 fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
-            
+
             # Determine appropriate y-axis range 
             if min_value < -10 or max_value > 10:
                 # For very wide ranges, use data-driven range with padding
@@ -1596,17 +1596,17 @@ class EventAnalysis:
                 y_range = [min_value - padding, max_value + padding]
             elif min_value < -5 or max_value > 5:
                 # For moderately wide ranges, use fixed range of [-10, 10]
-                y_range = [-10, 10]
+                y_range = [-20, 20]
             else:
                 # For normal Sharpe ranges, use [-5, 5]
                 y_range = [-5, 5]
-                
+
             # Ensure zero is in the range
             if y_range[0] > 0:
                 y_range[0] = 0
             if y_range[1] < 0:
                 y_range[1] = 0
-            
+
             # Set layout
             fig.update_layout(
                 title=f'Sharpe Ratio Quantiles Around Events (Lookback: {lookback_window} days)',
@@ -1631,7 +1631,7 @@ class EventAnalysis:
                     tickformat='.2f'  # Show two decimal places
                 )
             )
-            
+
             # Add range annotation
             fig.add_annotation(
                 x=analysis_window[0] + 5,
@@ -1644,7 +1644,7 @@ class EventAnalysis:
                 bgcolor="white",
                 opacity=0.8
             )
-            
+
             # Save plot
             try:
                 plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.png")
@@ -1656,11 +1656,11 @@ class EventAnalysis:
                 html_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.html")
                 fig.write_html(html_filename)
                 print(f"Saved Sharpe quantiles as HTML (fallback) to: {html_filename}")
-            
+
         except Exception as e:
             print(f"Error creating plot: {e}")
             traceback.print_exc()
-    
+
         # Save results to CSV
         csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.csv")
         try:
@@ -1668,7 +1668,7 @@ class EventAnalysis:
             print(f"Saved Sharpe quantiles data to: {csv_filename}")
         except Exception as e:
             print(f"Error saving quantiles data: {e}")
-    
+
         return results_df
 
     def analyze_volatility_spikes(self, 
