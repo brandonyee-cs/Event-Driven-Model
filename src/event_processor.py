@@ -965,27 +965,23 @@ class EventAnalysis:
             # Ensure data is sorted by date
             event_data = event_data.sort('date')
             
-            # Get event date for this event
-            event_day_df = event_data.filter(pl.col('days_to_event') == 0)
-            if event_day_df.is_empty():
-                # Find the closest day to the event (smallest absolute days_to_event)
-                abs_days = event_data.with_columns(
-                    pl.Expr.abs(pl.col('days_to_event')).alias('abs_days_to_event')
-                )
-                closest_day = abs_days.sort('abs_days_to_event').head(1)
-
-                if closest_day.is_empty() or closest_day.select('abs_days_to_event').item() > 5:
-                    # Skip if no day within 3 days of event
-                    print(f"Warning: No close trading days (within ±3 days) found for event {event_id}. Skipping.")
-                    continue
-
-                print(f"Note: Using closest trading day ({closest_day.select('days_to_event').item()} days from event) for event {event_id}")
-                event_date = closest_day.select('date').item()
-                event_day_idx = closest_day.with_row_count().select('row_nr').item()
-            else:
-                event_date = event_day_df.select('date').item()
-                event_day_idx = event_day_df.with_row_count().select('row_nr').item()
+            # For GARCH modeling, we just need some point to anchor the event
+            # Don't skip events just because there's no exact day_to_event=0
+            if event_data.is_empty():
+                print(f"Warning: No data available for event {event_id}. Skipping.")
+                continue
             
+            # Find the closest available day to the event
+            days_to_event_values = event_data.select('days_to_event').to_series().to_numpy()
+            closest_idx = np.abs(days_to_event_values).argmin()
+            event_day_idx = closest_idx
+            closest_day_value = days_to_event_values[closest_idx]
+            date_values = event_data.select('date').to_series().to_numpy()
+            event_date = date_values[closest_idx]
+            
+            if closest_day_value != 0:
+                print(f"Note: Using closest available day (days_to_event={closest_day_value}) for event {event_id}")
+                        
             # Skip if event has insufficient data
             if len(event_returns) < 20:  # Minimum data needed for GARCH
                 continue
