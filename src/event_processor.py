@@ -965,14 +965,26 @@ class EventAnalysis:
             # Ensure data is sorted by date
             event_data = event_data.sort('date')
             
-            ## Get event date for this event
+            # Get event date for this event
             event_day_df = event_data.filter(pl.col('days_to_event') == 0)
             if event_day_df.is_empty():
-                print(f"Warning: No event day (days_to_event == 0) found for event {event_id}. Skipping.")
-                continue  # Skip to the next event
-            
-            event_date = event_day_df.select('date').item()
-            event_day_idx = event_day_df.with_row_count().select('row_nr').item()
+                # Find the closest day to the event (smallest absolute days_to_event)
+                abs_days = event_data.with_columns(
+                    pl.abs(pl.col('days_to_event')).alias('abs_days_to_event')
+                )
+                closest_day = abs_days.sort('abs_days_to_event').head(1)
+                
+                if closest_day.is_empty() or closest_day.select('abs_days_to_event').item() > 3:
+                    # Skip if no day within 3 days of event
+                    print(f"Warning: No close trading days (within ±3 days) found for event {event_id}. Skipping.")
+                    continue
+                    
+                print(f"Note: Using closest trading day ({closest_day.select('days_to_event').item()} days from event) for event {event_id}")
+                event_date = closest_day.select('date').item()
+                event_day_idx = closest_day.with_row_count().select('row_nr').item()
+            else:
+                event_date = event_day_df.select('date').item()
+                event_day_idx = event_day_df.with_row_count().select('row_nr').item()
             
             # Skip if event has insufficient data
             if len(event_returns) < 20:  # Minimum data needed for GARCH
