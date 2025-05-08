@@ -186,24 +186,33 @@ class EventDataLoader:
                     raise ValueError(f"Event date column '{self.event_date_col}' not found.")
 
             print(f"Using columns '{ticker_col}' (as ticker) and '{date_col}' (as Event Date) from event file.")
-            event_data_raw = pl.read_csv(self.event_path, columns=[ticker_col, date_col], try_parse_dates=True)
+            
+            # Read CSV with explicit date parsing for DD/MM/YYYY format
+            event_data_raw = pl.read_csv(
+                self.event_path,
+                columns=[ticker_col, date_col],
+                try_parse_dates=True,
+                date_format="%d/%m/%Y"  # Explicitly specify DD/MM/YYYY format
+            )
+            
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Event Date'})
 
             # --- Check/Correct Date Type ---
             if event_data_renamed['Event Date'].dtype == pl.Object or isinstance(event_data_renamed['Event Date'].dtype, pl.String):
                 print("    'Event Date' read as Object/String, attempting str.to_datetime...")
                 event_data_processed = event_data_renamed.with_columns([
-                     pl.col('Event Date').str.to_datetime(strict=False).cast(pl.Datetime),  # Explicit parse and cast
-                     pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
-                 ])
+                    pl.col('Event Date').str.to_datetime(format="%d/%m/%Y").cast(pl.Datetime),  # Explicit format
+                    pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
+                ])
             elif isinstance(event_data_renamed['Event Date'].dtype, (pl.Date, pl.Datetime)):
-                 print("    'Event Date' already parsed as Date/Datetime.")
-                 event_data_processed = event_data_renamed.with_columns([
-                     pl.col('Event Date').cast(pl.Datetime),  # Ensure it's Datetime specifically if needed
-                     pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
-                 ])
+                print("    'Event Date' already parsed as Date/Datetime.")
+                event_data_processed = event_data_renamed.with_columns([
+                    pl.col('Event Date').cast(pl.Datetime),  # Ensure it's Datetime specifically if needed
+                    pl.col('ticker').cast(pl.Utf8).str.to_uppercase()
+                ])
             else:
-                 raise TypeError(f"Unexpected dtype for 'Event Date': {event_data_renamed['Event Date'].dtype}")
+                raise TypeError(f"Unexpected dtype for 'Event Date': {event_data_renamed['Event Date'].dtype}")
+
             # --- End Corrected Date Handling ---
 
             event_data_processed = event_data_processed.drop_nulls(subset=['Event Date'])
