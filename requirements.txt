@@ -10,8 +10,7 @@ seaborn>=0.12.2
 # Machine learning - using specific versions to ensure compatibility
 scikit-learn>=1.2.2,<1.4.0  # Using an upper bound for stability
 xgboost>=1.7.6,<2.0.0
+statsmodels
 
 # Data reading/processing
 pyarrow>=12.0.0  # For Parquet file support
-plotly
-kaleido
