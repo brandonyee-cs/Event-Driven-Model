@@ -1,8 +1,8 @@
 import polars as pl
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns # Retained for potential use, though not directly in plots
 from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, classification_report
 from sklearn.impute import SimpleImputer
 import xgboost as xgb
@@ -32,7 +32,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
 class EventDataLoader:
-    def __init__(self, event_path: str, stock_paths: List[str], window_days: int = 30, 
+    def __init__(self, event_path: str, stock_paths: List[str], window_days: int = 30,
                  event_date_col: str = 'Event Date', ticker_col: str = 'ticker'):
         """
         Initialize DataLoader for events using Polars.
@@ -45,13 +45,13 @@ class EventDataLoader:
         ticker_col (str): Column name containing ticker symbols
         """
         self.event_path = event_path
-        if isinstance(stock_paths, str): 
+        if isinstance(stock_paths, str):
             self.stock_paths = [stock_paths]
-        elif isinstance(stock_paths, list): 
+        elif isinstance(stock_paths, list):
             self.stock_paths = stock_paths
-        else: 
+        else:
             raise TypeError("stock_paths must be a string or a list of Parquet file paths.")
-        
+
         self.window_days = window_days
         self.event_date_col = event_date_col
         self.ticker_col = ticker_col
@@ -164,20 +164,20 @@ class EventDataLoader:
             event_df_peek = pl.read_csv_batched(self.event_path, batch_size=1).next_batches(1)[0]
             ticker_col = self.ticker_col
             date_col = self.event_date_col
-            
-            if ticker_col not in event_df_peek.columns: 
+
+            if ticker_col not in event_df_peek.columns:
                 # Try to find ticker column if not found by name
-                potential_ticker_cols = [c for c in event_df_peek.columns 
+                potential_ticker_cols = [c for c in event_df_peek.columns
                                         if 'ticker' in c.lower() or 'symbol' in c.lower()]
                 if potential_ticker_cols:
                     ticker_col = potential_ticker_cols[0]
                     print(f"Using '{ticker_col}' as ticker column")
                 else:
                     raise ValueError(f"Ticker column '{self.ticker_col}' not found in event file.")
-            
-            if date_col not in event_df_peek.columns: 
+
+            if date_col not in event_df_peek.columns:
                 # Try to find date column if not found by name
-                potential_date_cols = [c for c in event_df_peek.columns 
+                potential_date_cols = [c for c in event_df_peek.columns
                                       if 'date' in c.lower() or 'day' in c.lower()]
                 if potential_date_cols:
                     date_col = potential_date_cols[0]
@@ -651,7 +651,7 @@ class EventFeatureEngineer:
             else:
                  print("Warning: Numeric feature array is empty. Skipping imputer fitting.")
                  X_numeric_imputed_np = X_numeric_np
-                 self._imputer_fitted = True
+                 self._imputer_fitted = True # Mark as fitted even if empty to prevent error
         else:
             if not self._imputer_fitted: raise RuntimeError("Imputer not fitted. Call with fit_imputer=True first.")
             print("Transforming numeric NumPy data with pre-fitted imputer...")
@@ -689,9 +689,12 @@ class EventFeatureEngineer:
              X_np = X_categorical_np
              self.final_feature_names = categorical_cols_present
         else:
-             num_cols = len(numeric_features) + len(categorical_cols_present)
-             X_np = np.empty((0, num_cols), dtype=np.float64)
+             # Handles case where both numeric and categorical are empty
+             # (e.g. df_with_target was empty, or X_numeric_np was empty and no categorical features)
+             num_potential_cols = len(numeric_features) + len(categorical_cols_present)
+             X_np = np.empty((0, num_potential_cols), dtype=np.float64)
              self.final_feature_names = numeric_features + categorical_cols_present
+
 
         y_np = y_pl.cast(pl.Float64).to_numpy()
 
@@ -705,7 +708,7 @@ class EventAnalysis:
     def __init__(self, data_loader: EventDataLoader, feature_engineer: EventFeatureEngineer):
         """
         Initialize EventAnalysis with data loader and feature engineer.
-        
+
         Parameters:
         data_loader (EventDataLoader): Instance to load event and stock data
         feature_engineer (EventFeatureEngineer): Instance to engineer features
@@ -718,27 +721,27 @@ class EventAnalysis:
     def load_and_prepare_data(self, run_feature_engineering: bool = False) -> Optional[pl.DataFrame]:
         """
         Loads and prepares data using the data loader and optionally applies feature engineering.
-        
+
         Parameters:
         run_feature_engineering (bool): Whether to run feature engineering
-        
+
         Returns:
         pl.DataFrame: Prepared data or None if loading fails
         """
         try:
             # Load event and stock data using the available load_data method
             combined_data = self.data_loader.load_data()
-            
+
             if combined_data is None:
                 print("Error: Failed to load data from data loader.")
                 return None
-            
+
             if run_feature_engineering:
                 # Create target for predictive modeling
                 combined_data = self.feature_engineer.create_target(combined_data)
                 # Calculate features for analysis
                 combined_data = self.feature_engineer.calculate_features(combined_data)
-            
+
             self.data = combined_data
             return combined_data
         except Exception as e:
@@ -749,7 +752,7 @@ class EventAnalysis:
     def train_models(self, test_size: float = 0.2, time_split_column: str = "Event Date"):
         """
         Train machine learning models on the prepared data.
-        
+
         Parameters:
         test_size (float): Proportion of data to use for testing
         time_split_column (str): Column containing dates for time-based splitting
@@ -758,38 +761,53 @@ class EventAnalysis:
         if self.data is None:
             print("Error: No data loaded. Call load_and_prepare_data first.")
             return
-            
+
         try:
             # Extract features and target
             X, y, feature_names = self.feature_engineer.get_features_target(self.data, fit_imputer=True)
-            
+
             if X.shape[0] == 0 or y.shape[0] == 0:
                 print("Error: No valid features or target extracted.")
                 return
-                
+
             print(f"Training models on {X.shape[0]} samples with {X.shape[1]} features.")
-            
+
             # Create time-based split if time column provided
             if time_split_column in self.data.columns:
                 # Sort by time and split
-                dates = self.data.select(time_split_column).to_numpy().flatten()
-                sorted_indices = np.argsort(dates)
-                split_idx = int(len(sorted_indices) * (1 - test_size))
-                train_indices = sorted_indices[:split_idx]
-                test_indices = sorted_indices[split_idx:]
-                
-                X_train, X_test = X[train_indices], X[test_indices]
-                y_train, y_test = y[train_indices], y[test_indices]
+                # Ensure we only use rows that ended up in X and y (after drop_nulls on target)
+                valid_indices_for_split = self.data.with_row_count().filter(pl.col('future_ret').is_not_null())['row_nr'].to_numpy()
+
+                dates_for_split = self.data.filter(pl.col('future_ret').is_not_null()).select(time_split_column).to_numpy().flatten()
+
+                if len(dates_for_split) != X.shape[0]:
+                     print(f"Warning: Mismatch in date count ({len(dates_for_split)}) and X samples ({X.shape[0]}). Falling back to random split.")
+                     from sklearn.model_selection import train_test_split
+                     X_train, X_test, y_train, y_test = train_test_split(
+                         X, y, test_size=test_size, random_state=42
+                     )
+                else:
+                    sorted_indices_relative_to_X = np.argsort(dates_for_split)
+                    split_idx = int(len(sorted_indices_relative_to_X) * (1 - test_size))
+                    train_indices_in_X = sorted_indices_relative_to_X[:split_idx]
+                    test_indices_in_X = sorted_indices_relative_to_X[split_idx:]
+
+                    X_train, X_test = X[train_indices_in_X], X[test_indices_in_X]
+                    y_train, y_test = y[train_indices_in_X], y[test_indices_in_X]
+                    print(f"Time-based split: Train {X_train.shape[0]}, Test {X_test.shape[0]}")
+
             else:
                 # Random split
                 from sklearn.model_selection import train_test_split
                 X_train, X_test, y_train, y_test = train_test_split(
                     X, y, test_size=test_size, random_state=42
                 )
-            
+                print(f"Random split: Train {X_train.shape[0]}, Test {X_test.shape[0]}")
+
+
             # Initialize and train models
-            from src.models import TimeSeriesRidge, XGBoostDecileModel
-            
+            # from src.models import TimeSeriesRidge, XGBoostDecileModel # Already imported at top
+
             # TimeSeriesRidge model
             tsridge_model = TimeSeriesRidge(alpha=0.1, lambda2=0.5)
             tsridge_model.fit(X_train, y_train)
@@ -799,7 +817,7 @@ class EventAnalysis:
                 'X_test': X_test, 'y_test': y_test,
                 'feature_names': feature_names
             }
-            
+
             # XGBoost model
             xgb_params = {
                 'n_estimators': 100,
@@ -816,9 +834,9 @@ class EventAnalysis:
                 'X_test': X_test, 'y_test': y_test,
                 'feature_names': feature_names
             }
-            
+
             print(f"Successfully trained {len(self.models)} models.")
-            
+
         except Exception as e:
             print(f"Error training models: {e}")
             traceback.print_exc()
@@ -826,7 +844,7 @@ class EventAnalysis:
     def evaluate_models(self) -> Dict[str, Any]:
         """
         Evaluate trained machine learning models and return performance metrics.
-        
+
         Returns:
         Dict[str, Any]: Dictionary of model evaluation results
         """
@@ -834,24 +852,24 @@ class EventAnalysis:
         if not self.models:
             print("Error: No models trained. Call train_models first.")
             return {}
-            
+
         results = {}
-        
+
         try:
             for model_name, model_info in self.models.items():
                 model = model_info['model']
                 X_test = model_info['X_test']
                 y_test = model_info['y_test']
-                
+
                 # Make predictions
                 y_pred = model.predict(X_test)
-                
+
                 # Calculate metrics
                 from sklearn.metrics import mean_squared_error, r2_score
                 mse = mean_squared_error(y_test, y_pred)
                 rmse = np.sqrt(mse)
                 r2 = r2_score(y_test, y_pred)
-                
+
                 # Store results
                 results[model_name] = {
                     'mse': mse,
@@ -860,11 +878,11 @@ class EventAnalysis:
                     'y_pred': y_pred,
                     'y_test': y_test
                 }
-                
+
                 print(f"Model: {model_name}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
-                
+
             return results
-            
+
         except Exception as e:
             print(f"Error evaluating models: {e}")
             traceback.print_exc()
@@ -872,8 +890,8 @@ class EventAnalysis:
 
     def plot_feature_importance(self, results_dir: str, file_prefix: str, model_name: str):
         """
-        Plot feature importance for a specified model.
-        
+        Plot feature importance for a specified model using Matplotlib.
+
         Parameters:
         results_dir (str): Directory to save the plot
         file_prefix (str): Prefix for the saved file name
@@ -883,54 +901,50 @@ class EventAnalysis:
         if model_name not in self.models:
             print(f"Error: Model '{model_name}' not found in trained models.")
             return
-            
+
         try:
             model_info = self.models[model_name]
             model = model_info['model']
             feature_names = model_info['feature_names']
-            
+
             if model_name == 'TimeSeriesRidge':
-                # For Ridge models, feature importance is based on coefficient magnitude
                 importances = np.abs(model.coef_)
                 indices = np.argsort(importances)[::-1]
             elif model_name == 'XGBoostDecile':
-                # For XGBoost models, use built-in feature importance
-                xgb_model = model.xgb_model
-                importances = xgb_model.feature_importances_
+                xgb_model_actual = model.xgb_model # Access the underlying XGBoost model
+                importances = xgb_model_actual.feature_importances_
                 indices = np.argsort(importances)[::-1]
             else:
                 print(f"Error: Feature importance not implemented for model type '{model_name}'.")
                 return
-            
-            # Create feature importance plot using Plotly
-            import plotly.graph_objects as go
-            
+
             sorted_importances = importances[indices]
             sorted_features = [feature_names[i] for i in indices]
-            
-            # Limit to top 15 features for readability
+
             top_n = min(15, len(sorted_features))
-            
-            fig = go.Figure(go.Bar(
-                x=sorted_importances[:top_n][::-1],
-                y=sorted_features[:top_n][::-1],
-                orientation='h'
-            ))
-            
-            fig.update_layout(
-                title=f'Feature Importance - {model_name}',
-                xaxis_title='Importance',
-                yaxis_title='Feature',
-                template='plotly_white',
-                width=900,
-                height=500
+
+            fig, ax = plt.subplots(figsize=(10, 6)) # Adjusted for typical Matplotlib aspect
+            ax.barh(
+                np.arange(top_n),
+                sorted_importances[:top_n][::-1], # Reverse for horizontal bar plot
+                align='center'
             )
-            
+            ax.set_yticks(np.arange(top_n))
+            ax.set_yticklabels(sorted_features[:top_n][::-1]) # Reverse for horizontal bar plot
+            ax.set_xlabel('Importance')
+            ax.set_ylabel('Feature')
+            ax.set_title(f'Feature Importance - {model_name}')
+            plt.tight_layout()
+
             # Save plot
             plot_filename = os.path.join(results_dir, f"{file_prefix}_feat_importance_{model_name}.png")
-            fig.write_image(plot_filename, format='png', scale=2)
-            print(f"Saved feature importance plot to: {plot_filename}")
-            
+            try:
+                plt.savefig(plot_filename, dpi=200)
+                print(f"Saved feature importance plot to: {plot_filename}")
+            except Exception as e:
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
+
         except Exception as e:
             print(f"Error plotting feature importance: {e}")
             traceback.print_exc()
@@ -938,10 +952,10 @@ class EventAnalysis:
     def find_sample_event_ids(self, n: int = 3) -> List[str]:
         """
         Find sample event IDs for prediction visualization.
-        
+
         Parameters:
         n (int): Number of sample events to return
-        
+
         Returns:
         List[str]: List of event IDs
         """
@@ -949,29 +963,29 @@ class EventAnalysis:
         if self.data is None:
             print("Error: No data loaded.")
             return []
-            
+
         try:
             # Get unique event IDs
             event_ids = self.data.get_column('event_id').unique().to_list()
-            
+
             if len(event_ids) <= n:
                 return event_ids
-                
+
             # Sample n event IDs
             import random
             random.seed(42)  # For reproducibility
             sample_ids = random.sample(event_ids, n)
-            
+
             return sample_ids
-            
+
         except Exception as e:
             print(f"Error finding sample event IDs: {e}")
             return []
 
     def plot_predictions_for_event(self, results_dir: str, event_id: str, file_prefix: str, model_name: str):
         """
-        Plot predictions for a specific event using a trained model.
-        
+        Plot predictions for a specific event using a trained model with Matplotlib.
+
         Parameters:
         results_dir (str): Directory to save the plot
         event_id (str): Event ID to plot predictions for
@@ -982,216 +996,156 @@ class EventAnalysis:
         if self.data is None:
             print("Error: No data loaded.")
             return
-            
+
         if model_name not in self.models:
             print(f"Error: Model '{model_name}' not found in trained models.")
             return
-            
+
         try:
             # Filter data for the specified event
-            event_data = self.data.filter(pl.col('event_id') == event_id)
-            
-            if event_data.is_empty():
+            event_data_pl = self.data.filter(pl.col('event_id') == event_id)
+
+            if event_data_pl.is_empty():
                 print(f"Error: No data found for event ID '{event_id}'.")
                 return
-                
+
             # Sort by days_to_event
-            event_data = event_data.sort('days_to_event')
-            
+            event_data_pl = event_data_pl.sort('days_to_event')
+
             # Extract features and target
-            X, y, _ = self.feature_engineer.get_features_target(event_data, fit_imputer=False)
-            
+            X, y, _ = self.feature_engineer.get_features_target(event_data_pl, fit_imputer=False) # Use pre-fitted imputer
+
             if X.shape[0] == 0:
                 print(f"Error: No valid features extracted for event ID '{event_id}'.")
                 return
-                
+
             # Make predictions
             model = self.models[model_name]['model']
             y_pred = model.predict(X)
-            
-            # Create plot
-            import plotly.graph_objects as go
-            
-            days = event_data.get_column('days_to_event').to_numpy()
-            actual_returns = event_data.get_column('future_ret').to_numpy() * 100  # Convert to percentage
-            
-            fig = go.Figure()
-            
-            # Add actual returns
-            fig.add_trace(go.Scatter(
-                x=days,
-                y=actual_returns,
-                mode='lines+markers',
-                name='Actual Returns (%)',
-                line=dict(color='blue')
-            ))
-            
-            # Add predicted returns
-            fig.add_trace(go.Scatter(
-                x=days,
-                y=y_pred * 100,  # Convert to percentage
-                mode='lines+markers',
-                name='Predicted Returns (%)',
-                line=dict(color='red')
-            ))
-            
-            # Add vertical line at event day
-            fig.add_vline(x=0, line=dict(color='green', dash='dash'), annotation_text='Event Day')
-            
-            ticker = event_data.get_column('ticker').head(1).item()
-            event_date = event_data.get_column('Event Date').head(1).item()
-            
-            fig.update_layout(
-                title=f'Return Predictions - {ticker} Event on {event_date} - {model_name}',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Returns (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600
-            )
-            
+
+            days = event_data_pl.get_column('days_to_event').to_numpy()
+            # Use 'y' which is future_ret from get_features_target, already handled NaNs
+            actual_returns_pct = y * 100 # y is already future_ret, convert to percentage
+            predicted_returns_pct = y_pred * 100 # Convert to percentage
+
+            fig, ax = plt.subplots(figsize=(12, 7)) # Adjusted for typical Matplotlib aspect
+
+            ax.plot(days, actual_returns_pct, marker='o', linestyle='-', color='blue', label='Actual Returns (%)')
+            ax.plot(days, predicted_returns_pct, marker='x', linestyle='--', color='red', label='Predicted Returns (%)')
+
+            ax.axvline(x=0, color='green', linestyle='--', label='Event Day')
+            ax.text(0.1, ax.get_ylim()[1] * 0.9, 'Event Day', color='green', ha='left')
+
+
+            ticker = event_data_pl.get_column('ticker').head(1).item()
+            event_date_val = event_data_pl.get_column('Event Date').head(1).item()
+            if isinstance(event_date_val, datetime.datetime):
+                event_date_str = event_date_val.strftime('%Y-%m-%d')
+            else:
+                event_date_str = str(event_date_val)
+
+
+            ax.set_title(f'Return Predictions - {ticker} Event on {event_date_str} - {model_name}')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Returns (%)')
+            ax.legend()
+            ax.grid(True, linestyle=':', alpha=0.7)
+            plt.tight_layout()
+
             # Save plot
             plot_filename = os.path.join(results_dir, f"{file_prefix}_pred_{model_name}_{event_id}.png")
-            fig.write_image(plot_filename, format='png', scale=2)
-            print(f"Saved prediction plot to: {plot_filename}")
-            
+            try:
+                plt.savefig(plot_filename, dpi=200)
+                print(f"Saved prediction plot to: {plot_filename}")
+            except Exception as e:
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
+
         except Exception as e:
             print(f"Error plotting predictions: {e}")
             traceback.print_exc()
 
-    def calculate_rolling_sharpe_timeseries(self, 
-        results_dir: str, 
+    def calculate_rolling_sharpe_timeseries(self,
+        results_dir: str,
         file_prefix: str = "event",
-        return_col: str = 'ret', 
+        return_col: str = 'ret',
         analysis_window: Tuple[int, int] = (-60, 60),
         sharpe_window: int = 5,
-        annualize: bool = True, 
+        annualize: bool = True,
         risk_free_rate: float = 0.0
     ) -> Optional[pl.DataFrame]:
         """
         Calculates a time series of rolling Sharpe ratios around events.
-    
-        For each day relative to the event, computes the Sharpe ratio using returns
-        within the specified lookback window. Sharpe ratios are calculated for each event
-        and then summarized across all events for each relative day.
-    
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing daily returns
-        analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-        sharpe_window (int): Lookback window (days) for calculating Sharpe ratio
-        annualize (bool): Whether to annualize the Sharpe ratio
-        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-    
-        Returns:
-        pl.DataFrame: DataFrame containing Sharpe ratio time series or None if calculation fails
+        Uses Matplotlib for plotting.
         """
         print(f"\n--- Calculating Rolling Sharpe Ratio Time Series ---")
         print(f"Analysis Window: {analysis_window}, Sharpe Window: {sharpe_window} days")
-    
-        # Input validation
+
         if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
             print("Error: Data not loaded or missing required columns (return_col, days_to_event).")
             return None
-    
+
         if sharpe_window < 3:
             print("Warning: Sharpe window too small (<3 days). Setting to 3.")
             sharpe_window = 3
-    
-        # Calculate daily risk-free rate
+
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if annualize and risk_free_rate > 0 else 0
-    
-        # Extend analysis window to include lookback period
         extended_start = analysis_window[0] - sharpe_window
         analysis_data = self.data.filter(
-            (pl.col('days_to_event') >= extended_start) & 
+            (pl.col('days_to_event') >= extended_start) &
             (pl.col('days_to_event') <= analysis_window[1])
         ).sort(['event_id', 'days_to_event'])
-    
+
         if analysis_data.is_empty():
             print(f"Error: No data found within extended analysis window [{extended_start}, {analysis_window[1]}].")
             return None
-    
-        # Ensure all days in analysis window are present
-        all_days = pl.DataFrame({
-            'days_to_event': range(analysis_window[0], analysis_window[1] + 1)
-        })
-    
-        # Check if returns are likely in percentage form (sample a few values)
+
+        all_days = pl.DataFrame({'days_to_event': range(analysis_window[0], analysis_window[1] + 1)})
         sample_returns = analysis_data.select(pl.col(return_col)).sample(n=min(100, analysis_data.height))
-        avg_abs_return = sample_returns.mean_horizontal().abs()[0]
-        
-        # If average absolute return is > 0.05, returns are likely in percentage form (e.g., 2.5 instead of 0.025)
+        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item() # Corrected mean for Polars
+
         returns_in_pct = avg_abs_return > 0.05
         print(f"Detected returns format: {'Percentage form' if returns_in_pct else 'Decimal form'} (avg abs: {avg_abs_return:.4f})")
-        
-        # Convert returns to decimal form if needed for consistent calculation
+
         if returns_in_pct:
             print("Converting percentage returns to decimal form for Sharpe calculation")
-            analysis_data = analysis_data.with_columns(
-                (pl.col(return_col) / 100).alias('decimal_return')
-            )
+            analysis_data = analysis_data.with_columns((pl.col(return_col) / 100).alias('decimal_return'))
             return_col_for_calc = 'decimal_return'
         else:
             return_col_for_calc = return_col
-    
-        # Clip extreme returns to prevent outliers from skewing results
-        analysis_data = analysis_data.with_columns(
-            pl.col(return_col_for_calc).clip(-0.05, 0.05).alias('clipped_return')
-        )
-    
-        # Create rolling window calculations for each event_id
-        # For each day in the analysis window, calculate the Sharpe ratio using the previous sharpe_window days
+
+        analysis_data = analysis_data.with_columns(pl.col(return_col_for_calc).clip(-0.05, 0.05).alias('clipped_return'))
+
         sharpe_data = []
-        
         for day in range(analysis_window[0], analysis_window[1] + 1):
-            window_start = day - sharpe_window
-            window_end = day - 1  # Only use data up to the previous day
-            
-            # Get data for the current rolling window
-            window_data = analysis_data.filter(
-                (pl.col('days_to_event') >= window_start) & 
-                (pl.col('days_to_event') <= window_end)
+            window_start_day = day - sharpe_window
+            window_end_day = day - 1
+
+            window_data_for_day = analysis_data.filter(
+                (pl.col('days_to_event') >= window_start_day) &
+                (pl.col('days_to_event') <= window_end_day)
             )
-            
-            if window_data.is_empty():
-                sharpe_data.append({
-                    'days_to_event': day,
-                    'mean_return': None,
-                    'std_return': None,
-                    'sharpe_ratio': None,
-                    'event_count': 0,
-                    'valid_returns': 0
-                })
+
+            if window_data_for_day.is_empty():
+                sharpe_data.append({'days_to_event': day, 'mean_return': None, 'std_return': None, 'sharpe_ratio': None, 'event_count': 0, 'valid_returns': 0})
                 continue
-            
-            # Calculate Sharpe ratio for each event
-            event_sharpe = window_data.group_by('event_id').agg([
+
+            event_sharpe = window_data_for_day.group_by('event_id').agg([
                 pl.mean('clipped_return').alias('mean_return'),
                 pl.std('clipped_return').alias('std_return'),
                 pl.count().alias('window_count')
             ]).filter(
-                # Ensure we have enough data points and non-zero standard deviation
-                (pl.col('window_count') >= max(3, sharpe_window // 2)) & 
-                (pl.col('std_return') > 0)
+                (pl.col('window_count') >= max(3, sharpe_window // 2)) &
+                (pl.col('std_return') > 1e-9) # Avoid division by zero or very small std
             )
-            
-            # Calculate Sharpe ratio
-            event_sharpe = event_sharpe.with_columns(
-                ((pl.col('mean_return') - daily_rf) / pl.col('std_return') * 
-                 (np.sqrt(252) if annualize else 1)).alias('sharpe_ratio')
-            )
-            
-            # Calculate summary statistics across all events
+
             if event_sharpe.height > 0:
-                # Clip extreme Sharpe values to a reasonable range
                 event_sharpe = event_sharpe.with_columns(
-                    pl.col('sharpe_ratio').clip(-5, 5).alias('sharpe_ratio')
+                    ((pl.col('mean_return') - daily_rf) / pl.col('std_return') *
+                     (np.sqrt(252) if annualize else 1)).alias('sharpe_ratio')
                 )
-                
-                # Calculate mean and median Sharpe ratios
+                event_sharpe = event_sharpe.with_columns(pl.col('sharpe_ratio').clip(-5, 5).alias('sharpe_ratio'))
+
                 day_stats = {
                     'days_to_event': day,
                     'mean_return': event_sharpe['mean_return'].mean(),
@@ -1202,216 +1156,111 @@ class EventAnalysis:
                     'valid_returns': event_sharpe['window_count'].sum()
                 }
             else:
-                day_stats = {
-                    'days_to_event': day,
-                    'mean_return': None,
-                    'std_return': None,
-                    'sharpe_ratio': None,
-                    'median_sharpe': None,
-                    'event_count': 0,
-                    'valid_returns': 0
-                }
-            
+                day_stats = {'days_to_event': day, 'mean_return': None, 'std_return': None, 'sharpe_ratio': None, 'median_sharpe': None, 'event_count': 0, 'valid_returns': 0}
             sharpe_data.append(day_stats)
-        
-        # Convert to DataFrame
+
         sharpe_df = pl.DataFrame(sharpe_data)
-        
-        # Join with all_days to ensure full range
-        sharpe_df = all_days.join(
-            sharpe_df, on='days_to_event', how='left'
-        ).sort('days_to_event')
-        
-        # Interpolate missing values
-        sharpe_df = sharpe_df.with_columns([
-            pl.col('sharpe_ratio').interpolate(),
-            pl.col('mean_return').interpolate(),
-            pl.col('std_return').interpolate()
-        ])
-        
-        # Add smoothed Sharpe ratio for visualization
+        sharpe_df = all_days.join(sharpe_df, on='days_to_event', how='left').sort('days_to_event')
+        sharpe_df = sharpe_df.with_columns([pl.col('sharpe_ratio').interpolate(), pl.col('mean_return').interpolate(), pl.col('std_return').interpolate()])
+
         smooth_window = min(7, sharpe_window)
         sharpe_df = sharpe_df.with_columns(
-            pl.col('sharpe_ratio').rolling_mean(
-                window_size=smooth_window,
-                min_periods=smooth_window // 2,
-                center=True
-            ).alias('smooth_sharpe')
+            pl.col('sharpe_ratio').rolling_mean(window_size=smooth_window, min_periods=smooth_window // 2, center=True).alias('smooth_sharpe')
         )
-    
-        # Check valid days
+
         valid_days = sharpe_df.filter(pl.col('sharpe_ratio').is_not_null()).height
         if valid_days < (analysis_window[1] - analysis_window[0]) / 2:
             print(f"Warning: Only {valid_days} days have valid Sharpe ratios. Results may be unreliable.")
-        
-        # Show summary statistics
-        sharpe_stats = {
-            'Min Sharpe': sharpe_df['sharpe_ratio'].min(),
-            'Max Sharpe': sharpe_df['sharpe_ratio'].max(),
-            'Mean Sharpe': sharpe_df['sharpe_ratio'].mean(),
-            'Median Sharpe': sharpe_df['sharpe_ratio'].median()
+
+        sharpe_stats_dict = {
+            'Min Sharpe': sharpe_df['sharpe_ratio'].min(), 'Max Sharpe': sharpe_df['sharpe_ratio'].max(),
+            'Mean Sharpe': sharpe_df['sharpe_ratio'].mean(), 'Median Sharpe': sharpe_df['sharpe_ratio'].median()
         }
         print("Sharpe Ratio Summary Statistics:")
-        for stat, value in sharpe_stats.items():
-            print(f"  {stat}: {value:.4f}")
-        
-        # Plot the results
+        for stat, value in sharpe_stats_dict.items():
+            print(f"  {stat}: {value:.4f}" if value is not None else f"  {stat}: N/A")
+
+        # Plotting with Matplotlib
         try:
-            # Convert to pandas for plotting with Plotly
             results_pd = sharpe_df.to_pandas()
-            
-            # Determine appropriate y-axis range
-            y_min = results_pd['sharpe_ratio'].min()
-            y_max = results_pd['sharpe_ratio'].max()
-            
-            # If the data is all within a reasonable range, use a fixed scale
-            if -5 <= y_min <= 5 and -5 <= y_max <= 5:
-                y_range = [-3, 3]  # Standard range for typical Sharpe ratios
+            fig, ax = plt.subplots(figsize=(12, 7))
+
+            y_min_data = results_pd['sharpe_ratio'].dropna().min()
+            y_max_data = results_pd['sharpe_ratio'].dropna().max()
+
+            if pd.isna(y_min_data) or pd.isna(y_max_data):
+                 y_range_plot = [-3, 3] # Default if no data
+            elif -5 <= y_min_data <= 5 and -5 <= y_max_data <= 5:
+                y_range_plot = [-3, 3]
             else:
-                # Pad by 10% on each side
-                padding = 0.1 * (y_max - y_min)
-                y_range = [y_min - padding, y_max + padding]
-                
-                # Ensure zero is in the range
-                if y_range[0] > 0:
-                    y_range[0] = 0
-                if y_range[1] < 0:
-                    y_range[1] = 0
-            
-            # Create Plotly figure
-            fig = go.Figure()
-            
-            # Add raw Sharpe ratio
-            fig.add_trace(go.Scatter(
-                x=results_pd['days_to_event'],
-                y=results_pd['sharpe_ratio'],
-                mode='lines',
-                name='Raw Sharpe Ratio',
-                line=dict(color='blue', width=1),
-                opacity=0.3
-            ))
-            
-            # Add smoothed Sharpe ratio
-            fig.add_trace(go.Scatter(
-                x=results_pd['days_to_event'],
-                y=results_pd['smooth_sharpe'],
-                mode='lines',
-                name=f'{smooth_window}-Day Smoothed',
-                line=dict(color='red', width=2)
-            ))
-            
-            # Add event day line
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), 
-                         annotation_text='Event Day')
-            
-            # Add month boundaries if applicable
+                padding = 0.1 * (y_max_data - y_min_data) if y_max_data != y_min_data else 0.5
+                y_range_plot = [y_min_data - padding, y_max_data + padding]
+                if y_range_plot[0] > 0: y_range_plot[0] = 0
+                if y_range_plot[1] < 0: y_range_plot[1] = 0
+
+
+            ax.plot(results_pd['days_to_event'], results_pd['sharpe_ratio'], color='blue', linewidth=1, alpha=0.3, label='Raw Sharpe Ratio')
+            ax.plot(results_pd['days_to_event'], results_pd['smooth_sharpe'], color='red', linewidth=2, label=f'{smooth_window}-Day Smoothed')
+
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            ax.text(0.1, y_range_plot[1] * 0.9, 'Event Day', color='red', ha='left')
+
+
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
-                fig.add_vline(x=-30, line=dict(color='green', dash='dot'), 
-                             annotation_text='Month Before')
-                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), 
-                             annotation_text='Month After')
-            
-            # Add zero line
-            fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
-            
-            # Highlight event window
-            fig.add_vrect(x0=-2, x1=2, fillcolor='yellow', opacity=0.2, 
-                         line_width=0, annotation_text='Event Window')
-            
-            # Set layout with appropriate y-axis range
-            fig.update_layout(
-                title=f'Rolling Sharpe Ratio vs. Days to Event ({sharpe_window}-Day Window)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Sharpe Ratio (Annualized)' if annualize else 'Sharpe Ratio',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600,
-                xaxis=dict(
-                    tickmode='linear',
-                    tick0=analysis_window[0],
-                    dtick=10,
-                    gridcolor='lightgray',
-                    zeroline=True,
-                    zerolinewidth=1,
-                    zerolinecolor='black'
-                ),
-                yaxis=dict(
-                    range=y_range,
-                    gridcolor='lightgray',
-                    zeroline=True,
-                    zerolinewidth=1,
-                    zerolinecolor='black',
-                    tickformat='.2f'  # Show two decimal places
-                )
-            )
-            
-            # Add annotation with Sharpe statistics
-            fig.add_annotation(
-                x=analysis_window[0] + 5,
-                y=y_range[1] - 0.1 * (y_range[1] - y_range[0]),
-                text=f"Mean: {sharpe_stats['Mean Sharpe']:.2f}, Median: {sharpe_stats['Median Sharpe']:.2f}",
-                showarrow=False,
-                align="left",
-                bordercolor="black",
-                borderwidth=1,
-                bgcolor="white",
-                opacity=0.8
-            )
-            
-            # Save plot
+                ax.axvline(x=-30, color='green', linestyle=':', label='Month Before')
+                ax.text(-29.9, y_range_plot[1] * 0.85, 'Month Before', color='green', ha='left')
+                ax.axvline(x=30, color='purple', linestyle=':', label='Month After')
+                ax.text(30.1, y_range_plot[1] * 0.85, 'Month After', color='purple', ha='left')
+
+
+            ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+            ax.axvspan(-2, 2, color='yellow', alpha=0.2, label='Event Window')
+
+            ax.set_title(f'Rolling Sharpe Ratio vs. Days to Event ({sharpe_window}-Day Window)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Sharpe Ratio (Annualized)' if annualize else 'Sharpe Ratio')
+            ax.legend()
+            ax.grid(True, linestyle=':', alpha=0.7)
+            ax.set_ylim(y_range_plot)
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
+
+            annotation_text = f"Mean: {sharpe_stats_dict.get('Mean Sharpe', 0.0):.2f}, Median: {sharpe_stats_dict.get('Median Sharpe', 0.0):.2f}"
+            ax.text(0.05, 0.95, annotation_text, transform=ax.transAxes, ha="left", va="top",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
+
             plot_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.png")
             try:
-                fig.write_image(plot_filename, format='png', scale=2)
+                plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
                 print(f"Saved rolling Sharpe time series plot to: {plot_filename}")
             except Exception as e:
-                print(f"Warning: Could not save plot image: {e}")
-                print("To fix this issue, install the kaleido package: pip install -U kaleido")
-                html_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.html")
-                fig.write_html(html_filename)
-                print(f"Saved as HTML (fallback) to: {html_filename}")
-        
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
+
         except Exception as e:
             print(f"Error creating plot: {e}")
-            import traceback
             traceback.print_exc()
-        
-        # Save data to CSV
+
         csv_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe_timeseries.csv")
         try:
             sharpe_df.write_csv(csv_filename)
             print(f"Saved rolling Sharpe time series data to: {csv_filename}")
         except Exception as e:
             print(f"Error saving data: {e}")
-        
+
         print(f"Completed Sharpe ratio calculation. Valid days: {valid_days}/{sharpe_df.height}")
         return sharpe_df
 
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
-                          return_col: str = 'ret', 
+                          return_col: str = 'ret',
                           analysis_window: Tuple[int, int] = (-60, 60),
                           lookback_window: int = 10,
                           quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
-                          annualize: bool = True, 
+                          annualize: bool = True,
                           risk_free_rate: float = 0.0):
         """
         Calculates Sharpe ratio quantiles for each day relative to events.
-
-        For each day, computes Sharpe ratios using the lookback window and calculates
-        quantiles across all events.
-
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing daily returns
-        analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-        lookback_window (int): Number of days to look back when calculating Sharpe ratios
-        quantiles (List[float]): List of quantiles to calculate
-        annualize (bool): Whether to annualize the Sharpe ratio
-        risk_free_rate (float): Annualized risk-free rate for Sharpe calculation
-
-        Returns:
-        pl.DataFrame: DataFrame containing Sharpe ratio quantiles
+        Uses Matplotlib for plotting.
         """
         print(f"\n--- Calculating Sharpe Ratio Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
 
@@ -1419,44 +1268,34 @@ class EventAnalysis:
             print("Error: Data not loaded or missing return column.")
             return None
 
-        # Calculate daily risk-free rate
         daily_rf = (1 + risk_free_rate) ** (1/252) - 1 if annualize and risk_free_rate > 0 else 0
-
-        # Pre-filter the data
         extended_start = analysis_window[0] - lookback_window
-        # Check if returns are likely in percentage form (sample a few values)
-        sample_data = self.data.filter(
-            (pl.col('days_to_event') >= extended_start) & 
+
+        temp_analysis_data = self.data.filter(
+            (pl.col('days_to_event') >= extended_start) &
             (pl.col('days_to_event') <= analysis_window[1])
         )
-        sample_returns = sample_data.select(pl.col(return_col)).sample(n=min(100, sample_data.height))
-        avg_abs_return = sample_returns.mean_horizontal().abs()[0]
+        sample_returns = temp_analysis_data.select(pl.col(return_col)).sample(n=min(100, temp_analysis_data.height))
+        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item()
 
-        # If average absolute return is > 0.05, returns are likely in percentage form (e.g., 2.5 instead of 0.025)
         returns_in_pct = avg_abs_return > 0.05
         print(f"Detected returns format: {'Percentage form' if returns_in_pct else 'Decimal form'} (avg abs: {avg_abs_return:.4f})")
 
-        # Convert returns to decimal form if needed for consistent calculation
         if returns_in_pct:
             print("Converting percentage returns to decimal form for Sharpe calculation")
             analysis_data = self.data.filter(
-                (pl.col('days_to_event') >= extended_start) & 
+                (pl.col('days_to_event') >= extended_start) &
                 (pl.col('days_to_event') <= analysis_window[1])
-            ).with_columns(
-                (pl.col(return_col) / 100).alias('decimal_return')
-            )
+            ).with_columns((pl.col(return_col) / 100).alias('decimal_return'))
             return_col_for_calc = 'decimal_return'
         else:
             analysis_data = self.data.filter(
-                (pl.col('days_to_event') >= extended_start) & 
+                (pl.col('days_to_event') >= extended_start) &
                 (pl.col('days_to_event') <= analysis_window[1])
             )
             return_col_for_calc = return_col
 
-        # Clip extreme returns to prevent outliers from skewing results
-        analysis_data = analysis_data.with_columns(
-            pl.col(return_col_for_calc).clip(-0.05, 0.05).alias('clipped_return')
-        )
+        analysis_data = analysis_data.with_columns(pl.col(return_col_for_calc).clip(-0.05, 0.05).alias('clipped_return'))
 
         if analysis_data.is_empty():
             print(f"Error: No data found within analysis window {analysis_window}.")
@@ -1466,366 +1305,239 @@ class EventAnalysis:
         sharpe_data = []
         print(f"Processing {len(days_range)} days...")
 
-        # Process in batches for memory efficiency
         batch_size = 10
-        for batch_start in range(0, len(days_range), batch_size):
-            batch_days = days_range[batch_start:batch_start + batch_size]
+        for batch_start_idx in range(0, len(days_range), batch_size):
+            batch_days = days_range[batch_start_idx : batch_start_idx + batch_size]
             print(f"Processing days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
-
             batch_results = []
             for day in batch_days:
-                window_start = day - lookback_window
-                window_end = day - 1  # Use data up to previous day
+                window_start_day = day - lookback_window
+                window_end_day = day - 1
 
-                # Get data for the current lookback window
-                window_data = analysis_data.filter(
-                    (pl.col('days_to_event') >= window_start) & 
-                    (pl.col('days_to_event') <= window_end)
+                window_data_for_day = analysis_data.filter(
+                    (pl.col('days_to_event') >= window_start_day) &
+                    (pl.col('days_to_event') <= window_end_day)
                 )
 
-                if window_data.is_empty():
-                    empty_results = {"days_to_event": day, "event_count": 0}
-                    for q in quantiles:
-                        empty_results[f"sharpe_q{int(q*100)}"] = None
-                    batch_results.append(empty_results)
+                if window_data_for_day.is_empty():
+                    empty_res = {"days_to_event": day, "event_count": 0}
+                    for q_val in quantiles: empty_res[f"sharpe_q{int(q_val*100)}"] = None
+                    batch_results.append(empty_res)
                     continue
 
-                # Calculate Sharpe ratio for each event
-                sharpe_by_event = window_data.group_by('event_id').agg([
+                sharpe_by_event_df = window_data_for_day.group_by('event_id').agg([
                     pl.mean('clipped_return').alias('mean_ret'),
                     pl.std('clipped_return').alias('std_dev'),
                     pl.count().alias('n_obs')
                 ]).filter(
                     (pl.col('n_obs') >= max(3, lookback_window // 3)) &
-                    (pl.col('std_dev') > 0)
+                    (pl.col('std_dev') > 1e-9)
                 )
 
-                valid_events = sharpe_by_event.height
-
-                if valid_events >= 5:
-                    # Calculate Sharpe ratio for each event
-                    sharpe_by_event = sharpe_by_event.with_columns(
-                        ((pl.col('mean_ret') - daily_rf) / pl.col('std_dev') * 
+                valid_events_count = sharpe_by_event_df.height
+                if valid_events_count >= 5:
+                    sharpe_by_event_df = sharpe_by_event_df.with_columns(
+                        ((pl.col('mean_ret') - daily_rf) / pl.col('std_dev') *
                          (np.sqrt(252) if annualize else 1)).alias('sharpe')
                     )
+                    sharpe_by_event_df = sharpe_by_event_df.with_columns(pl.col('sharpe').clip(-10, 10).alias('sharpe'))
 
-                    # Clip extreme Sharpe values to a reasonable range but allow for wider distribution
-                    sharpe_by_event = sharpe_by_event.with_columns(
-                        pl.col('sharpe').clip(-10, 10).alias('sharpe')
-                    )
-
-                    # Calculate quantiles
-                    q_values = {}
-                    for q in quantiles:
-                        q_value = sharpe_by_event.select(
-                            pl.col('sharpe').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
-                        ).item(0, 0)
-                        q_values[f"sharpe_q{int(q*100)}"] = q_value
-
-                    day_results = {"days_to_event": day, "event_count": valid_events, **q_values}
+                    q_values_dict = {}
+                    for q_val in quantiles:
+                        q_res = sharpe_by_event_df.select(pl.col('sharpe').quantile(q_val, interpolation='linear')).item()
+                        q_values_dict[f"sharpe_q{int(q_val*100)}"] = q_res
+                    day_res = {"days_to_event": day, "event_count": valid_events_count, **q_values_dict}
                 else:
-                    day_results = {"days_to_event": day, "event_count": valid_events}
-                    for q in quantiles:
-                        day_results[f"sharpe_q{int(q*100)}"] = None
-
-                batch_results.append(day_results)
-
+                    day_res = {"days_to_event": day, "event_count": valid_events_count}
+                    for q_val in quantiles: day_res[f"sharpe_q{int(q_val*100)}"] = None
+                batch_results.append(day_res)
             sharpe_data.extend(batch_results)
-
-            # Clean up for memory efficiency
-            del window_data, sharpe_by_event, batch_results
-            import gc
+            del window_data_for_day, sharpe_by_event_df, batch_results
             gc.collect()
 
         results_df = pl.DataFrame(sharpe_data)
 
-        # Collect statistics for display and scaling
-        min_value = float('inf')
-        max_value = float('-inf')
-        for q in quantiles:
-            col = f"sharpe_q{int(q*100)}"
-            if col in results_df.columns:
-                col_min = results_df[col].drop_nulls().min()
-                col_max = results_df[col].drop_nulls().max()
-                if col_min is not None and col_min < min_value:
-                    min_value = col_min
-                if col_max is not None and col_max > max_value:
-                    max_value = col_max
+        min_val_plot, max_val_plot = float('inf'), float('-inf')
+        for q_val in quantiles:
+            col_name = f"sharpe_q{int(q_val*100)}"
+            if col_name in results_df.columns:
+                col_min_val = results_df[col_name].drop_nulls().min()
+                col_max_val = results_df[col_name].drop_nulls().max()
+                if col_min_val is not None and col_min_val < min_val_plot: min_val_plot = col_min_val
+                if col_max_val is not None and col_max_val > max_val_plot: max_val_plot = col_max_val
 
-        # If values are outside normal Sharpe range, print details
-        if min_value < -5 or max_value > 5:
-            print(f"Note: Wide range of Sharpe values detected: [{min_value:.2f}, {max_value:.2f}]")
+        if min_val_plot == float('inf'): min_val_plot = -5 # Default if no data
+        if max_val_plot == float('-inf'): max_val_plot = 5  # Default if no data
 
-        # Plot quantiles using Plotly
+        if min_val_plot < -5 or max_val_plot > 5:
+            print(f"Note: Wide range of Sharpe values detected: [{min_val_plot:.2f}, {max_val_plot:.2f}]")
+
+        # Plotting with Matplotlib
         try:
             results_pd = results_df.to_pandas()
-            fig = go.Figure()
+            fig, ax = plt.subplots(figsize=(12, 7))
 
-            # Add quantile lines
-            for q in quantiles:
-                col = f"sharpe_q{int(q*100)}"
-                if col in results_pd.columns:
-                    line_width = 2 if q == 0.5 else 1
-                    line_dash = 'solid' if q == 0.5 else 'dash'
-                    fig.add_trace(go.Scatter(
-                        x=results_pd['days_to_event'],
-                        y=results_pd[col],
-                        mode='lines',
-                        name=f'Q{int(q*100)}',
-                        line=dict(width=line_width, dash=line_dash)
-                    ))
+            for q_val in quantiles:
+                col_name_plot = f"sharpe_q{int(q_val*100)}"
+                if col_name_plot in results_pd.columns:
+                    lw = 2 if q_val == 0.5 else 1
+                    ls = 'solid' if q_val == 0.5 else 'dashed'
+                    ax.plot(results_pd['days_to_event'], results_pd[col_name_plot], linewidth=lw, linestyle=ls, label=f'Q{int(q_val*100)}')
 
-            # Add reference lines
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            y_lim_ax = ax.get_ylim() # Get current y_lim after plotting lines to place text
+            ax.text(0.1, y_lim_ax[1] * 0.9, 'Event Day', color='red', ha='left')
+
+
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
-                fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
-                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
+                ax.axvline(x=-30, color='green', linestyle=':', label='Month Before')
+                ax.text(-29.9, y_lim_ax[1] * 0.85, 'Month Before', color='green', ha='left')
+                ax.axvline(x=30, color='purple', linestyle=':', label='Month After')
+                ax.text(30.1, y_lim_ax[1] * 0.85, 'Month After', color='purple', ha='left')
 
-            # Add zero line
-            fig.add_hline(y=0, line=dict(color='gray'), opacity=0.3)
+            ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+            event_start_plot, event_end_plot = -2, 2
+            if analysis_window[0] <= event_start_plot and analysis_window[1] >= event_end_plot:
+                ax.axvspan(event_start_plot, event_end_plot, color='yellow', alpha=0.2, label='Event Window')
 
-            # Highlight event window
-            event_start, event_end = -2, 2
-            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
-                fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
-
-            # Determine appropriate y-axis range 
-            if min_value < -10 or max_value > 10:
-                # For very wide ranges, use data-driven range with padding
-                padding = 0.1 * (max_value - min_value)
-                y_range = [min_value - padding, max_value + padding]
-            elif min_value < -5 or max_value > 5:
-                # For moderately wide ranges, use fixed range of [-10, 10]
-                y_range = [-20, 20]
+            if min_val_plot < -10 or max_val_plot > 10:
+                padding_plot = 0.1 * (max_val_plot - min_val_plot) if max_val_plot != min_val_plot else 1.0
+                y_range_final = [min_val_plot - padding_plot, max_val_plot + padding_plot]
+            elif min_val_plot < -5 or max_val_plot > 5:
+                y_range_final = [-10, 10] # Clamped from [-20,20] for typical Sharpe
             else:
-                # For normal Sharpe ranges, use [-5, 5]
-                y_range = [-5, 5]
+                y_range_final = [-5, 5]
+            if y_range_final[0] > 0: y_range_final[0] = 0
+            if y_range_final[1] < 0: y_range_final[1] = 0
 
-            # Ensure zero is in the range
-            if y_range[0] > 0:
-                y_range[0] = 0
-            if y_range[1] < 0:
-                y_range[1] = 0
 
-            # Set layout
-            fig.update_layout(
-                title=f'Sharpe Ratio Quantiles Around Events (Lookback: {lookback_window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Sharpe Ratio' + (' (Annualized)' if annualize else ''),
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600,
-                xaxis=dict(
-                    tickmode='linear',
-                    tick0=analysis_window[0],
-                    dtick=20,
-                    gridcolor='lightgray'
-                ),
-                yaxis=dict(
-                    range=y_range,
-                    gridcolor='lightgray',
-                    zeroline=True,
-                    zerolinewidth=1,
-                    zerolinecolor='black',
-                    tickformat='.2f'  # Show two decimal places
-                )
-            )
+            ax.set_title(f'Sharpe Ratio Quantiles Around Events (Lookback: {lookback_window} days)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Sharpe Ratio' + (' (Annualized)' if annualize else ''))
+            ax.legend(loc='best')
+            ax.grid(True, linestyle=':', alpha=0.7)
+            ax.set_ylim(y_range_final)
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(20))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
 
-            # Add range annotation
-            fig.add_annotation(
-                x=analysis_window[0] + 5,
-                y=y_range[1] - 0.1 * (y_range[1] - y_range[0]),
-                text=f"Sharpe range: [{min_value:.2f}, {max_value:.2f}]",
-                showarrow=False,
-                align="left",
-                bordercolor="black",
-                borderwidth=1,
-                bgcolor="white",
-                opacity=0.8
-            )
+            annotation_text_plot = f"Sharpe range: [{min_val_plot:.2f}, {max_val_plot:.2f}]"
+            ax.text(0.05, 0.95, annotation_text_plot, transform=ax.transAxes, ha="left", va="top",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
 
-            # Save plot
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.png")
             try:
-                plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.png")
-                fig.write_image(plot_filename, format='png', scale=2)
+                plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
                 print(f"Saved Sharpe quantiles plot to: {plot_filename}")
             except Exception as e:
-                print(f"Warning: Could not save plot image: {e}")
-                print("To fix this issue, install the kaleido package: pip install -U kaleido")
-                html_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.html")
-                fig.write_html(html_filename)
-                print(f"Saved Sharpe quantiles as HTML (fallback) to: {html_filename}")
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
 
         except Exception as e:
             print(f"Error creating plot: {e}")
             traceback.print_exc()
 
-        # Save results to CSV
         csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.csv")
         try:
             results_df.write_csv(csv_filename)
             print(f"Saved Sharpe quantiles data to: {csv_filename}")
         except Exception as e:
             print(f"Error saving quantiles data: {e}")
-
         return results_df
 
-    def analyze_volatility_spikes(self, 
-                                 results_dir: str, 
-                                 file_prefix: str = "event", 
-                                 window: int = 5, 
-                                 min_periods: int = 3, 
-                                 pre_days: int = 30, 
-                                 post_days: int = 30, 
-                                 baseline_window=(-60, -11), 
+    def analyze_volatility_spikes(self,
+                                 results_dir: str,
+                                 file_prefix: str = "event",
+                                 window: int = 5,
+                                 min_periods: int = 3,
+                                 pre_days: int = 30,
+                                 post_days: int = 30,
+                                 baseline_window=(-60, -11),
                                  event_window=(-2, 2)):
         """
-        Calculates and plots rolling volatility around events.
-        
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        window (int): Window size for rolling volatility
-        min_periods (int): Minimum observations in window
-        pre_days (int): Days before event to analyze
-        post_days (int): Days after event to analyze
-        baseline_window (Tuple[int, int]): Days for baseline volatility
-        event_window (Tuple[int, int]): Days defining event window
-        
-        Returns:
-        pl.DataFrame: DataFrame containing volatility data
+        Calculates and plots rolling volatility around events using Matplotlib.
         """
         print(f"\n--- Analyzing Rolling Volatility (Window={window} days) ---")
-        
+
         if self.data is None or 'ret' not in self.data.columns or 'days_to_event' not in self.data.columns:
             print("Error: Data/required columns missing.")
             return None
 
-        # Filter data to analysis period
         df = self.data.filter(
-            (pl.col('days_to_event') >= -pre_days) & 
+            (pl.col('days_to_event') >= -pre_days) &
             (pl.col('days_to_event') <= post_days)
         ).sort(['event_id', 'date'])
 
-        # Calculate rolling volatility by event
         df = df.with_columns(
             pl.col('ret').clip(-0.5, 0.5).rolling_std(
-                window_size=window, 
+                window_size=window,
                 min_periods=min_periods
             ).over('event_id').alias('rolling_vol')
         )
+        df = df.with_columns((pl.col('rolling_vol') * np.sqrt(252) * 100).alias('annualized_vol'))
 
-        # Annualize volatility (percentage)
-        df = df.with_columns(
-            (pl.col('rolling_vol') * np.sqrt(252) * 100).alias('annualized_vol')
-        )
-
-        # Aggregate across events for each relative day
         aligned_vol = df.group_by('days_to_event').agg([
             pl.mean('annualized_vol').alias('avg_annualized_vol'),
             pl.median('annualized_vol').alias('median_annualized_vol'),
-            pl.count('annualized_vol').alias('event_count')
+            pl.count().alias('event_count') # count on original col before it might become null
         ]).sort('days_to_event')
 
-        # Calculate baseline and event volatility for comparison
         baseline_data = df.filter(
-            (pl.col('days_to_event') >= baseline_window[0]) & 
+            (pl.col('days_to_event') >= baseline_window[0]) &
             (pl.col('days_to_event') <= baseline_window[1])
         )
-        
         event_data = df.filter(
-            (pl.col('days_to_event') >= event_window[0]) & 
+            (pl.col('days_to_event') >= event_window[0]) &
             (pl.col('days_to_event') <= event_window[1])
         )
-        
-        baseline_vol = baseline_data['annualized_vol'].mean()
-        event_vol = event_data['annualized_vol'].mean()
-        vol_change_pct = ((event_vol / baseline_vol) - 1) * 100 if baseline_vol > 0 else float('nan')
-        
-        print(f"Baseline volatility ({baseline_window}): {baseline_vol:.2f}%")
-        print(f"Event window volatility ({event_window}): {event_vol:.2f}%")
-        print(f"Volatility change: {vol_change_pct:+.2f}%")
 
-        # Plot volatility
+        baseline_vol_val = baseline_data['annualized_vol'].mean()
+        event_vol_val = event_data['annualized_vol'].mean()
+        vol_change_pct_val = ((event_vol_val / baseline_vol_val) - 1) * 100 if baseline_vol_val is not None and baseline_vol_val > 0 else float('nan')
+
+        print(f"Baseline volatility ({baseline_window}): {baseline_vol_val or 0:.2f}%")
+        print(f"Event window volatility ({event_window}): {event_vol_val or 0:.2f}%")
+        print(f"Volatility change: {vol_change_pct_val:+.2f}%" if not pd.isna(vol_change_pct_val) else "Volatility change: N/A")
+
+
+        # Plotting with Matplotlib
         if not aligned_vol.is_empty():
             aligned_vol_pd = aligned_vol.to_pandas()
-            
-            fig = go.Figure()
-            
-            # Add volatility line
-            fig.add_trace(go.Scatter(
-                x=aligned_vol_pd['days_to_event'],
-                y=aligned_vol_pd['avg_annualized_vol'],
-                mode='lines',
-                name='Avg. Annualized Volatility',
-                line=dict(color='blue', width=2)
-            ))
-            
-            # Add horizontal line for baseline volatility
-            fig.add_hline(
-                y=baseline_vol, 
-                line=dict(color='green', dash='dash'), 
-                annotation_text=f'Baseline: {baseline_vol:.1f}%'
-            )
-            
-            # Add vertical line at event day
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
-            
-            # Highlight event window
-            fig.add_vrect(
-                x0=event_window[0], 
-                x1=event_window[1], 
-                fillcolor='yellow', 
-                opacity=0.2, 
-                line_width=0, 
-                annotation_text='Event Window'
-            )
-            
-            # Set layout
-            fig.update_layout(
-                title=f'Average Rolling Volatility Around Event (Window={window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Avg. Annualized Volatility (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600,
-                xaxis=dict(
-                    tickmode='linear',
-                    tick0=-pre_days,
-                    dtick=10,
-                    gridcolor='lightgray'
-                ),
-                yaxis=dict(
-                    rangemode='tozero',
-                    gridcolor='lightgray'
-                )
-            )
-            
-            # Add annotation for volatility change
-            fig.add_annotation(
-                x=event_window[1] + 2,
-                y=event_vol,
-                text=f"Event vol: {event_vol:.1f}%<br>Change: {vol_change_pct:+.1f}%",
-                showarrow=True,
-                arrowhead=1,
-                ax=40,
-                ay=-40
-            )
-            
-            # Save plot
+            fig, ax = plt.subplots(figsize=(12, 7))
+
+            ax.plot(aligned_vol_pd['days_to_event'], aligned_vol_pd['avg_annualized_vol'], color='blue', linewidth=2, label='Avg. Annualized Volatility')
+
+            if baseline_vol_val is not None:
+                ax.axhline(y=baseline_vol_val, color='green', linestyle='--', label=f'Baseline Vol: {baseline_vol_val:.1f}%')
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            ax.text(0.1, ax.get_ylim()[1]*0.95, 'Event Day', color='red', ha='left')
+
+
+            ax.axvspan(event_window[0], event_window[1], color='yellow', alpha=0.2, label='Event Window')
+
+            ax.set_title(f'Average Rolling Volatility Around Event (Window={window} days)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Avg. Annualized Volatility (%)')
+            ax.legend()
+            ax.grid(True, linestyle=':', alpha=0.7)
+            ax.set_ylim(bottom=0) # Volatility is non-negative
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+
+            if event_vol_val is not None and not pd.isna(vol_change_pct_val):
+                 ax.annotate(f"Event vol: {event_vol_val:.1f}%\nChange: {vol_change_pct_val:+.1f}%",
+                            xy=(event_window[1], event_vol_val), xycoords='data',
+                            xytext=(event_window[1] + 5, event_vol_val + (ax.get_ylim()[1]*0.05) ), textcoords='data',
+                            arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
+                            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+
+
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d.png")
             try:
-                plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d.png")
-                fig.write_image(plot_filename, format='png', scale=2)
+                plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
                 print(f"Saved rolling volatility plot to: {plot_filename}")
             except Exception as e:
-                print(f"Warning: Could not save plot image: {e}")
-                html_filename = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d.html")
-                fig.write_html(html_filename)
-                print(f"Saved as HTML (fallback) to: {html_filename}")
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
 
-            # Save data
             csv_filename = os.path.join(results_dir, f"{file_prefix}_volatility_rolling_{window}d_data.csv")
             try:
                 aligned_vol.write_csv(csv_filename)
@@ -1834,32 +1546,17 @@ class EventAnalysis:
                 print(f"Error saving data: {e}")
         else:
             print("No data for rolling volatility plot.")
-
         return aligned_vol
 
-    def calculate_volatility_quantiles(self, 
-                                     results_dir: str, 
+    def calculate_volatility_quantiles(self,
+                                     results_dir: str,
                                      file_prefix: str = "event",
-                                     return_col: str = 'ret', 
+                                     return_col: str = 'ret',
                                      analysis_window: Tuple[int, int] = (-60, 60),
                                      lookback_window: int = 10,
                                      quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
         """
-        Calculates volatility quantiles for each day relative to events.
-        
-        For each day, computes volatility using the lookback window and calculates
-        quantiles across all events.
-        
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing daily returns
-        analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-        lookback_window (int): Number of days to look back when calculating volatility
-        quantiles (List[float]): List of quantiles to calculate
-        
-        Returns:
-        pl.DataFrame: DataFrame containing volatility quantiles
+        Calculates volatility quantiles for each day relative to events using Matplotlib.
         """
         print(f"\n--- Calculating Volatility Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
 
@@ -1867,331 +1564,218 @@ class EventAnalysis:
             print("Error: Data not loaded or missing return column.")
             return None
 
-        # Pre-filter the data and clip extreme returns
         extended_start = analysis_window[0] - lookback_window
-        analysis_data = self.data.filter(
-            (pl.col('days_to_event') >= extended_start) & 
+        analysis_data_filtered = self.data.filter(
+            (pl.col('days_to_event') >= extended_start) &
             (pl.col('days_to_event') <= analysis_window[1])
-        ).with_columns(
-            pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return')
-        )
+        ).with_columns(pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return'))
 
-        if analysis_data.is_empty():
+        if analysis_data_filtered.is_empty():
             print(f"Error: No data found within analysis window {analysis_window}.")
             return None
 
-        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
-        vol_data = []
-        print(f"Processing {len(days_range)} days...")
+        days_range_list = list(range(analysis_window[0], analysis_window[1] + 1))
+        vol_quantile_data = []
+        print(f"Processing {len(days_range_list)} days...")
 
-        # Process days in batches for memory efficiency
         batch_size = 10
-        for batch_start in range(0, len(days_range), batch_size):
-            batch_days = days_range[batch_start:batch_start + batch_size]
-            print(f"Processing days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
+        for batch_start_idx in range(0, len(days_range_list), batch_size):
+            current_batch_days = days_range_list[batch_start_idx : batch_start_idx + batch_size]
+            print(f"Processing days {current_batch_days[0]} to {current_batch_days[-1]} ({len(current_batch_days)} days)...")
+            batch_results_list = []
+            for day_val in current_batch_days:
+                window_start_val = day_val - lookback_window
+                window_end_val = day_val - 1
 
-            batch_results = []
-            for day in batch_days:
-                window_start = day - lookback_window
-                window_end = day - 1  # Use data up to previous day
-
-                # Get data for the current lookback window
-                window_data = analysis_data.filter(
-                    (pl.col('days_to_event') >= window_start) & 
-                    (pl.col('days_to_event') <= window_end)
+                current_window_data = analysis_data_filtered.filter(
+                    (pl.col('days_to_event') >= window_start_val) &
+                    (pl.col('days_to_event') <= window_end_val)
                 )
 
-                if window_data.is_empty():
-                    empty_results = {"days_to_event": day, "event_count": 0}
-                    for q in quantiles:
-                        empty_results[f"vol_q{int(q*100)}"] = None
-                    batch_results.append(empty_results)
+                if current_window_data.is_empty():
+                    empty_res_dict = {"days_to_event": day_val, "event_count": 0}
+                    for q_item in quantiles: empty_res_dict[f"vol_q{int(q_item*100)}"] = None
+                    batch_results_list.append(empty_res_dict)
                     continue
 
-                # Calculate volatility for each event
-                vol_by_event = window_data.group_by('event_id').agg([
+                vol_by_event_df = current_window_data.group_by('event_id').agg([
                     pl.std('clipped_return').alias('vol'),
                     pl.count().alias('n_obs')
                 ]).filter(
                     (pl.col('n_obs') >= max(3, lookback_window // 3)) &
-                    (pl.col('vol').is_not_null()) &
-                    (pl.col('vol') > 0)
+                    pl.col('vol').is_not_null() & (pl.col('vol') > 1e-9) # Ensure std_dev is positive
                 )
 
-                valid_events = vol_by_event.height
-
-                if valid_events >= 5:
-                    # Annualize volatility (percentage)
-                    vol_by_event = vol_by_event.with_columns(
+                num_valid_events = vol_by_event_df.height
+                if num_valid_events >= 5:
+                    vol_by_event_df = vol_by_event_df.with_columns(
                         (pl.col('vol') * np.sqrt(252) * 100).alias('annualized_vol')
                     )
-
-                    # Calculate quantiles
-                    q_values = {}
-                    for q in quantiles:
-                        q_value = vol_by_event.select(
-                            pl.col('annualized_vol').quantile(q, interpolation='linear').alias(f"q{int(q*100)}")
-                        ).item(0, 0)
-                        q_values[f"vol_q{int(q*100)}"] = q_value
-
-                    day_results = {"days_to_event": day, "event_count": valid_events, **q_values}
+                    quantile_values_dict = {}
+                    for q_item in quantiles:
+                        q_result = vol_by_event_df.select(pl.col('annualized_vol').quantile(q_item, interpolation='linear')).item()
+                        quantile_values_dict[f"vol_q{int(q_item*100)}"] = q_result
+                    day_results_dict = {"days_to_event": day_val, "event_count": num_valid_events, **quantile_values_dict}
                 else:
-                    day_results = {"days_to_event": day, "event_count": valid_events}
-                    for q in quantiles:
-                        day_results[f"vol_q{int(q*100)}"] = None
-
-                batch_results.append(day_results)
-
-            vol_data.extend(batch_results)
-
-            # Clean up for memory efficiency
-            del window_data, vol_by_event, batch_results
-            import gc
+                    day_results_dict = {"days_to_event": day_val, "event_count": num_valid_events}
+                    for q_item in quantiles: day_results_dict[f"vol_q{int(q_item*100)}"] = None
+                batch_results_list.append(day_results_dict)
+            vol_quantile_data.extend(batch_results_list)
+            del current_window_data, vol_by_event_df, batch_results_list
             gc.collect()
 
-        results_df = pl.DataFrame(vol_data)
+        results_vol_df = pl.DataFrame(vol_quantile_data)
 
-        # Plot quantiles
+        # Plotting with Matplotlib
         try:
-            results_pd = results_df.to_pandas()
-            fig = go.Figure()
-            
-            # Add quantile lines
-            for q in quantiles:
-                col = f"vol_q{int(q*100)}"
-                if col in results_pd.columns:
-                    line_width = 2 if q == 0.5 else 1
-                    line_dash = 'solid' if q == 0.5 else 'dash'
-                    fig.add_trace(go.Scatter(
-                        x=results_pd['days_to_event'],
-                        y=results_pd[col],
-                        mode='lines',
-                        name=f'Q{int(q*100)}',
-                        line=dict(width=line_width, dash=line_dash)
-                    ))
-            
-            # Add reference lines
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
+            results_vol_pd = results_vol_df.to_pandas()
+            fig, ax = plt.subplots(figsize=(12, 7))
+
+            for q_item in quantiles:
+                col_name_str = f"vol_q{int(q_item*100)}"
+                if col_name_str in results_vol_pd.columns:
+                    line_w = 2 if q_item == 0.5 else 1
+                    line_s = 'solid' if q_item == 0.5 else 'dashed'
+                    ax.plot(results_vol_pd['days_to_event'], results_vol_pd[col_name_str], linewidth=line_w, linestyle=line_s, label=f'Q{int(q_item*100)}')
+
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            y_curr_lims = ax.get_ylim()
+            ax.text(0.1, y_curr_lims[1] * 0.9, 'Event Day', color='red', ha='left')
+
+
             if analysis_window[0] <= -30 and analysis_window[1] >= 30:
-                fig.add_vline(x=-30, line=dict(color='green', dash='dot'), annotation_text='Month Before')
-                fig.add_vline(x=30, line=dict(color='purple', dash='dot'), annotation_text='Month After')
-            
-            # Highlight event window
-            event_start, event_end = -2, 2
-            if analysis_window[0] <= event_start and analysis_window[1] >= event_end:
-                fig.add_vrect(x0=event_start, x1=event_end, fillcolor='yellow', opacity=0.2, line_width=0, annotation_text='Event Window')
-            
-            # Set layout
-            fig.update_layout(
-                title=f'Volatility Quantiles Around Events (Lookback: {lookback_window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Annualized Volatility (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600,
-                xaxis=dict(
-                    tickmode='linear',
-                    tick0=analysis_window[0],
-                    dtick=20,
-                    gridcolor='lightgray'
-                ),
-                yaxis=dict(
-                    rangemode='tozero',
-                    gridcolor='lightgray'
-                )
-            )
-            
-            # Save plot
+                ax.axvline(x=-30, color='green', linestyle=':', label='Month Before')
+                ax.text(-29.9, y_curr_lims[1] * 0.85, 'Month Before', color='green', ha='left')
+                ax.axvline(x=30, color='purple', linestyle=':', label='Month After')
+                ax.text(30.1, y_curr_lims[1] * 0.85, 'Month After', color='purple', ha='left')
+
+
+            event_window_start, event_window_end = -2, 2
+            if analysis_window[0] <= event_window_start and analysis_window[1] >= event_window_end:
+                ax.axvspan(event_window_start, event_window_end, color='yellow', alpha=0.2, label='Event Window')
+
+            ax.set_title(f'Volatility Quantiles Around Events (Lookback: {lookback_window} days)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Annualized Volatility (%)')
+            ax.legend(loc='best')
+            ax.grid(True, linestyle=':', alpha=0.7)
+            ax.set_ylim(bottom=0) # Volatility is non-negative
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(20))
+
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.png")
             try:
-                plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.png")
-                fig.write_image(plot_filename, format='png', scale=2)
+                plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
                 print(f"Saved volatility quantiles plot to: {plot_filename}")
             except Exception as e:
-                print(f"Warning: Could not save plot image: {e}")
-                html_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.html")
-                fig.write_html(html_filename)
-                print(f"Saved as HTML (fallback) to: {html_filename}")
-            
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
+
         except Exception as e:
             print(f"Error creating plot: {e}")
             traceback.print_exc()
 
-        # Save results to CSV
         csv_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.csv")
         try:
-            results_df.write_csv(csv_filename)
+            results_vol_df.write_csv(csv_filename)
             print(f"Saved volatility quantiles data to: {csv_filename}")
         except Exception as e:
             print(f"Error saving quantiles data: {e}")
+        return results_vol_df
 
-        return results_df
-
-    def analyze_mean_returns(self, 
-                           results_dir: str, 
-                           file_prefix: str = "event", 
-                           return_col: str = 'ret', 
-                           window: int = 5, 
-                           min_periods: int = 3, 
-                           pre_days: int = 60, 
-                           post_days: int = 60, 
-                           baseline_window=(-60, -11), 
+    def analyze_mean_returns(self,
+                           results_dir: str,
+                           file_prefix: str = "event",
+                           return_col: str = 'ret',
+                           window: int = 5,
+                           min_periods: int = 3,
+                           pre_days: int = 60,
+                           post_days: int = 60,
+                           baseline_window=(-60, -11),
                            event_window=(-2, 2)):
         """
-        Calculates and plots rolling mean returns around events.
-        
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing daily returns
-        window (int): Window size for rolling mean
-        min_periods (int): Minimum observations in window
-        pre_days (int): Days before event to analyze
-        post_days (int): Days after event to analyze
-        baseline_window (Tuple[int, int]): Days for baseline returns
-        event_window (Tuple[int, int]): Days defining event window
-        
-        Returns:
-        pl.DataFrame: DataFrame containing mean return data
+        Calculates and plots rolling mean returns around events using Matplotlib.
         """
         print(f"\n--- Analyzing Rolling Mean Returns (Window={window} days) ---")
-        
+
         if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
             print("Error: Data/required columns missing.")
             return None
 
-        # Filter data to analysis period and clip extreme returns
         df = self.data.filter(
-            (pl.col('days_to_event') >= -pre_days) & 
+            (pl.col('days_to_event') >= -pre_days) &
             (pl.col('days_to_event') <= post_days)
         ).with_columns(
             pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return')
         ).sort(['event_id', 'date'])
 
-        # Calculate rolling mean by event
         df = df.with_columns(
             pl.col('clipped_return').rolling_mean(
-                window_size=window, 
+                window_size=window,
                 min_periods=min_periods
             ).over('event_id').alias('rolling_mean_return')
         )
+        df = df.with_columns((pl.col('rolling_mean_return') * 100).alias('rolling_mean_return_pct'))
 
-        # Convert to percentage
-        df = df.with_columns(
-            (pl.col('rolling_mean_return') * 100).alias('rolling_mean_return_pct')
-        )
-
-        # Aggregate across events for each relative day
         aligned_means = df.group_by('days_to_event').agg([
             pl.mean('rolling_mean_return_pct').alias('avg_rolling_mean_return'),
             pl.median('rolling_mean_return_pct').alias('median_rolling_mean_return'),
-            pl.count('rolling_mean_return_pct').alias('event_count')
+            pl.count().alias('event_count')
         ]).sort('days_to_event')
 
-        # Calculate baseline and event returns for comparison
         baseline_data = df.filter(
-            (pl.col('days_to_event') >= baseline_window[0]) & 
+            (pl.col('days_to_event') >= baseline_window[0]) &
             (pl.col('days_to_event') <= baseline_window[1])
         )
-        
         event_data = df.filter(
-            (pl.col('days_to_event') >= event_window[0]) & 
+            (pl.col('days_to_event') >= event_window[0]) &
             (pl.col('days_to_event') <= event_window[1])
         )
-        
-        baseline_ret = baseline_data['rolling_mean_return_pct'].mean()
-        event_ret = event_data['rolling_mean_return_pct'].mean()
-        ret_change = event_ret - baseline_ret
-        
-        print(f"Baseline return ({baseline_window}): {baseline_ret:.2f}%")
-        print(f"Event window return ({event_window}): {event_ret:.2f}%")
-        print(f"Return change: {ret_change:+.2f}%")
 
-        # Plot mean returns
+        baseline_ret_val = baseline_data['rolling_mean_return_pct'].mean()
+        event_ret_val = event_data['rolling_mean_return_pct'].mean()
+        ret_change_val = (event_ret_val - baseline_ret_val) if baseline_ret_val is not None and event_ret_val is not None else float('nan')
+
+        print(f"Baseline return ({baseline_window}): {baseline_ret_val or 0:.2f}%")
+        print(f"Event window return ({event_window}): {event_ret_val or 0:.2f}%")
+        print(f"Return change: {ret_change_val:+.2f}%" if not pd.isna(ret_change_val) else "Return change: N/A")
+
+        # Plotting with Matplotlib
         if not aligned_means.is_empty():
             aligned_means_pd = aligned_means.to_pandas()
-            
-            fig = go.Figure()
-            
-            # Add mean return line
-            fig.add_trace(go.Scatter(
-                x=aligned_means_pd['days_to_event'],
-                y=aligned_means_pd['avg_rolling_mean_return'],
-                mode='lines',
-                name='Avg. Rolling Mean Return',
-                line=dict(color='blue', width=2)
-            ))
-            
-            # Add horizontal line for baseline return
-            fig.add_hline(
-                y=baseline_ret, 
-                line=dict(color='green', dash='dash'), 
-                annotation_text=f'Baseline: {baseline_ret:.2f}%'
-            )
-            
-            # Add zero line
-            fig.add_hline(
-                y=0, 
-                line=dict(color='gray'), 
-                opacity=0.3
-            )
-            
-            # Add vertical line at event day
-            fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
-            
-            # Highlight event window
-            fig.add_vrect(
-                x0=event_window[0], 
-                x1=event_window[1], 
-                fillcolor='yellow', 
-                opacity=0.2, 
-                line_width=0, 
-                annotation_text='Event Window'
-            )
-            
-            # Set layout
-            fig.update_layout(
-                title=f'Average Rolling Mean Return Around Event (Window={window} days)',
-                xaxis_title='Days Relative to Event',
-                yaxis_title='Avg. Rolling Mean Return (%)',
-                showlegend=True,
-                template='plotly_white',
-                width=1000,
-                height=600,
-                xaxis=dict(
-                    tickmode='linear',
-                    tick0=-pre_days,
-                    dtick=10,
-                    gridcolor='lightgray'
-                ),
-                yaxis=dict(
-                    gridcolor='lightgray'
-                )
-            )
-            
-            # Add annotation for return change
-            fig.add_annotation(
-                x=event_window[1] + 2,
-                y=event_ret,
-                text=f"Event: {event_ret:.2f}%<br>Change: {ret_change:+.2f}%",
-                showarrow=True,
-                arrowhead=1,
-                ax=40,
-                ay=-40
-            )
-            
-            # Save plot
+            fig, ax = plt.subplots(figsize=(12, 7))
+
+            ax.plot(aligned_means_pd['days_to_event'], aligned_means_pd['avg_rolling_mean_return'], color='blue', linewidth=2, label='Avg. Rolling Mean Return')
+
+            if baseline_ret_val is not None:
+                ax.axhline(y=baseline_ret_val, color='green', linestyle='--', label=f'Baseline Ret: {baseline_ret_val:.2f}%')
+            ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            ax.text(0.1, ax.get_ylim()[1]*0.95, 'Event Day', color='red', ha='left')
+
+            ax.axvspan(event_window[0], event_window[1], color='yellow', alpha=0.2, label='Event Window')
+
+            ax.set_title(f'Average Rolling Mean Return Around Event (Window={window} days)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Avg. Rolling Mean Return (%)')
+            ax.legend()
+            ax.grid(True, linestyle=':', alpha=0.7)
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+
+            if event_ret_val is not None and not pd.isna(ret_change_val):
+                ax.annotate(f"Event: {event_ret_val:.2f}%\nChange: {ret_change_val:+.2f}%",
+                            xy=(event_window[1], event_ret_val), xycoords='data',
+                            xytext=(event_window[1] + 5, event_ret_val + (ax.get_ylim()[1]*0.05 if event_ret_val > 0 else ax.get_ylim()[0]*0.05) ), textcoords='data', # Adjust text position
+                            arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
+                            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.png")
             try:
-                plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.png")
-                fig.write_image(plot_filename, format='png', scale=2)
+                plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
                 print(f"Saved rolling mean return plot to: {plot_filename}")
             except Exception as e:
-                print(f"Warning: Could not save plot image: {e}")
-                html_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d.html")
-                fig.write_html(html_filename)
-                print(f"Saved as HTML (fallback) to: {html_filename}")
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
 
-            # Save data
             csv_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_rolling_{window}d_data.csv")
             try:
                 aligned_means.write_csv(csv_filename)
@@ -2200,32 +1784,17 @@ class EventAnalysis:
                 print(f"Error saving data: {e}")
         else:
             print("No data for rolling mean returns plot.")
-
         return aligned_means
 
-    def calculate_mean_returns_quantiles(self, 
-                                       results_dir: str, 
+    def calculate_mean_returns_quantiles(self,
+                                       results_dir: str,
                                        file_prefix: str = "event",
-                                       return_col: str = 'ret', 
+                                       return_col: str = 'ret',
                                        analysis_window: Tuple[int, int] = (-60, 60),
                                        lookback_window: int = 10,
                                        quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
         """
-        Calculates mean return quantiles for each day relative to events.
-        
-        For each day, computes mean returns using the lookback window and calculates
-        quantiles across all events.
-        
-        Parameters:
-        results_dir (str): Directory to save results
-        file_prefix (str): Prefix for saved files
-        return_col (str): Column name containing daily returns
-        analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-        lookback_window (int): Number of days to look back when calculating mean returns
-        quantiles (List[float]): List of quantiles to calculate
-        
-        Returns:
-        pl.DataFrame: DataFrame containing mean return quantiles
+        Calculates mean return quantiles for each day relative to events using Matplotlib.
         """
         print(f"\n--- Calculating Mean Return Quantiles (Analysis Window: {analysis_window}, Lookback: {lookback_window}) ---")
 
@@ -2233,36 +1802,128 @@ class EventAnalysis:
             print("Error: Data not loaded or missing return column.")
             return None
 
-        # Pre-filter the data
         extended_start = analysis_window[0] - lookback_window
-        analysis_data = self.data.filter(
-            (pl.col('days_to_event') >= extended_start) & 
+        analysis_data_filtered = self.data.filter(
+            (pl.col('days_to_event') >= extended_start) &
             (pl.col('days_to_event') <= analysis_window[1])
-        ).with_columns(
-            pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return')
-        )
+        ).with_columns(pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return'))
 
-        if analysis_data.is_empty():
+        if analysis_data_filtered.is_empty():
             print(f"Error: No data found within analysis window {analysis_window}.")
             return None
 
-        days_range = list(range(analysis_window[0], analysis_window[1] + 1))
-        mean_data = []
-        print(f"Processing {len(days_range)} days...")
+        days_range_list = list(range(analysis_window[0], analysis_window[1] + 1))
+        mean_ret_quantile_data = []
+        print(f"Processing {len(days_range_list)} days...")
 
-        # Process in batches for memory efficiency
         batch_size = 10
-        for batch_start in range(0, len(days_range), batch_size):
-            batch_days = days_range[batch_start:batch_start + batch_size]
-            print(f"Processing days {batch_days[0]} to {batch_days[-1]} ({len(batch_days)} days)...")
+        for batch_start_idx in range(0, len(days_range_list), batch_size):
+            current_batch_days = days_range_list[batch_start_idx : batch_start_idx + batch_size]
+            print(f"Processing days {current_batch_days[0]} to {current_batch_days[-1]} ({len(current_batch_days)} days)...")
+            batch_results_list = []
+            for day_val in current_batch_days:
+                window_start_val = day_val - lookback_window
+                window_end_val = day_val - 1 # Lookback up to the day before
 
-            batch_results = []
-            for day in batch_days:
-                window_start = day - lookback_window
-                window_end = day
+                current_window_data = analysis_data_filtered.filter(
+                    (pl.col('days_to_event') >= window_start_val) &
+                    (pl.col('days_to_event') <= window_end_val)
+                )
 
-    def analyze_rvr(self, 
-                        results_dir: str, 
+                if current_window_data.is_empty():
+                    empty_res_dict = {"days_to_event": day_val, "event_count": 0}
+                    for q_item in quantiles: empty_res_dict[f"mean_ret_q{int(q_item*100)}"] = None
+                    batch_results_list.append(empty_res_dict)
+                    continue
+
+                mean_ret_by_event_df = current_window_data.group_by('event_id').agg([
+                    pl.mean('clipped_return').alias('mean_ret_raw'),
+                    pl.count().alias('n_obs')
+                ]).filter(
+                    (pl.col('n_obs') >= max(3, lookback_window // 3)) &
+                    pl.col('mean_ret_raw').is_not_null()
+                )
+
+                num_valid_events = mean_ret_by_event_df.height
+                if num_valid_events >= 5:
+                    mean_ret_by_event_df = mean_ret_by_event_df.with_columns(
+                        (pl.col('mean_ret_raw') * 100).alias('mean_ret_pct') # Convert to percentage
+                    )
+                    quantile_values_dict = {}
+                    for q_item in quantiles:
+                        q_result = mean_ret_by_event_df.select(pl.col('mean_ret_pct').quantile(q_item, interpolation='linear')).item()
+                        quantile_values_dict[f"mean_ret_q{int(q_item*100)}"] = q_result
+                    day_results_dict = {"days_to_event": day_val, "event_count": num_valid_events, **quantile_values_dict}
+                else:
+                    day_results_dict = {"days_to_event": day_val, "event_count": num_valid_events}
+                    for q_item in quantiles: day_results_dict[f"mean_ret_q{int(q_item*100)}"] = None
+                batch_results_list.append(day_results_dict)
+            mean_ret_quantile_data.extend(batch_results_list)
+            del current_window_data, mean_ret_by_event_df, batch_results_list
+            gc.collect()
+
+        results_mean_ret_df = pl.DataFrame(mean_ret_quantile_data)
+
+        # Plotting with Matplotlib
+        try:
+            results_mean_ret_pd = results_mean_ret_df.to_pandas()
+            fig, ax = plt.subplots(figsize=(12, 7))
+
+            for q_item in quantiles:
+                col_name_str = f"mean_ret_q{int(q_item*100)}"
+                if col_name_str in results_mean_ret_pd.columns:
+                    line_w = 2 if q_item == 0.5 else 1
+                    line_s = 'solid' if q_item == 0.5 else 'dashed'
+                    ax.plot(results_mean_ret_pd['days_to_event'], results_mean_ret_pd[col_name_str], linewidth=line_w, linestyle=line_s, label=f'Q{int(q_item*100)}')
+
+            ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            y_curr_lims = ax.get_ylim()
+            ax.text(0.1, y_curr_lims[1] * 0.9 if y_curr_lims[1] > 0 else y_curr_lims[0]*0.1 , 'Event Day', color='red', ha='left')
+
+
+            if analysis_window[0] <= -30 and analysis_window[1] >= 30:
+                ax.axvline(x=-30, color='green', linestyle=':', label='Month Before')
+                ax.text(-29.9, y_curr_lims[1] * 0.85 if y_curr_lims[1] > 0 else y_curr_lims[0]*0.15, 'Month Before', color='green', ha='left')
+                ax.axvline(x=30, color='purple', linestyle=':', label='Month After')
+                ax.text(30.1, y_curr_lims[1] * 0.85 if y_curr_lims[1] > 0 else y_curr_lims[0]*0.15, 'Month After', color='purple', ha='left')
+
+
+            event_window_start, event_window_end = -2, 2
+            if analysis_window[0] <= event_window_start and analysis_window[1] >= event_window_end:
+                ax.axvspan(event_window_start, event_window_end, color='yellow', alpha=0.2, label='Event Window')
+
+            ax.set_title(f'Mean Return Quantiles Around Events (Lookback: {lookback_window} days)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Mean Return (%)')
+            ax.legend(loc='best')
+            ax.grid(True, linestyle=':', alpha=0.7)
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(20))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f%%')) # Percentage format
+
+            plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_quantiles.png")
+            try:
+                plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
+                print(f"Saved mean return quantiles plot to: {plot_filename}")
+            except Exception as e:
+                print(f"Warning: Could not save plot image {plot_filename}: {e}")
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"Error creating plot: {e}")
+            traceback.print_exc()
+
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_mean_return_quantiles.csv")
+        try:
+            results_mean_ret_df.write_csv(csv_filename)
+            print(f"Saved mean return quantiles data to: {csv_filename}")
+        except Exception as e:
+            print(f"Error saving quantiles data: {e}")
+        return results_mean_ret_df
+
+
+    def analyze_rvr(self,
+                        results_dir: str,
                         file_prefix: str = "event",
                         return_col: str = 'ret',
                         analysis_window: tuple[int, int] = (-30, 30),
@@ -2270,314 +1931,220 @@ class EventAnalysis:
                         lookback_window: int = 5,
                         optimistic_bias: float = 0.01,
                         min_periods: int = 3,
-                        variance_floor: float = 1e-6,  # Added minimum variance to prevent division issues
-                        rvr_clip_threshold: float = 1e10,  # Added clipping threshold for extreme RVR values
-                        adaptive_threshold: bool = True):  # Added parameter for adaptive threshold
+                        variance_floor: float = 1e-6,
+                        rvr_clip_threshold: float = 1e10,
+                        adaptive_threshold: bool = True):
             """
-            Analyzes the Return-to-Variance Ratio (RVR) across event phases to test if RVR peaks
-            during the post-event rising phase due to high volatility and optimistic bias.
-    
-            Parameters:
-            results_dir (str): Directory to save results
-            file_prefix (str): Prefix for saved files
-            return_col (str): Column name containing daily returns
-            analysis_window (Tuple[int, int]): Days relative to event to analyze (start, end)
-            post_event_delta (int): Duration of post-event rising phase (days after event)
-            lookback_window (int): Lookback window for calculating mean return and volatility
-            optimistic_bias (float): Bias added to expected returns in post-event rising phase
-            min_periods (int): Minimum observations for rolling calculations
-            variance_floor (float): Minimum variance value to prevent division by very small numbers
-            rvr_clip_threshold (float): Maximum allowed RVR value to clip outliers
-            adaptive_threshold (bool): Whether to use adaptive thresholding for return format detection
-    
-            Returns:
-            pl.DataFrame or None: DataFrame containing RVR data across phases, or None if analysis fails
+            Analyzes the Return-to-Variance Ratio (RVR) using Matplotlib.
             """
             print(f"\n--- Analyzing Return-to-Variance Ratio (RVR) ---")
             print(f"Analysis Window: {analysis_window}, Post-Event Delta: {post_event_delta} days, Lookback: {lookback_window} days")
-    
-            # Initialize rvr_daily to None
-            rvr_daily = None
-    
-            # Validate inputs
+
+            rvr_daily_df = None
             if self.data is None or return_col not in self.data.columns or 'days_to_event' not in self.data.columns:
                 print("Error: Data not loaded or missing required columns.")
-                return rvr_daily
-    
+                return rvr_daily_df
+
             if post_event_delta <= 0 or post_event_delta > analysis_window[1]:
                 print(f"Error: post_event_delta ({post_event_delta}) must be positive and within analysis window.")
-                return rvr_daily
-    
-            # Define event phases
-            phases = {
+                return rvr_daily_df
+
+            phases_dict = {
                 'pre_event': (analysis_window[0], -1),
                 'post_event_rising': (0, post_event_delta),
                 'late_post_event': (post_event_delta + 1, analysis_window[1])
             }
-    
-            # Filter data to extended analysis period
-            extended_start = analysis_window[0] - lookback_window
-            analysis_data = self.data.filter(
-                (pl.col('days_to_event') >= extended_start) &
+
+            extended_start_day = analysis_window[0] - lookback_window
+            analysis_data_rvr = self.data.filter(
+                (pl.col('days_to_event') >= extended_start_day) &
                 (pl.col('days_to_event') <= analysis_window[1])
             ).with_columns(
-                pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return')
+                pl.col(return_col).clip(-0.5, 0.5).alias('clipped_return') # Clip first
             ).sort(['event_id', 'days_to_event'])
-    
-            if analysis_data.is_empty():
-                print(f"Error: No data found within extended analysis window [{extended_start}, {analysis_window[1]}].")
-                return rvr_daily
-    
-            # IMPROVED: Check if returns are in percentage form using more sophisticated detection
-            sample_returns = analysis_data.select(pl.col(return_col)).sample(n=min(100, analysis_data.height))
-            avg_abs_return = sample_returns.mean_horizontal().abs()[0]
-            
-            # If adaptive threshold is enabled, use event-specific detection logic
+
+
+            if analysis_data_rvr.is_empty():
+                print(f"Error: No data found within extended analysis window [{extended_start_day}, {analysis_window[1]}].")
+                return rvr_daily_df
+
+            sample_returns_rvr = analysis_data_rvr.select(pl.col('clipped_return')).sample(n=min(100, analysis_data_rvr.height)) # Use clipped for detection
+            avg_abs_return_rvr = sample_returns_rvr.select(pl.all().mean().abs()).item()
+
+
             if adaptive_threshold:
-                # Calculate percentiles to understand the distribution
-                pct_05 = sample_returns.select(pl.col(return_col).quantile(0.05)).item()
-                pct_95 = sample_returns.select(pl.col(return_col).quantile(0.95)).item()
-                
-                # 95th percentile difference logic: if the 95th-5th percentile range is greater than 0.1
-                # it's more likely to be in percentage form
-                range_check = (pct_95 - pct_05) > 0.1
-                
-                # Standard deviation check: if standard deviation is large, likely in percentage form
-                std_check = sample_returns.select(pl.col(return_col).std()).item() > 0.02
-                
-                # Combined logic for more robust detection
-                returns_in_pct = range_check or std_check or (avg_abs_return > 0.05)
-                
-                print(f"Adaptive return format detection: {'Percentage form' if returns_in_pct else 'Decimal form'}")
-                print(f"  Avg abs return: {avg_abs_return:.6f}, Range check: {range_check}, Std check: {std_check}")
+                pct_05_rvr = sample_returns_rvr.select(pl.col('clipped_return').quantile(0.05)).item()
+                pct_95_rvr = sample_returns_rvr.select(pl.col('clipped_return').quantile(0.95)).item()
+                range_check_rvr = (pct_95_rvr - pct_05_rvr) > 0.1
+                std_check_rvr = sample_returns_rvr.select(pl.col('clipped_return').std()).item() > 0.02
+                returns_in_pct_rvr = range_check_rvr or std_check_rvr or (avg_abs_return_rvr > 0.05)
+                print(f"Adaptive return format detection: {'Percentage form' if returns_in_pct_rvr else 'Decimal form'}")
+                print(f"  Avg abs return: {avg_abs_return_rvr:.6f}, Range check: {range_check_rvr}, Std check: {std_check_rvr}")
             else:
-                # Original logic as fallback
-                returns_in_pct = avg_abs_return > 0.05
-                print(f"Standard return format detection: {'Percentage form' if returns_in_pct else 'Decimal form'} (avg abs: {avg_abs_return:.6f})")
-    
-            # Convert returns to decimal form if needed for consistent calculation
-            if returns_in_pct:
+                returns_in_pct_rvr = avg_abs_return_rvr > 0.05
+                print(f"Standard return format detection: {'Percentage form' if returns_in_pct_rvr else 'Decimal form'} (avg abs: {avg_abs_return_rvr:.6f})")
+
+            calc_return_col_rvr = 'decimal_return_rvr'
+            if returns_in_pct_rvr:
                 print("Converting percentage returns to decimal form for RVR calculation")
-                analysis_data = analysis_data.with_columns(
-                    (pl.col(return_col) / 100).alias('decimal_return')
+                analysis_data_rvr = analysis_data_rvr.with_columns(
+                    (pl.col('clipped_return') / 100).alias(calc_return_col_rvr)
                 )
-                calc_return_col = 'decimal_return'
             else:
-                calc_return_col = return_col
-    
-            # Calculate rolling mean return and volatility for each event
-            analysis_data = analysis_data.with_columns([
-                pl.col(calc_return_col).clip(-0.05, 0.05).rolling_mean(
-                    window_size=lookback_window,
-                    min_periods=min_periods
-                ).over('event_id').alias('mean_return'),
-                pl.col(calc_return_col).clip(-0.05, 0.05).rolling_std(
-                    window_size=lookback_window,
-                    min_periods=min_periods
-                ).over('event_id').alias('volatility')
+                analysis_data_rvr = analysis_data_rvr.rename({'clipped_return': calc_return_col_rvr})
+
+
+            analysis_data_rvr = analysis_data_rvr.with_columns([
+                pl.col(calc_return_col_rvr).rolling_mean(
+                    window_size=lookback_window, min_periods=min_periods
+                ).over('event_id').alias('mean_return_rvr'),
+                pl.col(calc_return_col_rvr).rolling_std(
+                    window_size=lookback_window, min_periods=min_periods
+                ).over('event_id').alias('volatility_rvr')
             ])
-    
-            # Apply optimistic bias to expected returns in post-event rising phase
-            if returns_in_pct:
-                # Scale optimistic bias for percentage returns
-                adjusted_bias = optimistic_bias / 100
-            else:
-                adjusted_bias = optimistic_bias
-                
-            analysis_data = analysis_data.with_columns(
+
+            adj_bias_rvr = optimistic_bias / 100 if returns_in_pct_rvr else optimistic_bias # Bias is in decimal form
+            analysis_data_rvr = analysis_data_rvr.with_columns(
                 pl.when(
-                    (pl.col('days_to_event') >= phases['post_event_rising'][0]) &
-                    (pl.col('days_to_event') <= phases['post_event_rising'][1])
-                )
-                .then(pl.col('mean_return') + adjusted_bias)
-                .otherwise(pl.col('mean_return'))
-                .alias('expected_return')
+                    (pl.col('days_to_event') >= phases_dict['post_event_rising'][0]) &
+                    (pl.col('days_to_event') <= phases_dict['post_event_rising'][1])
+                ).then(pl.col('mean_return_rvr') + adj_bias_rvr)
+                .otherwise(pl.col('mean_return_rvr'))
+                .alias('expected_return_rvr')
             )
-    
-            # Calculate variance (square of volatility) with floor to prevent division by very small numbers
-            analysis_data = analysis_data.with_columns(
-                pl.max_horizontal(
-                    pl.col('volatility') ** 2,
-                    pl.lit(variance_floor)  # Apply variance floor
-                ).alias('variance')
+            analysis_data_rvr = analysis_data_rvr.with_columns(
+                pl.max_horizontal(pl.col('volatility_rvr') ** 2, pl.lit(variance_floor)).alias('variance_rvr')
             )
-    
-            # Calculate RVR (Expected Return / Variance) with clipping of extreme values
-            analysis_data = analysis_data.with_columns(
-                pl.when(pl.col('variance') > 0)
-                .then(
-                    pl.col('expected_return') / pl.col('variance')
-                )
+            analysis_data_rvr = analysis_data_rvr.with_columns(
+                pl.when(pl.col('variance_rvr') > 1e-9) # Ensure variance is not effectively zero
+                .then(pl.col('expected_return_rvr') / pl.col('variance_rvr'))
                 .otherwise(None)
-                .alias('raw_rvr')
+                .alias('raw_rvr_calc')
             )
-            
-            # Add clipped RVR to prevent extreme values from skewing analysis
-            analysis_data = analysis_data.with_columns(
-                pl.col('raw_rvr').clip(-rvr_clip_threshold, rvr_clip_threshold).alias('rvr')
+            analysis_data_rvr = analysis_data_rvr.with_columns(
+                pl.col('raw_rvr_calc').clip(-rvr_clip_threshold, rvr_clip_threshold).alias('rvr_final')
             )
-    
-            # Aggregate RVR across events for each day
-            rvr_daily = analysis_data.group_by('days_to_event').agg([
-                pl.col('rvr').mean().alias('avg_rvr'),
-                pl.col('rvr').median().alias('median_rvr'),
-                pl.col('raw_rvr').mean().alias('avg_raw_rvr'),  # Added for comparison
-                pl.col('expected_return').mean().alias('avg_expected_return'),
-                pl.col('variance').mean().alias('avg_variance'),
-                pl.col('rvr').count().alias('event_count')
+
+            rvr_daily_df = analysis_data_rvr.group_by('days_to_event').agg([
+                pl.col('rvr_final').mean().alias('avg_rvr'),
+                pl.col('rvr_final').median().alias('median_rvr'),
+                pl.col('raw_rvr_calc').mean().alias('avg_raw_rvr'),
+                pl.col('expected_return_rvr').mean().alias('avg_expected_return'),
+                pl.col('variance_rvr').mean().alias('avg_variance'),
+                pl.col('rvr_final').count().alias('event_count') # count notnull rvr
             ]).sort('days_to_event')
-    
-            # Summarize RVR by phase
-            phase_summaries = []
-            for phase_name, (start_day, end_day) in phases.items():
-                phase_data = analysis_data.filter(
-                    (pl.col('days_to_event') >= start_day) &
-                    (pl.col('days_to_event') <= end_day)
+
+            phase_summaries_list = []
+            for phase_name_str, (start_day_val, end_day_val) in phases_dict.items():
+                phase_data_df = analysis_data_rvr.filter(
+                    (pl.col('days_to_event') >= start_day_val) & (pl.col('days_to_event') <= end_day_val)
                 )
-                if not phase_data.is_empty():
-                    phase_stats = {
-                        'phase': phase_name,
-                        'start_day': start_day,
-                        'end_day': end_day,
-                        'avg_rvr': phase_data['rvr'].mean(),
-                        'median_rvr': phase_data['rvr'].median(),
-                        'avg_raw_rvr': phase_data['raw_rvr'].mean(),  # Added for comparison
-                        'avg_expected_return': phase_data['expected_return'].mean(),
-                        'avg_variance': phase_data['variance'].mean(),
-                        'event_count': phase_data['rvr'].count()
+                if not phase_data_df.is_empty():
+                    phase_stats_dict = {
+                        'phase': phase_name_str, 'start_day': start_day_val, 'end_day': end_day_val,
+                        'avg_rvr': phase_data_df['rvr_final'].mean(),
+                        'median_rvr': phase_data_df['rvr_final'].median(),
+                        'avg_raw_rvr': phase_data_df['raw_rvr_calc'].mean(),
+                        'avg_expected_return': phase_data_df['expected_return_rvr'].mean(),
+                        'avg_variance': phase_data_df['variance_rvr'].mean(),
+                        'event_count': phase_data_df.filter(pl.col('rvr_final').is_not_null()).height
                     }
-                    phase_summaries.append(phase_stats)
-                else:
-                    phase_summaries.append({
-                        'phase': phase_name,
-                        'start_day': start_day,
-                        'end_day': end_day,
-                        'avg_rvr': None,
-                        'median_rvr': None,
-                        'avg_raw_rvr': None,
-                        'avg_expected_return': None,
-                        'avg_variance': None,
-                        'event_count': 0
+                    phase_summaries_list.append(phase_stats_dict)
+                else: # Append Nones if phase is empty
+                    phase_summaries_list.append({
+                        'phase': phase_name_str, 'start_day': start_day_val, 'end_day': end_day_val,
+                        'avg_rvr': None, 'median_rvr': None, 'avg_raw_rvr': None,
+                        'avg_expected_return': None, 'avg_variance': None, 'event_count': 0
                     })
-    
-            phase_df = pl.DataFrame(phase_summaries)
+
+
+            phase_summary_df = pl.DataFrame(phase_summaries_list)
             print("\nRVR by Phase:")
-            for row in phase_df.iter_rows(named=True):
-                print(f"Phase: {row['phase']} ({row['start_day']} to {row['end_day']} days)")
-                print(f"  Avg RVR: {row['avg_rvr']:.4f}")
-                print(f"  Median RVR: {row['median_rvr']:.4f}")
-                print(f"  Avg Expected Return: {row['avg_expected_return']:.6f}")
-                print(f"  Avg Variance: {row['avg_variance']:.6f}")
-                print(f"  Events: {row['event_count']}")
-    
-            # Plot RVR time series
+            for row_dict in phase_summary_df.to_dicts():
+                print(f"Phase: {row_dict['phase']} ({row_dict['start_day']} to {row_dict['end_day']} days)")
+                print(f"  Avg RVR: {row_dict.get('avg_rvr', 0.0):.4f}")
+                print(f"  Median RVR: {row_dict.get('median_rvr', 0.0):.4f}")
+                print(f"  Avg Expected Return: {row_dict.get('avg_expected_return', 0.0):.6f}")
+                print(f"  Avg Variance: {row_dict.get('avg_variance', 0.0):.6f}")
+                print(f"  Events: {row_dict.get('event_count', 0)}")
+
+
+            # Plotting with Matplotlib
             try:
-                rvr_pd = rvr_daily.to_pandas()
-                fig = go.Figure()
-    
-                # Add average RVR line
-                fig.add_trace(go.Scatter(
-                    x=rvr_pd['days_to_event'],
-                    y=rvr_pd['avg_rvr'],
-                    mode='lines',
-                    name='Avg RVR',
-                    line=dict(color='blue', width=2)
-                ))
-    
-                # Add phase boundaries
-                fig.add_vline(x=0, line=dict(color='red', dash='dash'), annotation_text='Event Day')
-                fig.add_vline(x=post_event_delta, line=dict(color='purple', dash='dot'),
-                              annotation_text='End of Post-Event Rising')
-    
-                # Highlight post-event rising phase
-                fig.add_vrect(
-                    x0=phases['post_event_rising'][0],
-                    x1=phases['post_event_rising'][1],
-                    fillcolor='yellow',
-                    opacity=0.2,
-                    line_width=0,
-                    annotation_text='Post-Event Rising'
-                )
-    
-                # Determine y-axis range
-                valid_rvr = rvr_pd['avg_rvr'].dropna()
-                if not valid_rvr.empty:
-                    y_min, y_max = valid_rvr.min(), valid_rvr.max()
-                    y_padding = 0.1 * (y_max - y_min) if y_max != y_min else 0.1
-                    y_range = [y_min - y_padding, y_max + y_padding]
+                rvr_pd_plot = rvr_daily_df.to_pandas()
+                fig, ax = plt.subplots(figsize=(12, 7))
+
+                ax.plot(rvr_pd_plot['days_to_event'], rvr_pd_plot['avg_rvr'], color='blue', linewidth=2, label='Avg RVR')
+
+                ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+                ax.axvline(x=post_event_delta, color='purple', linestyle=':', label='End of Post-Event Rising')
+                ax.axvspan(phases_dict['post_event_rising'][0], phases_dict['post_event_rising'][1], color='yellow', alpha=0.2, label='Post-Event Rising')
+
+                y_lim_plot = ax.get_ylim()
+                ax.text(0.1, y_lim_plot[1]*0.9, 'Event Day', color='red', ha='left')
+                ax.text(post_event_delta + 0.1, y_lim_plot[1]*0.85, 'End Post-Event Rising', color='purple', ha='left')
+
+
+                valid_rvr_plot = rvr_pd_plot['avg_rvr'].dropna()
+                if not valid_rvr_plot.empty:
+                    y_min_rvr, y_max_rvr = valid_rvr_plot.min(), valid_rvr_plot.max()
+                    y_padding_rvr = 0.1 * (y_max_rvr - y_min_rvr) if y_max_rvr != y_min_rvr else 0.1
+                    y_range_rvr = [y_min_rvr - y_padding_rvr, y_max_rvr + y_padding_rvr]
                 else:
-                    y_range = [-1, 1]
-    
-                fig.update_layout(
-                    title=f'Return-to-Variance Ratio Around Events (Lookback: {lookback_window} days)',
-                    xaxis_title='Days Relative to Event',
-                    yaxis_title='Average RVR',
-                    showlegend=True,
-                    template='plotly_white',
-                    width=1000,
-                    height=600,
-                    xaxis=dict(
-                        tickmode='linear',
-                        tick0=analysis_window[0],
-                        dtick=10,
-                        gridcolor='lightgray'
-                    ),
-                    yaxis=dict(
-                        range=y_range,
-                        gridcolor='lightgray',
-                        tickformat='.2f'
-                    )
-                )
-    
-                # Add phase RVR annotations
-                for row in phase_df.iter_rows(named=True):
-                    if row['avg_rvr'] is not None:
-                        x_pos = (row['start_day'] + row['end_day']) / 2
-                        fig.add_annotation(
-                            x=x_pos,
-                            y=row['avg_rvr'],
-                            text=f"{row['phase']}: {row['avg_rvr']:.2f}",
-                            showarrow=True,
-                            arrowhead=1,
-                            ax=20 if row['phase'] == 'pre_event' else -20,
-                            ay=-30
-                        )
-    
-                # Save plot
+                    y_range_rvr = [-1, 1] # Default if no data
+
+                ax.set_title(f'Return-to-Variance Ratio Around Events (Lookback: {lookback_window} days)')
+                ax.set_xlabel('Days Relative to Event')
+                ax.set_ylabel('Average RVR')
+                ax.legend(loc='best')
+                ax.grid(True, linestyle=':', alpha=0.7)
+                ax.set_ylim(y_range_rvr)
+                ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+                ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
+
+                for row_dict_plot in phase_summary_df.to_dicts():
+                    if row_dict_plot.get('avg_rvr') is not None:
+                        x_pos_plot = (row_dict_plot['start_day'] + row_dict_plot['end_day']) / 2
+                        y_pos_plot = row_dict_plot['avg_rvr']
+                        # Adjust annotation position to avoid overlap
+                        text_y_offset = (y_range_rvr[1] - y_range_rvr[0]) * 0.05
+                        ax_offset = 20 if row_dict_plot['phase'] == 'pre_event' else -20
+                        ay_offset = -30 if y_pos_plot > (y_range_rvr[0] + y_range_rvr[1])/2 else 30
+
+                        ax.annotate(f"{row_dict_plot['phase']}: {y_pos_plot:.2f}",
+                                    xy=(x_pos_plot, y_pos_plot), xycoords='data',
+                                    xytext=(x_pos_plot + ax_offset/2 , y_pos_plot + ay_offset/10), textcoords='data', # Simplified offset
+                                    arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=.2"),
+                                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.7))
+
+
                 plot_filename = os.path.join(results_dir, f"{file_prefix}_rvr_timeseries.png")
                 try:
-                    fig.write_image(plot_filename, format='png', scale=2)
+                    plt.savefig(plot_filename, dpi=200, bbox_inches='tight')
                     print(f"Saved RVR time series plot to: {plot_filename}")
                 except Exception as e:
-                    print(f"Warning: Could not save plot image: {e}")
-                    html_filename = os.path.join(results_dir, f"{file_prefix}_rvr_timeseries.html")
-                    fig.write_html(html_filename)
-                    print(f"Saved as HTML (fallback) to: {html_filename}")
-    
+                    print(f"Warning: Could not save plot image {plot_filename}: {e}")
+                plt.close(fig)
+
             except Exception as e:
                 print(f"Error creating RVR plot: {e}")
-                import traceback
                 traceback.print_exc()
-    
-            # Save daily RVR data
-            if rvr_daily is not None:
+
+            if rvr_daily_df is not None:
                 csv_filename = os.path.join(results_dir, f"{file_prefix}_rvr_daily.csv")
                 try:
-                    rvr_daily.write_csv(csv_filename)
+                    rvr_daily_df.write_csv(csv_filename)
                     print(f"Saved daily RVR data to: {csv_filename}")
                 except Exception as e:
                     print(f"Error saving daily RVR data: {e}")
-    
-            # Save phase summary
+
             phase_csv_filename = os.path.join(results_dir, f"{file_prefix}_rvr_phase_summary.csv")
             try:
-                phase_df.write_csv(phase_csv_filename)
+                phase_summary_df.write_csv(phase_csv_filename)
                 print(f"Saved RVR phase summary to: {phase_csv_filename}")
             except Exception as e:
                 print(f"Error saving phase summary: {e}")
-    
-            # Clean up
-            del analysis_data, phase_df
+
+            del analysis_data_rvr, phase_summary_df
             gc.collect()
-    
-            return rvr_daily
+            return rvr_daily_df
