@@ -1764,3 +1764,907 @@ class EventAnalysis:
         except Exception as e:
             print(f"Error plotting predictions: {e}")
             traceback.print_exc()
+
+    def analyze_volatility_spikes(self, results_dir: str, file_prefix: str = "event", 
+                                 window: int = 5, pre_days: int = 60, post_days: int = 60,
+                                 baseline_window: tuple = (-60, -11), event_window: tuple = (-2, 2)):
+        """
+        Analyze volatility spikes around events.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str, optional
+            Prefix for output files
+        window : int, optional
+            Window size for rolling volatility calculation
+        pre_days : int, optional
+            Number of days before the event to consider
+        post_days : int, optional
+            Number of days after the event to consider
+        baseline_window : tuple, optional
+            Window for baseline volatility calculation (days_to_event)
+        event_window : tuple, optional
+            Window for event volatility calculation (days_to_event)
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with volatility spike data
+        """
+        print("\n--- Analyzing Volatility Spikes ---")
+
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return None
+
+        # Create directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Collect volatility data for each event
+        volatility_data = []
+
+        # Get unique event IDs
+        event_ids = self.data.select('event_id').unique().to_series().to_list()
+
+        for event_id in event_ids:
+            # Filter data for this event
+            event_data = self.data.filter(pl.col('event_id') == event_id)
+
+            # Sort by days_to_event
+            event_data = event_data.sort('days_to_event')
+
+            # Get returns
+            returns = event_data.select('ret').to_series().to_numpy()
+            days_to_event = event_data.select('days_to_event').to_series().to_numpy()
+
+            # Skip if insufficient data
+            if len(returns) < window + 1:
+                continue
+
+            # Calculate rolling volatility (standard deviation)
+            rolling_vol = np.zeros_like(returns)
+
+            for i in range(len(returns)):
+                if i < window:
+                    # Use available data for first points
+                    rolling_vol[i] = np.std(returns[:i+1], ddof=1) if i > 0 else 0
+                else:
+                    rolling_vol[i] = np.std(returns[i-window+1:i+1], ddof=1)
+
+            # Annualize volatility (approximate by multiplying by sqrt(252))
+            annualized_vol = rolling_vol * np.sqrt(252) * 100  # Convert to percentage
+
+            # Store results with days_to_event
+            for day, vol in zip(days_to_event, annualized_vol):
+                volatility_data.append({
+                    'event_id': event_id,
+                    'days_to_event': day,
+                    'rolling_volatility': vol
+                })
+
+        # Convert to DataFrame
+        vol_df = pd.DataFrame(volatility_data)
+
+        if vol_df.empty:
+            print("Error: No volatility data collected.")
+            return None
+
+        # Calculate average volatility for each day relative to event
+        avg_vol = vol_df.groupby('days_to_event').agg(
+            avg_vol=('rolling_volatility', 'mean'),
+            median_vol=('rolling_volatility', 'median'),
+            std_vol=('rolling_volatility', 'std'),
+            count=('rolling_volatility', 'count')
+        ).reset_index()
+
+        # Calculate baseline and event period volatilities
+        baseline_mask = (avg_vol['days_to_event'] >= baseline_window[0]) & (avg_vol['days_to_event'] <= baseline_window[1])
+        event_mask = (avg_vol['days_to_event'] >= event_window[0]) & (avg_vol['days_to_event'] <= event_window[1])
+
+        baseline_vol = avg_vol.loc[baseline_mask, 'avg_vol'].mean()
+        event_vol = avg_vol.loc[event_mask, 'avg_vol'].mean()
+
+        # Calculate volatility spike ratio
+        vol_spike_ratio = event_vol / baseline_vol if baseline_vol > 0 else np.nan
+
+        print(f"\nVolatility Analysis Results:")
+        print(f"  Baseline Volatility ({baseline_window[0]} to {baseline_window[1]} days): {baseline_vol:.2f}%")
+        print(f"  Event Volatility ({event_window[0]} to {event_window[1]} days): {event_vol:.2f}%")
+        print(f"  Volatility Spike Ratio: {vol_spike_ratio:.2f}")
+
+        # Save data
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_volatility_spikes.csv")
+        avg_vol.to_csv(csv_filename, index=False)
+        print(f"Saved volatility spikes data to: {csv_filename}")
+
+        # Create stats summary file
+        stats_df = pd.DataFrame({
+            'Metric': ['Baseline Volatility', 'Event Volatility', 'Volatility Spike Ratio'],
+            'Value': [baseline_vol, event_vol, vol_spike_ratio],
+            'Window': [f"{baseline_window[0]} to {baseline_window[1]}", 
+                      f"{event_window[0]} to {event_window[1]}", 
+                      "Event/Baseline"]
+        })
+
+        stats_filename = os.path.join(results_dir, f"{file_prefix}_volatility_stats.csv")
+        stats_df.to_csv(stats_filename, index=False)
+        print(f"Saved volatility statistics to: {stats_filename}")
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(avg_vol['days_to_event'], avg_vol['avg_vol'], 'b-', linewidth=2, label='Avg. Volatility')
+
+        # Add vertical line at event day
+        ax.axvline(x=0, color='r', linestyle='--', label='Event Day')
+
+        # Highlight baseline and event windows
+        ax.axvspan(baseline_window[0], baseline_window[1], color='lightblue', alpha=0.3, label='Baseline Window')
+        ax.axvspan(event_window[0], event_window[1], color='lightgreen', alpha=0.3, label='Event Window')
+
+        # Add horizontal lines for baseline and event volatility
+        ax.axhline(y=baseline_vol, color='blue', linestyle=':', label=f'Baseline Vol: {baseline_vol:.2f}%')
+        ax.axhline(y=event_vol, color='green', linestyle=':', label=f'Event Vol: {event_vol:.2f}%')
+
+        ax.set_title('Volatility Around Events')
+        ax.set_xlabel('Days Relative to Event')
+        ax.set_ylabel('Annualized Volatility (%)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Add volatility spike ratio annotation
+        ax.annotate(f'Volatility Spike Ratio: {vol_spike_ratio:.2f}',
+                   xy=(0.05, 0.05), xycoords='axes fraction',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+
+        # Save plot
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_spikes.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved volatility spike plot to: {plot_filename}")
+        plt.close(fig)
+
+        return avg_vol
+
+    def analyze_mean_returns(self, results_dir: str, file_prefix: str = "event", return_col: str = 'ret',
+                            window: int = 5, pre_days: int = 60, post_days: int = 60,
+                            baseline_window: tuple = (-60, -11), event_window: tuple = (-2, 2)):
+        """
+        Analyze mean returns around events.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str, optional
+            Prefix for output files
+        return_col : str, optional
+            Column name containing returns
+        window : int, optional
+            Window size for rolling mean calculation
+        pre_days : int, optional
+            Number of days before the event to consider
+        post_days : int, optional
+            Number of days after the event to consider
+        baseline_window : tuple, optional
+            Window for baseline returns calculation (days_to_event)
+        event_window : tuple, optional
+            Window for event returns calculation (days_to_event)
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with mean returns data
+        """
+        print("\n--- Analyzing Mean Returns ---")
+
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return None
+
+        # Create directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Collect returns data for each event
+        returns_data = []
+
+        # Get unique event IDs
+        event_ids = self.data.select('event_id').unique().to_series().to_list()
+
+        for event_id in event_ids:
+            # Filter data for this event
+            event_data = self.data.filter(pl.col('event_id') == event_id)
+
+            # Sort by days_to_event
+            event_data = event_data.sort('days_to_event')
+
+            # Get returns
+            returns = event_data.select(pl.col(return_col)).to_series().to_numpy()
+            days_to_event = event_data.select('days_to_event').to_series().to_numpy()
+
+            # Skip if insufficient data
+            if len(returns) < window + 1:
+                continue
+
+            # Calculate rolling mean returns
+            rolling_mean = np.zeros_like(returns)
+
+            for i in range(len(returns)):
+                if i < window:
+                    # Use available data for first points
+                    rolling_mean[i] = np.mean(returns[:i+1]) if i > 0 else returns[0]
+                else:
+                    rolling_mean[i] = np.mean(returns[i-window+1:i+1])
+
+            # Store results with days_to_event
+            for day, ret, roll_mean in zip(days_to_event, returns, rolling_mean):
+                returns_data.append({
+                    'event_id': event_id,
+                    'days_to_event': day,
+                    'return': ret,
+                    'rolling_mean': roll_mean
+                })
+
+        # Convert to DataFrame
+        ret_df = pd.DataFrame(returns_data)
+
+        if ret_df.empty:
+            print("Error: No returns data collected.")
+            return None
+
+        # Calculate average returns for each day relative to event
+        avg_ret = ret_df.groupby('days_to_event').agg(
+            avg_return=('return', 'mean'),
+            avg_rolling_mean=('rolling_mean', 'mean'),
+            median_return=('return', 'median'),
+            std_return=('return', 'std'),
+            count=('return', 'count')
+        ).reset_index()
+
+        # Calculate baseline and event period returns
+        baseline_mask = (avg_ret['days_to_event'] >= baseline_window[0]) & (avg_ret['days_to_event'] <= baseline_window[1])
+        event_mask = (avg_ret['days_to_event'] >= event_window[0]) & (avg_ret['days_to_event'] <= event_window[1])
+
+        baseline_ret = avg_ret.loc[baseline_mask, 'avg_return'].mean()
+        event_ret = avg_ret.loc[event_mask, 'avg_return'].mean()
+
+        print(f"\nMean Returns Analysis Results:")
+        print(f"  Baseline Return ({baseline_window[0]} to {baseline_window[1]} days): {baseline_ret:.6f}")
+        print(f"  Event Return ({event_window[0]} to {event_window[1]} days): {event_ret:.6f}")
+
+        # Save data
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_mean_returns.csv")
+        avg_ret.to_csv(csv_filename, index=False)
+        print(f"Saved mean returns data to: {csv_filename}")
+
+        # Create stats summary file
+        stats_df = pd.DataFrame({
+            'Metric': ['Baseline Return', 'Event Return'],
+            'Value': [baseline_ret, event_ret],
+            'Window': [f"{baseline_window[0]} to {baseline_window[1]}", 
+                      f"{event_window[0]} to {event_window[1]}"]
+        })
+
+        stats_filename = os.path.join(results_dir, f"{file_prefix}_returns_stats.csv")
+        stats_df.to_csv(stats_filename, index=False)
+        print(f"Saved returns statistics to: {stats_filename}")
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(avg_ret['days_to_event'], avg_ret['avg_return'] * 100, 'b-', linewidth=2, label='Avg. Return (%)')
+        ax.plot(avg_ret['days_to_event'], avg_ret['avg_rolling_mean'] * 100, 'g-', linewidth=1.5, label=f'Rolling Mean ({window}-day window) (%)')
+
+        # Add vertical line at event day
+        ax.axvline(x=0, color='r', linestyle='--', label='Event Day')
+
+        # Highlight baseline and event windows
+        ax.axvspan(baseline_window[0], baseline_window[1], color='lightblue', alpha=0.3, label='Baseline Window')
+        ax.axvspan(event_window[0], event_window[1], color='lightgreen', alpha=0.3, label='Event Window')
+
+        ax.set_title('Returns Around Events')
+        ax.set_xlabel('Days Relative to Event')
+        ax.set_ylabel('Return (%)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Save plot
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_mean_returns.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved mean returns plot to: {plot_filename}")
+        plt.close(fig)
+
+        return avg_ret
+
+    def calculate_volatility_quantiles(self, results_dir: str, file_prefix: str = "event", 
+                                       return_col: str = 'ret', analysis_window: tuple = (-30, 30),
+                                       lookback_window: int = 10, quantiles: list = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
+        """
+        Calculate volatility quantiles for each day relative to the event.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str, optional
+            Prefix for output files
+        return_col : str, optional
+            Column name containing returns
+        analysis_window : tuple, optional
+            Window for analysis (days_to_event)
+        lookback_window : int, optional
+            Window size for rolling volatility calculation
+        quantiles : list, optional
+            Quantiles to calculate
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with volatility quantiles
+        """
+        print(f"\n--- Calculating Volatility Quantiles ---")
+
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return None
+
+        # Create directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Collect volatility data for each event and day
+        volatility_data = []
+
+        # Get unique event IDs
+        event_ids = self.data.select('event_id').unique().to_series().to_list()
+
+        for event_id in event_ids:
+            # Filter data for this event and analysis window
+            event_data = self.data.filter(
+                (pl.col('event_id') == event_id) &
+                (pl.col('days_to_event') >= analysis_window[0]) &
+                (pl.col('days_to_event') <= analysis_window[1])
+            ).sort('days_to_event')
+
+            # Skip if insufficient data
+            if event_data.height < lookback_window + 1:
+                continue
+
+            # Get returns and days to event
+            returns = event_data.select(pl.col(return_col)).to_series().to_numpy()
+            days_to_event = event_data.select('days_to_event').to_series().to_numpy()
+
+            # Calculate rolling volatility for each day
+            for i in range(len(returns)):
+                if i < lookback_window:
+                    # Skip if not enough data for lookback
+                    continue
+
+                # Calculate volatility using lookback window
+                vol = np.std(returns[i-lookback_window:i], ddof=1)
+
+                # Annualize volatility
+                annualized_vol = vol * np.sqrt(252) * 100  # Convert to percentage
+
+                volatility_data.append({
+                    'event_id': event_id,
+                    'days_to_event': days_to_event[i],
+                    'volatility': annualized_vol
+                })
+
+        # Convert to DataFrame
+        vol_df = pd.DataFrame(volatility_data)
+
+        if vol_df.empty:
+            print("Error: No volatility data collected.")
+            return None
+
+        # Calculate quantiles for each day relative to event
+        quantile_data = []
+
+        for day in range(analysis_window[0], analysis_window[1] + 1):
+            day_data = vol_df[vol_df['days_to_event'] == day]
+
+            if day_data.empty:
+                continue
+
+            day_quantiles = {
+                'days_to_event': day,
+                'count': len(day_data),
+                'mean': day_data['volatility'].mean(),
+                'median': day_data['volatility'].median()
+            }
+
+            # Calculate quantiles
+            for q in quantiles:
+                day_quantiles[f'q{int(q*100)}'] = day_data['volatility'].quantile(q)
+
+            quantile_data.append(day_quantiles)
+
+        # Convert to DataFrame
+        quantile_df = pd.DataFrame(quantile_data)
+
+        # Save data
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.csv")
+        quantile_df.to_csv(csv_filename, index=False)
+        print(f"Saved volatility quantiles to: {csv_filename}")
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot median and mean
+        ax.plot(quantile_df['days_to_event'], quantile_df['median'], 'b-', linewidth=2, label='Median')
+        ax.plot(quantile_df['days_to_event'], quantile_df['mean'], 'g--', linewidth=1.5, label='Mean')
+
+        # Plot selected quantiles
+        quantile_colors = {
+            5: 'lightblue',
+            25: 'skyblue',
+            75: 'sandybrown',
+            95: 'salmon'
+        }
+
+        for q in [5, 25, 75, 95]:
+            if f'q{q}' in quantile_df.columns:
+                ax.plot(quantile_df['days_to_event'], quantile_df[f'q{q}'], '-', 
+                      color=quantile_colors.get(q, 'gray'), alpha=0.7, linewidth=1,
+                      label=f'{q}th Percentile')
+
+        # Add vertical line at event day
+        ax.axvline(x=0, color='r', linestyle='--', label='Event Day')
+
+        ax.set_title('Volatility Quantiles Around Events')
+        ax.set_xlabel('Days Relative to Event')
+        ax.set_ylabel('Annualized Volatility (%)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Save plot
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_volatility_quantiles.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved volatility quantiles plot to: {plot_filename}")
+        plt.close(fig)
+
+        return quantile_df
+
+    def calculate_mean_returns_quantiles(self, results_dir: str, file_prefix: str = "event", 
+                                         return_col: str = 'ret', analysis_window: tuple = (-30, 30),
+                                         lookback_window: int = 10, quantiles: list = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
+        """
+        Calculate mean returns quantiles for each day relative to the event.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str, optional
+            Prefix for output files
+        return_col : str, optional
+            Column name containing returns
+        analysis_window : tuple, optional
+            Window for analysis (days_to_event)
+        lookback_window : int, optional
+            Window size for rolling mean calculation
+        quantiles : list, optional
+            Quantiles to calculate
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with mean returns quantiles
+        """
+        print(f"\n--- Calculating Mean Returns Quantiles ---")
+
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return None
+
+        # Create directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Collect mean returns data for each event and day
+        returns_data = []
+
+        # Get unique event IDs
+        event_ids = self.data.select('event_id').unique().to_series().to_list()
+
+        for event_id in event_ids:
+            # Filter data for this event and analysis window
+            event_data = self.data.filter(
+                (pl.col('event_id') == event_id) &
+                (pl.col('days_to_event') >= analysis_window[0]) &
+                (pl.col('days_to_event') <= analysis_window[1])
+            ).sort('days_to_event')
+
+            # Skip if insufficient data
+            if event_data.height < lookback_window + 1:
+                continue
+
+            # Get returns and days to event
+            returns = event_data.select(pl.col(return_col)).to_series().to_numpy()
+            days_to_event = event_data.select('days_to_event').to_series().to_numpy()
+
+            # Calculate rolling mean returns for each day
+            for i in range(len(returns)):
+                if i < lookback_window:
+                    # Skip if not enough data for lookback
+                    continue
+
+                # Calculate mean return using lookback window
+                mean_return = np.mean(returns[i-lookback_window:i])
+
+                returns_data.append({
+                    'event_id': event_id,
+                    'days_to_event': days_to_event[i],
+                    'mean_return': mean_return
+                })
+
+        # Convert to DataFrame
+        ret_df = pd.DataFrame(returns_data)
+
+        if ret_df.empty:
+            print("Error: No returns data collected.")
+            return None
+
+        # Calculate quantiles for each day relative to event
+        quantile_data = []
+
+        for day in range(analysis_window[0], analysis_window[1] + 1):
+            day_data = ret_df[ret_df['days_to_event'] == day]
+
+            if day_data.empty:
+                continue
+
+            day_quantiles = {
+                'days_to_event': day,
+                'count': len(day_data),
+                'mean': day_data['mean_return'].mean(),
+                'median': day_data['mean_return'].median()
+            }
+
+            # Calculate quantiles
+            for q in quantiles:
+                day_quantiles[f'q{int(q*100)}'] = day_data['mean_return'].quantile(q)
+
+            quantile_data.append(day_quantiles)
+
+        # Convert to DataFrame
+        quantile_df = pd.DataFrame(quantile_data)
+
+        # Save data
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_returns_quantiles.csv")
+        quantile_df.to_csv(csv_filename, index=False)
+        print(f"Saved mean returns quantiles to: {csv_filename}")
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot median and mean
+        ax.plot(quantile_df['days_to_event'], quantile_df['median'] * 100, 'b-', linewidth=2, label='Median')
+        ax.plot(quantile_df['days_to_event'], quantile_df['mean'] * 100, 'g--', linewidth=1.5, label='Mean')
+
+        # Plot selected quantiles
+        quantile_colors = {
+            5: 'lightblue',
+            25: 'skyblue',
+            75: 'sandybrown',
+            95: 'salmon'
+        }
+
+        for q in [5, 25, 75, 95]:
+            if f'q{q}' in quantile_df.columns:
+                ax.plot(quantile_df['days_to_event'], quantile_df[f'q{q}'] * 100, '-', 
+                      color=quantile_colors.get(q, 'gray'), alpha=0.7, linewidth=1,
+                      label=f'{q}th Percentile')
+
+        # Add vertical line at event day
+        ax.axvline(x=0, color='r', linestyle='--', label='Event Day')
+
+        ax.set_title('Mean Returns Quantiles Around Events')
+        ax.set_xlabel('Days Relative to Event')
+        ax.set_ylabel('Mean Return (%)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Save plot
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_returns_quantiles.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved mean returns quantiles plot to: {plot_filename}")
+        plt.close(fig)
+
+        return quantile_df
+
+    def calculate_rolling_sharpe_timeseries(self, results_dir: str, file_prefix: str = "event", 
+                                           return_col: str = 'ret', analysis_window: tuple = (-30, 30),
+                                           sharpe_window: int = 5, annualize: bool = True):
+        """
+        Calculate rolling Sharpe ratio time series around events.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str, optional
+            Prefix for output files
+        return_col : str, optional
+            Column name containing returns
+        analysis_window : tuple, optional
+            Window for analysis (days_to_event)
+        sharpe_window : int, optional
+            Window size for rolling Sharpe calculation
+        annualize : bool, optional
+            Whether to annualize the Sharpe ratio
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with rolling Sharpe ratio time series
+        """
+        print(f"\n--- Calculating Rolling Sharpe Ratio Time Series ---")
+
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return None
+
+        # Create directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Collect Sharpe ratio data for each event and day
+        sharpe_data = []
+
+        # Get unique event IDs
+        event_ids = self.data.select('event_id').unique().to_series().to_list()
+
+        for event_id in event_ids:
+            # Filter data for this event and analysis window
+            event_data = self.data.filter(
+                (pl.col('event_id') == event_id) &
+                (pl.col('days_to_event') >= analysis_window[0]) &
+                (pl.col('days_to_event') <= analysis_window[1])
+            ).sort('days_to_event')
+
+            # Skip if insufficient data
+            if event_data.height < sharpe_window + 1:
+                continue
+
+            # Get returns and days to event
+            returns = event_data.select(pl.col(return_col)).to_series().to_numpy()
+            days_to_event = event_data.select('days_to_event').to_series().to_numpy()
+
+            # Calculate rolling Sharpe ratio for each day
+            for i in range(len(returns)):
+                if i < sharpe_window:
+                    # Skip if not enough data for window
+                    continue
+
+                # Calculate mean and standard deviation of returns in the window
+                window_returns = returns[i-sharpe_window:i]
+                mean_return = np.mean(window_returns)
+                std_return = np.std(window_returns, ddof=1)
+
+                # Calculate Sharpe ratio, handle division by zero
+                if std_return > 0:
+                    sharpe = mean_return / std_return
+
+                    # Annualize if requested
+                    if annualize:
+                        sharpe = sharpe * np.sqrt(252)
+                else:
+                    sharpe = np.nan
+
+                sharpe_data.append({
+                    'event_id': event_id,
+                    'days_to_event': days_to_event[i],
+                    'sharpe_ratio': sharpe
+                    })
+
+            # Convert to DataFrame
+            sharpe_df = pd.DataFrame(sharpe_data)
+
+        if sharpe_df.empty:
+            print("Error: No Sharpe ratio data collected.")
+            return None
+
+        # Calculate average Sharpe ratio for each day relative to event
+        avg_sharpe = sharpe_df.groupby('days_to_event').agg(
+            avg_sharpe=('sharpe_ratio', 'mean'),
+            median_sharpe=('sharpe_ratio', 'median'),
+            std_sharpe=('sharpe_ratio', 'std'),
+            count=('sharpe_ratio', 'count')
+        ).reset_index()
+
+        # Save data
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe.csv")
+        avg_sharpe.to_csv(csv_filename, index=False)
+        print(f"Saved rolling Sharpe ratio data to: {csv_filename}")
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        ax.plot(avg_sharpe['days_to_event'], avg_sharpe['avg_sharpe'], 'b-', linewidth=2, label='Avg. Sharpe Ratio')
+        ax.plot(avg_sharpe['days_to_event'], avg_sharpe['median_sharpe'], 'g--', linewidth=1.5, label='Median Sharpe Ratio')
+
+        # Add vertical line at event day
+        ax.axvline(x=0, color='r', linestyle='--', label='Event Day')
+
+        # Add horizontal line at zero
+        ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+
+        ax.set_title(f'Rolling Sharpe Ratio Around Events ({sharpe_window}-day window)')
+        ax.set_xlabel('Days Relative to Event')
+        ax.set_ylabel('Sharpe Ratio')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Save plot
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_rolling_sharpe.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved rolling Sharpe ratio plot to: {plot_filename}")
+        plt.close(fig)
+
+        return avg_sharpe
+
+    def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event", 
+                                  return_col: str = 'ret', analysis_window: tuple = (-30, 30),
+                                  lookback_window: int = 10, quantiles: list = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
+                                  annualize: bool = True):
+        """
+        Calculate Sharpe ratio quantiles for each day relative to the event.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str, optional
+            Prefix for output files
+        return_col : str, optional
+            Column name containing returns
+        analysis_window : tuple, optional
+            Window for analysis (days_to_event)
+        lookback_window : int, optional
+            Window size for rolling Sharpe calculation
+        quantiles : list, optional
+            Quantiles to calculate
+        annualize : bool, optional
+            Whether to annualize the Sharpe ratio
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with Sharpe ratio quantiles
+        """
+        print(f"\n--- Calculating Sharpe Ratio Quantiles ---")
+
+        if self.data is None:
+            print("Error: No data loaded. Call load_and_prepare_data first.")
+            return None
+
+        # Create directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+
+        # Collect Sharpe ratio data for each event and day
+        sharpe_data = []
+
+        # Get unique event IDs
+        event_ids = self.data.select('event_id').unique().to_series().to_list()
+
+        for event_id in event_ids:
+            # Filter data for this event and analysis window
+            event_data = self.data.filter(
+                (pl.col('event_id') == event_id) &
+                (pl.col('days_to_event') >= analysis_window[0]) &
+                (pl.col('days_to_event') <= analysis_window[1])
+            ).sort('days_to_event')
+
+            # Skip if insufficient data
+            if event_data.height < lookback_window + 1:
+                continue
+
+            # Get returns and days to event
+            returns = event_data.select(pl.col(return_col)).to_series().to_numpy()
+            days_to_event = event_data.select('days_to_event').to_series().to_numpy()
+
+            # Calculate rolling Sharpe ratio for each day
+            for i in range(len(returns)):
+                if i < lookback_window:
+                    # Skip if not enough data for lookback
+                    continue
+
+                # Calculate Sharpe ratio using lookback window
+                window_returns = returns[i-lookback_window:i]
+                mean_return = np.mean(window_returns)
+                std_return = np.std(window_returns, ddof=1)
+
+                # Calculate Sharpe ratio, handle division by zero
+                if std_return > 0:
+                    sharpe = mean_return / std_return
+
+                    # Annualize if requested
+                    if annualize:
+                        sharpe = sharpe * np.sqrt(252)
+                else:
+                    sharpe = np.nan
+
+                sharpe_data.append({
+                    'event_id': event_id,
+                    'days_to_event': days_to_event[i],
+                    'sharpe_ratio': sharpe
+                })
+
+        # Convert to DataFrame
+        sharpe_df = pd.DataFrame(sharpe_data)
+
+        if sharpe_df.empty:
+            print("Error: No Sharpe ratio data collected.")
+            return None
+
+        # Calculate quantiles for each day relative to event
+        quantile_data = []
+
+        for day in range(analysis_window[0], analysis_window[1] + 1):
+            day_data = sharpe_df[sharpe_df['days_to_event'] == day]
+
+            if day_data.empty:
+                continue
+
+            day_quantiles = {
+                'days_to_event': day,
+                'count': len(day_data),
+                'mean': day_data['sharpe_ratio'].mean(),
+                'median': day_data['sharpe_ratio'].median()
+            }
+
+            # Calculate quantiles
+            for q in quantiles:
+                day_quantiles[f'q{int(q*100)}'] = day_data['sharpe_ratio'].quantile(q)
+
+            quantile_data.append(day_quantiles)
+
+        # Convert to DataFrame
+        quantile_df = pd.DataFrame(quantile_data)
+
+        # Save data
+        csv_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.csv")
+        quantile_df.to_csv(csv_filename, index=False)
+        print(f"Saved Sharpe ratio quantiles to: {csv_filename}")
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot median and mean
+        ax.plot(quantile_df['days_to_event'], quantile_df['median'], 'b-', linewidth=2, label='Median')
+        ax.plot(quantile_df['days_to_event'], quantile_df['mean'], 'g--', linewidth=1.5, label='Mean')
+
+        # Plot selected quantiles
+        quantile_colors = {
+            5: 'lightblue',
+            25: 'skyblue',
+            75: 'sandybrown',
+            95: 'salmon'
+        }
+
+        for q in [5, 25, 75, 95]:
+            if f'q{q}' in quantile_df.columns:
+                ax.plot(quantile_df['days_to_event'], quantile_df[f'q{q}'], '-', 
+                      color=quantile_colors.get(q, 'gray'), alpha=0.7, linewidth=1,
+                      label=f'{q}th Percentile')
+
+        # Add vertical line at event day
+        ax.axvline(x=0, color='r', linestyle='--', label='Event Day')
+
+        # Add horizontal line at zero
+        ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+
+        ax.set_title('Sharpe Ratio Quantiles Around Events')
+        ax.set_xlabel('Days Relative to Event')
+        ax.set_ylabel('Sharpe Ratio')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Save plot
+        plot_filename = os.path.join(results_dir, f"{file_prefix}_sharpe_quantiles.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved Sharpe ratio quantiles plot to: {plot_filename}")
+        plt.close(fig)
+
+        return quantile_df
