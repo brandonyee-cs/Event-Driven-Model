@@ -187,12 +187,11 @@ class EventDataLoader:
 
             print(f"Using columns '{ticker_col}' (as ticker) and '{date_col}' (as Event Date) from event file.")
             
-            # Read CSV with explicit date parsing for DD/MM/YYYY format
+            # Read CSV without date parsing
             event_data_raw = pl.read_csv(
                 self.event_path,
                 columns=[ticker_col, date_col],
-                try_parse_dates=True,
-                date_format="%d/%m/%Y"  # Explicitly specify DD/MM/YYYY format
+                try_parse_dates=False  # Don't try to parse dates automatically
             )
             
             event_data_renamed = event_data_raw.rename({ticker_col: 'ticker', date_col: 'Event Date'})
