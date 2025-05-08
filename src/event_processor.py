@@ -974,7 +974,7 @@ class EventAnalysis:
                 )
                 closest_day = abs_days.sort('abs_days_to_event').head(1)
 
-                if closest_day.is_empty() or closest_day.select('abs_days_to_event').item() > 3:
+                if closest_day.is_empty() or closest_day.select('abs_days_to_event').item() > 5:
                     # Skip if no day within 3 days of event
                     print(f"Warning: No close trading days (within ±3 days) found for event {event_id}. Skipping.")
                     continue
