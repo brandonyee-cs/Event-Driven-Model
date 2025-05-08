@@ -965,9 +965,14 @@ class EventAnalysis:
             # Ensure data is sorted by date
             event_data = event_data.sort('date')
             
-            # Get event date for this event
-            event_date = event_data.filter(pl.col('days_to_event') == 0).select('date').item()
-            event_day_idx = event_data.filter(pl.col('days_to_event') == 0).with_row_count().select('row_nr').item()
+            ## Get event date for this event
+            event_day_df = event_data.filter(pl.col('days_to_event') == 0)
+            if event_day_df.is_empty():
+                print(f"Warning: No event day (days_to_event == 0) found for event {event_id}. Skipping.")
+                continue  # Skip to the next event
+            
+            event_date = event_day_df.select('date').item()
+            event_day_idx = event_day_df.with_row_count().select('row_nr').item()
             
             # Skip if event has insufficient data
             if len(event_returns) < 20:  # Minimum data needed for GARCH
