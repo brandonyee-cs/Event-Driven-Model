@@ -739,7 +739,7 @@ class GJRGARCHModel(GARCHModel):
             max_iter: int = 1000) -> 'GJRGARCHModel':
         """
         Fit GJR-GARCH model to return series with improved optimization settings.
-        
+
         Parameters:
         -----------
         returns : array-like
@@ -748,7 +748,7 @@ class GJRGARCHModel(GARCHModel):
             Optimization method for scipy.optimize.minimize (defaults to SLSQP which supports bounds)
         max_iter : int
             Maximum iterations for optimization
-            
+
         Returns:
         --------
         self : GJRGARCHModel
@@ -763,29 +763,29 @@ class GJRGARCHModel(GARCHModel):
             returns_np = returns.to_numpy().flatten()
         else:
             returns_np = np.asarray(returns)
-        
+
         # Remove NaN values
         returns_np = returns_np[~np.isnan(returns_np)]
-        
+
         # Clip extreme values more aggressively 
         std_dev = np.std(returns_np)
         clip_threshold = 5 * std_dev  # More aggressive clipping (changed from 10*std_dev)
         returns_np = np.clip(returns_np, -clip_threshold, clip_threshold)
-        
+
         # Demean returns
         self.mean = np.mean(returns_np)
         returns_centered = returns_np - self.mean
-        
+
         # Initial parameters
         initial_params = [self.omega, self.alpha, self.beta, self.gamma]
-        
+
         # Set optimization options with more robust settings
         options = {
             'maxiter': max_iter,
             'ftol': 1e-8,         # Tighter function tolerance
             'disp': False         # Don't display convergence messages
         }
-        
+
         # Define parameter bounds more carefully
         # (omega, alpha, beta, gamma)
         bounds = [
@@ -794,17 +794,16 @@ class GJRGARCHModel(GARCHModel):
             (0.7, 0.98),          # Beta: high persistence but <1
             (0.01, 0.2)           # Gamma: small positive values
         ]
-        
+
         # Ensure bounds satisfy GARCH stationarity constraint
         # alpha + beta + 0.5*gamma < 1
-        
+
         # Try multiple optimization methods if first fails
         methods_to_try = [method, 'SLSQP', 'L-BFGS-B', 'trust-constr']
         converged = False
-        
+
         for current_method in methods_to_try:
             try:
-                print(f"Attempting {current_method} optimization method...")
                 result = minimize(
                     self._neg_log_likelihood,
                     initial_params,
@@ -813,10 +812,9 @@ class GJRGARCHModel(GARCHModel):
                     bounds=bounds,
                     options=options
                 )
-                
+
                 if result.success:
                     self.omega, self.alpha, self.beta, self.gamma = result.x
-                    print(f"Fitted GJR-GARCH parameters with {current_method}: "
                          f"omega={self.omega:.6f}, alpha={self.alpha:.4f}, "
                          f"beta={self.beta:.4f}, gamma={self.gamma:.4f}")
                     converged = True
@@ -825,7 +823,7 @@ class GJRGARCHModel(GARCHModel):
                     print(f"Warning: {current_method} did not converge: {result.message}")
             except Exception as e:
                 print(f"Error with {current_method} method: {e}")
-        
+
         if not converged:
             print("All optimization methods failed. Using refined initial parameters...")
             # Use more typical values if optimization failed
@@ -833,28 +831,28 @@ class GJRGARCHModel(GARCHModel):
             self.alpha = 0.05
             self.beta = 0.85
             self.gamma = 0.1
-        
+
         # Calculate fitted variance series
         T = len(returns_centered)
         sigma2 = np.zeros(T)
         sigma2[0] = max(1e-6, np.var(returns_centered))
-        
+
         for t in range(1, T):
             # Indicator for negative return
             I_t_minus_1 = 1.0 if returns_centered[t-1] < 0 else 0.0
             sigma2[t] = (self.omega + self.alpha * returns_centered[t-1]**2 + 
                          self.beta * sigma2[t-1] + 
                          self.gamma * I_t_minus_1 * returns_centered[t-1]**2)
-            
+
             # Add safety floor
             sigma2[t] = max(1e-6, sigma2[t])
-        
+
         # Store history
         self.variance_history = sigma2
         self.residuals_history = returns_centered
         self.sigma2_t = sigma2[-1]  # Most recent variance
         self.is_fitted = True
-        
+
         return self
     
     def predict(self, n_steps: int = 1) -> np.ndarray:
