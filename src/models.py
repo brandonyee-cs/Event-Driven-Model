@@ -489,7 +489,7 @@ class GARCHModel:
         T = len(returns)
         sigma2 = np.zeros(T)
 
-        # Initialize with unconditional variance with safety
+        # Initialize with unconditional variance with safety floor
         sigma2[0] = max(1e-6, np.var(returns))
 
         # Calculate variance series with safety checks
@@ -513,7 +513,7 @@ class GARCHModel:
             method: str = 'SLSQP', 
             max_iter: int = 1000) -> 'GARCHModel':
         """
-        Fit GARCH model to return series with improved numerical stability.
+        Fit GARCH model to return series.
         
         Parameters:
         -----------
@@ -521,6 +521,7 @@ class GARCHModel:
             Return series for fitting
         method : str
             Optimization method for scipy.optimize.minimize
+            Must be a method that supports bounds ('SLSQP', 'L-BFGS-B', 'trust-constr')
         max_iter : int
             Maximum iterations for optimization
             
@@ -554,9 +555,13 @@ class GARCHModel:
         # Initial parameters
         initial_params = [self.omega, self.alpha, self.beta]
         
+        # Set optimization method that supports bounds
+        # BFGS doesn't support bounds, so ensure we use SLSQP, L-BFGS-B, or trust-constr
+        if method in ['BFGS', 'CG', 'Newton-CG', 'Nelder-Mead']:
+            method = 'SLSQP'  # Fall back to SLSQP which handles bounds well
+        
         # Fit GARCH parameters using MLE
         try:
-            # Use SLSQP method which is generally more robust for this problem
             result = minimize(
                 self._neg_log_likelihood,
                 initial_params,
@@ -584,7 +589,7 @@ class GARCHModel:
         
         for t in range(1, T):
             sigma2[t] = self.omega + self.alpha * returns_centered[t-1]**2 + self.beta * sigma2[t-1]
-            # Add safety bounds
+            # Add safety floor
             sigma2[t] = max(1e-6, sigma2[t])
         
         # Store history
@@ -704,7 +709,7 @@ class GJRGARCHModel(GARCHModel):
         T = len(returns)
         sigma2 = np.zeros(T)
 
-        # Initialize with unconditional variance with safety
+        # Initialize with unconditional variance with safety floor
         sigma2[0] = max(1e-6, np.var(returns))
 
         # Calculate variance series with safety checks
