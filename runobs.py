@@ -62,7 +62,7 @@ VOL_WINDOW = 5
 VOL_PRE_DAYS = 60
 VOL_POST_DAYS = 60
 VOL_BASELINE_START = -60
-VOL_BASELINE_END = 60
+VOL_BASELINE_END = -11
 VOL_EVENT_START = -2
 VOL_EVENT_END = 2
     
@@ -80,52 +80,6 @@ QUANTILE_LOOKBACK = 10
 ML_WINDOW = 3
 RUN_ML = False
 ML_TEST_SPLIT = 0.2
-
-# GARCH model parameters
-GARCH_PARAMS = {
-    'omega': 0.00001,
-    'alpha': 0.1, 
-    'beta': 0.8,
-    'gamma': 0.05  # Default to GJR-GARCH for asymmetric volatility response
-}
-
-# Three-phase volatility parameters
-VOL_PARAMS = {
-    'k1': 1.5,   # Pre-event volatility multiplier
-    'k2': 2.0,   # Post-event volatility multiplier
-    'delta': 10, # Duration of post-event rising phase
-    'dt1': 5,    # Pre-event rise duration parameter
-    'dt2': 2,    # Post-event rise rate parameter
-    'dt3': 10    # Post-event decay rate parameter
-}
-
-# Event asset parameters
-EVENT_ASSET_PARAMS = {
-    'baseline_mu': 0.001,
-    'rf_rate': 0.0,
-    'risk_aversion': 2.0,
-    'corr_generic': 0.3,
-    'sigma_generic': 0.01,
-    'mu_generic': 0.0005,
-    'transaction_cost_buy': 0.001,
-    'transaction_cost_sell': 0.0005
-}
-
-# Two-risk framework parameters
-TWO_RISK_PARAMS = {
-    'directional_risk_vol': 0.05,
-    'impact_uncertainty_vol': 0.02,
-    'directional_risk_premium': 0.05,
-    'impact_uncertainty_premium': 0.03
-}
-
-# RVR analysis parameters
-RVR_ANALYSIS_WINDOW = (-30, 30)
-RVR_POST_EVENT_DELTA = 10
-RVR_LOOKBACK_WINDOW = 5
-RVR_OPTIMISTIC_BIAS = 0.01
-RVR_MIN_PERIODS = 3
-RVR_VARIANCE_FLOOR = 1e-6
 
 def run_fda_analysis():
     """
@@ -163,13 +117,6 @@ def run_fda_analysis():
         )
         feature_engineer = EventFeatureEngineer(prediction_window=ML_WINDOW)
         analyzer = EventAnalysis(data_loader, feature_engineer)
-        
-        # Set GARCH model parameters
-        analyzer.garch_params = GARCH_PARAMS
-        analyzer.vol_params = VOL_PARAMS
-        analyzer.event_asset_params = EVENT_ASSET_PARAMS
-        analyzer.two_risk_params = TWO_RISK_PARAMS
-        
         print("FDA components initialized.")
 
         # --- Load Data ---
@@ -180,45 +127,6 @@ def run_fda_analysis():
             return False
             
         print(f"FDA data loaded successfully. Shape: {analyzer.data.shape}")
-        
-        # --- Fit GARCH Models ---
-        print("\n--- Fitting GARCH Models for FDA Events ---")
-        analyzer.fit_garch_models(return_col='ret', model_type='gjr')
-        
-        # --- Analyze Volatility with GARCH ---
-        analyzer.analyze_volatility_patterns(
-            results_dir=FDA_RESULTS_DIR,
-            file_prefix=FDA_FILE_PREFIX,
-            return_col='ret'
-        )
-        
-        # --- Analyze Impact Uncertainty ---
-        analyzer.analyze_impact_uncertainty(
-            results_dir=FDA_RESULTS_DIR,
-            file_prefix=FDA_FILE_PREFIX
-        )
-        
-        # --- Analyze Return-to-Variance Ratio (RVR) ---
-        analyzer.analyze_rvr(
-            results_dir=FDA_RESULTS_DIR,
-            file_prefix=FDA_FILE_PREFIX,
-            return_col='ret',
-            analysis_window=RVR_ANALYSIS_WINDOW,
-            post_event_delta=RVR_POST_EVENT_DELTA,
-            lookback_window=RVR_LOOKBACK_WINDOW,
-            optimistic_bias=RVR_OPTIMISTIC_BIAS,
-            min_periods=RVR_MIN_PERIODS,
-            variance_floor=RVR_VARIANCE_FLOOR
-        )
-        
-        # --- Decompose Returns into Risk Components ---
-        analyzer.decompose_returns(
-            results_dir=FDA_RESULTS_DIR,
-            file_prefix=FDA_FILE_PREFIX,
-            return_col='ret',
-            pre_event_window=10,
-            post_event_window=10
-        )
         
         # Setup analysis parameters
         baseline_window = (VOL_BASELINE_START, VOL_BASELINE_END)
@@ -373,13 +281,6 @@ def run_earnings_analysis():
         )
         feature_engineer = EventFeatureEngineer(prediction_window=ML_WINDOW)
         analyzer = EventAnalysis(data_loader, feature_engineer)
-        
-        # Set GARCH model parameters
-        analyzer.garch_params = GARCH_PARAMS
-        analyzer.vol_params = VOL_PARAMS
-        analyzer.event_asset_params = EVENT_ASSET_PARAMS
-        analyzer.two_risk_params = TWO_RISK_PARAMS
-        
         print("Earnings components initialized.")
 
         # --- Load Data ---
@@ -390,45 +291,6 @@ def run_earnings_analysis():
             return False
             
         print(f"Earnings data loaded successfully. Shape: {analyzer.data.shape}")
-        
-        # --- Fit GARCH Models ---
-        print("\n--- Fitting GARCH Models for Earnings Events ---")
-        analyzer.fit_garch_models(return_col='ret', model_type='gjr')
-        
-        # --- Analyze Volatility with GARCH ---
-        analyzer.analyze_volatility_patterns(
-            results_dir=EARNINGS_RESULTS_DIR,
-            file_prefix=EARNINGS_FILE_PREFIX,
-            return_col='ret'
-        )
-        
-        # --- Analyze Impact Uncertainty ---
-        analyzer.analyze_impact_uncertainty(
-            results_dir=EARNINGS_RESULTS_DIR,
-            file_prefix=EARNINGS_FILE_PREFIX
-        )
-        
-        # --- Analyze Return-to-Variance Ratio (RVR) ---
-        analyzer.analyze_rvr(
-            results_dir=EARNINGS_RESULTS_DIR,
-            file_prefix=EARNINGS_FILE_PREFIX,
-            return_col='ret',
-            analysis_window=RVR_ANALYSIS_WINDOW,
-            post_event_delta=RVR_POST_EVENT_DELTA,
-            lookback_window=RVR_LOOKBACK_WINDOW,
-            optimistic_bias=RVR_OPTIMISTIC_BIAS,
-            min_periods=RVR_MIN_PERIODS,
-            variance_floor=RVR_VARIANCE_FLOOR
-        )
-        
-        # --- Decompose Returns into Risk Components ---
-        analyzer.decompose_returns(
-            results_dir=EARNINGS_RESULTS_DIR,
-            file_prefix=EARNINGS_FILE_PREFIX,
-            return_col='ret',
-            pre_event_window=10,
-            post_event_window=10
-        )
         
         # Setup analysis parameters
         baseline_window = (VOL_BASELINE_START, VOL_BASELINE_END)
@@ -546,7 +408,7 @@ def run_earnings_analysis():
         traceback.print_exc()
     
     return False
-    
+'''
 def run_comparison():
     """
     Runs a comparison between FDA and earnings event analysis results using Plotly.
@@ -570,43 +432,42 @@ def run_comparison():
         # Compare volatility patterns
         print("\nComparing volatility patterns...")
         try:
-            # Compare GARCH volatility patterns
-            fda_garch_vol_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_garch_volatility.csv")
-            earnings_garch_vol_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_garch_volatility.csv")
+            fda_vol_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_volatility_rolling_{VOL_WINDOW}d_data.csv")
+            earnings_vol_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_volatility_rolling_{VOL_WINDOW}d_data.csv")
             
-            if not os.path.exists(fda_garch_vol_file) or not os.path.exists(earnings_garch_vol_file):
-                print(f"Warning: GARCH volatility files not found. Skipping GARCH volatility comparison.")
+            if not os.path.exists(fda_vol_file) or not os.path.exists(earnings_vol_file):
+                print(f"Warning: Volatility files not found. Skipping volatility comparison.")
             else:
-                fda_garch_vol = pd.read_csv(fda_garch_vol_file)
-                earnings_garch_vol = pd.read_csv(earnings_garch_vol_file)
+                fda_vol = pd.read_csv(fda_vol_file)
+                earnings_vol = pd.read_csv(earnings_vol_file)
                 
                 # Check if data is valid
-                if fda_garch_vol.empty or earnings_garch_vol.empty:
-                    print("Warning: Empty GARCH volatility data file(s)")
+                if fda_vol.empty or earnings_vol.empty:
+                    print("Warning: Empty volatility data file(s)")
                 else:
                     # Set index for plotting
-                    fda_garch_vol.set_index('days_to_event', inplace=True)
-                    earnings_garch_vol.set_index('days_to_event', inplace=True)
+                    fda_vol.set_index('days_to_event', inplace=True)
+                    earnings_vol.set_index('days_to_event', inplace=True)
                     
                     # Plot comparison using Plotly
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
-                        x=fda_garch_vol.index,
-                        y=fda_garch_vol['avg_annualized_vol'],
+                        x=fda_vol.index,
+                        y=fda_vol['avg_annualized_vol'],
                         mode='lines',
                         name='FDA Approvals',
                         line=dict(color='blue')
                     ))
                     fig.add_trace(go.Scatter(
-                        x=earnings_garch_vol.index,
-                        y=earnings_garch_vol['avg_annualized_vol'],
+                        x=earnings_vol.index,
+                        y=earnings_vol['avg_annualized_vol'],
                         mode='lines',
                         name='Earnings Announcements',
                         line=dict(color='red')
                     ))
                     fig.add_vline(x=0, line=dict(color='black', dash='dash'), annotation_text='Event Day')
                     fig.update_layout(
-                        title='GARCH Volatility Comparison: FDA vs Earnings Events',
+                        title='Volatility Comparison: FDA vs Earnings Events',
                         xaxis_title='Days Relative to Event',
                         yaxis_title='Average Annualized Volatility (%)',
                         showlegend=True,
@@ -616,71 +477,73 @@ def run_comparison():
                     )
                     
                     # Save plot
-                    plot_filename = os.path.join(COMPARISON_DIR, "garch_volatility_comparison.png")
+                    plot_filename = os.path.join(COMPARISON_DIR, "volatility_comparison.png")
                     fig.write_image(plot_filename, format='png', scale=2)
-                    print(f"Saved GARCH volatility comparison plot to: {plot_filename}")
+                    print(f"Saved volatility comparison plot to: {plot_filename}")
                     
                     # Calculate and save volatility stats
                     stats = {
                         'Event Type': ['FDA Approvals', 'Earnings Announcements'],
-                        'Mean GARCH Volatility': [fda_garch_vol['avg_annualized_vol'].mean(), earnings_garch_vol['avg_annualized_vol'].mean()],
-                        'Median GARCH Volatility': [fda_garch_vol['avg_annualized_vol'].median(), earnings_garch_vol['avg_annualized_vol'].median()],
-                        'Max GARCH Volatility': [fda_garch_vol['avg_annualized_vol'].max(), earnings_garch_vol['avg_annualized_vol'].max()]
+                        'Mean Volatility': [fda_vol['avg_annualized_vol'].mean(), earnings_vol['avg_annualized_vol'].mean()],
+                        'Median Volatility': [fda_vol['avg_annualized_vol'].median(), earnings_vol['avg_annualized_vol'].median()],
+                        'Max Volatility': [fda_vol['avg_annualized_vol'].max(), earnings_vol['avg_annualized_vol'].max()]
                     }
                     
                     stats_df = pd.DataFrame(stats)
-                    stats_df.to_csv(os.path.join(COMPARISON_DIR, "garch_volatility_comparison_stats.csv"), index=False)
-                    print("GARCH volatility comparison completed.")
+                    stats_df.to_csv(os.path.join(COMPARISON_DIR, "volatility_comparison_stats.csv"), index=False)
+                    print("Volatility comparison completed.")
                     
                     # Print summary
-                    print("\nGARCH Volatility Summary:")
+                    print("\nVolatility Summary:")
                     for _, row in stats_df.iterrows():
-                        print(f"  {row['Event Type']}: Mean={row['Mean GARCH Volatility']:.2f}, Median={row['Median GARCH Volatility']:.2f}")
+                        print(f"  {row['Event Type']}: Mean={row['Mean Volatility']:.2f}, Median={row['Median Volatility']:.2f}")
         except Exception as e:
-            print(f"Error comparing GARCH volatility: {e}")
+            print(f"Error comparing volatility: {e}")
             traceback.print_exc()
-            
-        # Compare impact uncertainty
-        print("\nComparing impact uncertainty...")
+        
+        # Compare Sharpe ratios
+        print("\nComparing Sharpe ratios...")
         try:
-            fda_impact_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_impact_uncertainty.csv")
-            earnings_impact_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_impact_uncertainty.csv")
+            # Load Sharpe timeseries data
+            fda_sharpe_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_rolling_sharpe_timeseries.csv")
+            earnings_sharpe_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_rolling_sharpe_timeseries.csv")
             
-            if not os.path.exists(fda_impact_file) or not os.path.exists(earnings_impact_file):
-                print(f"Warning: Impact uncertainty files not found. Skipping impact uncertainty comparison.")
+            if not os.path.exists(fda_sharpe_file) or not os.path.exists(earnings_sharpe_file):
+                print(f"Warning: Sharpe ratio files not found. Skipping Sharpe ratio comparison.")
             else:
-                fda_impact = pd.read_csv(fda_impact_file)
-                earnings_impact = pd.read_csv(earnings_impact_file)
+                fda_sharpe = pd.read_csv(fda_sharpe_file)
+                earnings_sharpe = pd.read_csv(earnings_sharpe_file)
                 
                 # Check if data is valid
-                if fda_impact.empty or earnings_impact.empty:
-                    print("Warning: Empty impact uncertainty data file(s)")
+                if fda_sharpe.empty or earnings_sharpe.empty:
+                    print("Warning: Empty Sharpe data file(s)")
                 else:
-                    # Set index for plotting
-                    fda_impact.set_index('days_to_event', inplace=True)
-                    earnings_impact.set_index('days_to_event', inplace=True)
+                    # Convert to DataFrame with days_to_event as index
+                    fda_sharpe.set_index('days_to_event', inplace=True)
+                    earnings_sharpe.set_index('days_to_event', inplace=True)
                     
                     # Plot comparison using Plotly
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
-                        x=fda_impact.index,
-                        y=fda_impact['avg_impact'],
+                        x=fda_sharpe.index,
+                        y=fda_sharpe['sharpe_ratio'],
                         mode='lines',
                         name='FDA Approvals',
                         line=dict(color='blue')
                     ))
                     fig.add_trace(go.Scatter(
-                        x=earnings_impact.index,
-                        y=earnings_impact['avg_impact'],
+                        x=earnings_sharpe.index,
+                        y=earnings_sharpe['sharpe_ratio'],
                         mode='lines',
                         name='Earnings Announcements',
                         line=dict(color='red')
                     ))
                     fig.add_vline(x=0, line=dict(color='black', dash='dash'), annotation_text='Event Day')
+                    fig.add_hline(y=0, line=dict(color='gray', opacity=0.3))
                     fig.update_layout(
-                        title='Impact Uncertainty Comparison: FDA vs Earnings Events',
+                        title='Sharpe Ratio Comparison: FDA vs Earnings Events',
                         xaxis_title='Days Relative to Event',
-                        yaxis_title='Average Impact Uncertainty',
+                        yaxis_title='Sharpe Ratio',
                         showlegend=True,
                         template='plotly_white',
                         width=1000,
@@ -688,198 +551,145 @@ def run_comparison():
                     )
                     
                     # Save plot
-                    plot_filename = os.path.join(COMPARISON_DIR, "impact_uncertainty_comparison.png")
+                    plot_filename = os.path.join(COMPARISON_DIR, "sharpe_ratio_comparison.png")
                     fig.write_image(plot_filename, format='png', scale=2)
-                    print(f"Saved impact uncertainty comparison plot to: {plot_filename}")
+                    print(f"Saved Sharpe ratio comparison plot to: {plot_filename}")
                     
-                    # Calculate and save impact uncertainty stats
-                    stats = {
-                        'Event Type': ['FDA Approvals', 'Earnings Announcements'],
-                        'Mean Impact Uncertainty': [fda_impact['avg_impact'].mean(), earnings_impact['avg_impact'].mean()],
-                        'Median Impact Uncertainty': [fda_impact['avg_impact'].median(), earnings_impact['avg_impact'].median()],
-                        'Max Impact Uncertainty': [fda_impact['avg_impact'].max(), earnings_impact['avg_impact'].max()]
-                    }
+                    # Calculate and save summary statistics
+                    event_window = (-5, 5)  # Days around event for stats
+                    pre_window = (-30, -6)  # Pre-event window
+                    post_window = (6, 30)   # Post-event window
                     
-                    stats_df = pd.DataFrame(stats)
-                    stats_df.to_csv(os.path.join(COMPARISON_DIR, "impact_uncertainty_comparison_stats.csv"), index=False)
-                    print("Impact uncertainty comparison completed.")
+                    def get_window_stats(df, window):
+                        window_data = df.loc[(df.index >= window[0]) & (df.index <= window[1]), 'sharpe_ratio']
+                        if window_data.empty:
+                            return {'mean': np.nan, 'median': np.nan, 'std': np.nan, 'min': np.nan, 'max': np.nan}
+                        return {
+                            'mean': window_data.mean(),
+                            'median': window_data.median(),
+                            'std': window_data.std(),
+                            'min': window_data.min(),
+                            'max': window_data.max()
+                        }
+                    
+                    # Get stats for each window and event type
+                    fda_event_stats = get_window_stats(fda_sharpe, event_window)
+                    fda_pre_stats = get_window_stats(fda_sharpe, pre_window)
+                    fda_post_stats = get_window_stats(fda_sharpe, post_window)
+                    
+                    earnings_event_stats = get_window_stats(earnings_sharpe, event_window)
+                    earnings_pre_stats = get_window_stats(earnings_sharpe, pre_window)
+                    earnings_post_stats = get_window_stats(earnings_sharpe, post_window)
+                    
+                    # Create summary DataFrame
+                    stats = pd.DataFrame({
+                        'FDA_Pre': pd.Series(fda_pre_stats),
+                        'FDA_Event': pd.Series(fda_event_stats),
+                        'FDA_Post': pd.Series(fda_post_stats),
+                        'Earnings_Pre': pd.Series(earnings_pre_stats),
+                        'Earnings_Event': pd.Series(earnings_event_stats),
+                        'Earnings_Post': pd.Series(earnings_post_stats)
+                    })
+                    
+                    stats.to_csv(os.path.join(COMPARISON_DIR, "sharpe_ratio_stats.csv"))
+                    print("Sharpe ratio comparison completed.")
                     
                     # Print summary
-                    print("\nImpact Uncertainty Summary:")
-                    for _, row in stats_df.iterrows():
-                        print(f"  {row['Event Type']}: Mean={row['Mean Impact Uncertainty']:.6f}, Median={row['Median Impact Uncertainty']:.6f}")
+                    print("\nSharpe Ratio Event Window Summary:")
+                    print(f"  FDA Approvals: Mean={fda_event_stats['mean']:.2f}, Median={fda_event_stats['median']:.2f}")
+                    print(f"  Earnings: Mean={earnings_event_stats['mean']:.2f}, Median={earnings_event_stats['median']:.2f}")
         except Exception as e:
-            print(f"Error comparing impact uncertainty: {e}")
+            print(f"Error comparing Sharpe ratios: {e}")
             traceback.print_exc()
-            
-        # Compare RVR
-        print("\nComparing Return-to-Variance Ratio (RVR)...")
+        
+        # Compare feature importance
+        print("\nComparing feature importance...")
         try:
-            fda_rvr_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_rvr_daily.csv")
-            earnings_rvr_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_rvr_daily.csv")
+            # Reference the feature importance files
+            fda_feat_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_feat_importance_TimeSeriesRidge.png")
+            earnings_feat_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_feat_importance_TimeSeriesRidge.png")
             
-            if not os.path.exists(fda_rvr_file) or not os.path.exists(earnings_rvr_file):
-                print(f"Warning: RVR files not found. Skipping RVR comparison.")
+            if not os.path.exists(fda_feat_file) or not os.path.exists(earnings_feat_file):
+                print("Warning: Feature importance files not found. ML analysis may not have been run.")
             else:
-                fda_rvr = pd.read_csv(fda_rvr_file)
-                earnings_rvr = pd.read_csv(earnings_rvr_file)
+                # Create a reference document
+                with open(os.path.join(COMPARISON_DIR, "feature_importance_comparison.txt"), "w") as f:
+                    f.write("Feature Importance Comparison\n")
+                    f.write("============================\n\n")
+                    f.write(f"FDA Feature Importance: {os.path.abspath(fda_feat_file)}\n")
+                    f.write(f"Earnings Feature Importance: {os.path.abspath(earnings_feat_file)}\n\n")
+                    f.write("To compare feature importance visually, please open the two PNG files.\n")
                 
-                # Check if data is valid
-                if fda_rvr.empty or earnings_rvr.empty:
-                    print("Warning: Empty RVR data file(s)")
-                else:
-                    # Set index for plotting
-                    fda_rvr.set_index('days_to_event', inplace=True)
-                    earnings_rvr.set_index('days_to_event', inplace=True)
-                    
-                    # Plot comparison using Plotly
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=fda_rvr.index,
-                        y=fda_rvr['avg_rvr'],
-                        mode='lines',
-                        name='FDA Approvals',
-                        line=dict(color='blue')
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=earnings_rvr.index,
-                        y=earnings_rvr['avg_rvr'],
-                        mode='lines',
-                        name='Earnings Announcements',
-                        line=dict(color='red')
-                    ))
-                    fig.add_vline(x=0, line=dict(color='black', dash='dash'), annotation_text='Event Day')
-                    fig.add_vline(x=RVR_POST_EVENT_DELTA, line=dict(color='green', dash='dash'), annotation_text='End of Post-Event Rising Phase')
-                    fig.update_layout(
-                        title='Return-to-Variance Ratio Comparison: FDA vs Earnings Events',
-                        xaxis_title='Days Relative to Event',
-                        yaxis_title='Average RVR',
-                        showlegend=True,
-                        template='plotly_white',
-                        width=1000,
-                        height=600
-                    )
-                    
-                    # Save plot
-                    plot_filename = os.path.join(COMPARISON_DIR, "rvr_comparison.png")
-                    fig.write_image(plot_filename, format='png', scale=2)
-                    print(f"Saved RVR comparison plot to: {plot_filename}")
-                    
-                    # Compare phase statistics
-                    fda_phase_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_rvr_phase_summary.csv")
-                    earnings_phase_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_rvr_phase_summary.csv")
-                    
-                    if os.path.exists(fda_phase_file) and os.path.exists(earnings_phase_file):
-                        fda_phases = pd.read_csv(fda_phase_file)
-                        earnings_phases = pd.read_csv(earnings_phase_file)
-                        
-                        # Create comparison table
-                        phase_comparison = pd.DataFrame({
-                            'Phase': fda_phases['phase'],
-                            'FDA_Avg_RVR': fda_phases['avg_rvr'],
-                            'Earnings_Avg_RVR': earnings_phases['avg_rvr'],
-                            'Difference': fda_phases['avg_rvr'] - earnings_phases['avg_rvr']
-                        })
-                        
-                        phase_comparison.to_csv(os.path.join(COMPARISON_DIR, "rvr_phase_comparison.csv"), index=False)
-                        print("RVR phase comparison completed.")
-                        
-                        # Print summary
-                        print("\nRVR Phase Comparison:")
-                        for _, row in phase_comparison.iterrows():
-                            print(f"  Phase: {row['Phase']}")
-                            print(f"    FDA: {row['FDA_Avg_RVR']:.4f}, Earnings: {row['Earnings_Avg_RVR']:.4f}, Diff: {row['Difference']:.4f}")
+                print("Feature importance comparison reference created.")
         except Exception as e:
-            print(f"Error comparing RVR: {e}")
-            traceback.print_exc()
-            
+            print(f"Error comparing feature importance: {e}")
+        
         # Create event comparison summary
         print("\nCreating event comparison summary...")
         try:
             # Create a summary document
             with open(os.path.join(COMPARISON_DIR, "event_comparison_summary.txt"), "w") as f:
-                f.write("Event Study Comparison: FDA Approvals vs Earnings Announcements with GARCH\n")
-                f.write("==================================================================\n\n")
+                f.write("Event Study Comparison: FDA Approvals vs Earnings Announcements\n")
+                f.write("===========================================================\n\n")
                 
                 f.write("Overview\n")
                 f.write("--------\n")
                 f.write("This document summarizes the comparison between FDA approval events and\n")
-                f.write("earnings announcement events based on GARCH model analysis using the\n")
-                f.write("two-risk framework: directional news risk and impact uncertainty.\n\n")
+                f.write("earnings announcement events based on their stock price effects.\n\n")
                 
                 f.write("Analysis Parameters\n")
                 f.write("-------------------\n")
                 f.write(f"Window Days: {WINDOW_DAYS}\n")
-                f.write(f"GARCH Parameters: omega={GARCH_PARAMS['omega']}, alpha={GARCH_PARAMS['alpha']}, ")
-                f.write(f"beta={GARCH_PARAMS['beta']}, gamma={GARCH_PARAMS['gamma']}\n")
-                f.write(f"Three-Phase Volatility: k1={VOL_PARAMS['k1']}, k2={VOL_PARAMS['k2']}, ")
-                f.write(f"delta={VOL_PARAMS['delta']}, dt1={VOL_PARAMS['dt1']}, dt2={VOL_PARAMS['dt2']}, dt3={VOL_PARAMS['dt3']}\n")
-                f.write(f"RVR Analysis Window: {RVR_ANALYSIS_WINDOW}\n")
-                f.write(f"RVR Post-Event Delta: {RVR_POST_EVENT_DELTA}\n\n")
+                f.write(f"Volatility Window: {VOL_WINDOW}\n")
+                f.write(f"Volatility Event Window: {VOL_EVENT_START} to {VOL_EVENT_END}\n")
+                f.write(f"Sharpe Window: {SHARPE_WINDOW}\n")
+                f.write(f"Sharpe Analysis Window: {SHARPE_ANALYSIS_START} to {SHARPE_ANALYSIS_END}\n")
+                f.write(f"Quantile Lookback Window: {QUANTILE_LOOKBACK}\n")
+                f.write(f"Quantiles Analyzed: {QUANTILES}\n\n")
                 
-                f.write("Key Findings\n")
-                f.write("-----------\n")
+                f.write("Key Observations\n")
+                f.write("--------------\n")
                 
-                # Try to get GARCH volatility data
+                # Try to get volatility data
                 try:
-                    garch_stats_file = os.path.join(COMPARISON_DIR, "garch_volatility_comparison_stats.csv")
-                    if os.path.exists(garch_stats_file):
-                        garch_stats = pd.read_csv(garch_stats_file)
-                        f.write("GARCH Volatility Impact:\n")
-                        for _, row in garch_stats.iterrows():
-                            f.write(f"- {row['Event Type']}: Mean Volatility = {row['Mean GARCH Volatility']:.2f}% ")
-                            f.write(f"(Median: {row['Median GARCH Volatility']:.2f}%)\n")
+                    vol_stats_file = os.path.join(COMPARISON_DIR, "volatility_comparison_stats.csv")
+                    if os.path.exists(vol_stats_file):
+                        vol_stats = pd.read_csv(vol_stats_file)
+                        f.write("Volatility Impact:\n")
+                        for _, row in vol_stats.iterrows():
+                            f.write(f"- {row['Event Type']}: Mean Volatility = {row['Mean Volatility']:.2f}% (Median: {row['Median Volatility']:.2f}%)\n")
                         f.write("\n")
                 except:
                     pass
                     
-                # Try to get impact uncertainty data
+                # Try to get Sharpe ratio data
                 try:
-                    impact_stats_file = os.path.join(COMPARISON_DIR, "impact_uncertainty_comparison_stats.csv")
-                    if os.path.exists(impact_stats_file):
-                        impact_stats = pd.read_csv(impact_stats_file)
-                        f.write("Impact Uncertainty:\n")
-                        for _, row in impact_stats.iterrows():
-                            f.write(f"- {row['Event Type']}: Mean Impact Uncertainty = {row['Mean Impact Uncertainty']:.6f} ")
-                            f.write(f"(Median: {row['Median Impact Uncertainty']:.6f})\n")
-                        f.write("\n")
-                except:
-                    pass
-                    
-                # Try to get RVR phase data
-                try:
-                    rvr_phase_file = os.path.join(COMPARISON_DIR, "rvr_phase_comparison.csv")
-                    if os.path.exists(rvr_phase_file):
-                        rvr_phases = pd.read_csv(rvr_phase_file)
-                        f.write("Return-to-Variance Ratio by Phase:\n")
-                        for _, row in rvr_phases.iterrows():
-                            f.write(f"- {row['Phase']}: FDA = {row['FDA_Avg_RVR']:.4f}, ")
-                            f.write(f"Earnings = {row['Earnings_Avg_RVR']:.4f}, ")
-                            f.write(f"Difference = {row['Difference']:.4f}\n")
+                    sharpe_stats_file = os.path.join(COMPARISON_DIR, "sharpe_ratio_stats.csv")
+                    if os.path.exists(sharpe_stats_file):
+                        sharpe_stats = pd.read_csv(sharpe_stats_file)
+                        f.write("Sharpe Ratio During Event Window:\n")
+                        f.write(f"- FDA Approvals: Mean = {sharpe_stats.loc[sharpe_stats.index[0], 'FDA_Event']:.2f}\n")
+                        f.write(f"- Earnings Announcements: Mean = {sharpe_stats.loc[sharpe_stats.index[0], 'Earnings_Event']:.2f}\n")
                         f.write("\n")
                 except:
                     pass
                 
                 f.write("Generated Visualizations\n")
                 f.write("-----------------------\n")
-                f.write("- garch_volatility_comparison.png: Compares GARCH-estimated volatility patterns\n")
-                f.write("- impact_uncertainty_comparison.png: Compares impact uncertainty patterns\n")
-                f.write("- rvr_comparison.png: Compares Return-to-Variance Ratio (RVR) patterns\n")
+                f.write("- volatility_comparison.png: Compares average volatility patterns\n")
+                f.write("- sharpe_ratio_comparison.png: Compares Sharpe ratio trends\n")
                 f.write("Additional outputs in FDA and Earnings results directories:\n")
-                f.write("- Return decomposition plots and data\n")
-                f.write("- Volatility and RVR by phase summaries\n\n")
+                f.write("- Volatility quantiles plots\n")
+                f.write("- Mean return quantiles plots\n")
+                f.write("- Sharpe ratio quantiles plots\n\n")
                 
                 f.write("Conclusion\n")
                 f.write("----------\n")
-                f.write("The comparison using GARCH models shows distinct differences between\n")
-                f.write("FDA approval events and earnings announcement events. The two-risk\n")
-                f.write("framework distinguishing between directional news risk and impact\n")
-                f.write("uncertainty reveals how these types of uncertainty resolve at different\n")
-                f.write("times around the events and carry separate risk premia.\n\n")
-                f.write("The Return-to-Variance Ratio (RVR) analysis supports Hypothesis 1 from\n")
-                f.write("the paper, showing that RVR peaks during the post-event rising phase\n")
-                f.write("for both event types, with differences in magnitude reflecting the\n")
-                f.write("distinct nature of the information content in these events.\n")
+                f.write("The comparison shows different market reaction patterns between\n")
+                f.write("FDA approval events and earnings announcement events. While earnings\n")
+                f.write("announcements typically show more immediate but shorter-term effects,\n")
+                f.write("FDA approvals often demonstrate more gradual but potentially longer-lasting\n")
+                f.write("impacts on stock prices and volatility.\n")
             
             print("Event comparison summary created.")
             
@@ -896,6 +706,7 @@ def run_comparison():
         traceback.print_exc()
         print("\n=== Event Comparison Analysis Failed ===")
         return False
+'''
         
 def main():
     # Run FDA analysis
@@ -905,18 +716,18 @@ def main():
     earnings_success = run_earnings_analysis()
     
     # Run comparison if both analyses succeeded
-    if fda_success and earnings_success:
-        comparison_success = run_comparison()
-        if comparison_success:
-            print("\n=== All analyses completed successfully ===")
-        else:
-            print("\n=== Comparison analysis failed, but FDA and earnings analyses completed ===")
-    elif fda_success:
-        print("\n=== Only FDA analysis completed successfully ===")
-    elif earnings_success:
-        print("\n=== Only earnings analysis completed successfully ===")
-    else:
-        print("\n=== Both analyses failed ===")
+    #if fda_success and earnings_success:
+    #    comparison_success = run_comparison()
+    #    if comparison_success:
+    #        print("\n=== All analyses completed successfully ===")
+    #    else:
+    #        print("\n=== Comparison analysis failed, but FDA and earnings analyses completed ===")
+    #elif fda_success:
+    #    print("\n=== Only FDA analysis completed successfully ===")
+    #elif earnings_success:
+    #    print("\n=== Only earnings analysis completed successfully ===")
+    #else:
+    #    print("\n=== Both analyses failed ===")
 
 if __name__ == "__main__":
     main()
