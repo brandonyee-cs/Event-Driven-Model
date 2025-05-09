@@ -575,7 +575,6 @@ class GARCHModel:
                 self.omega, self.alpha, self.beta = result.x
                 print(f"Fitted GARCH parameters: omega={self.omega:.6f}, alpha={self.alpha:.4f}, beta={self.beta:.4f}")
             else:
-                print(f"Warning: GARCH fitting did not converge: {result.message}")
                 # Fall back to initial parameters
                 print("Using initial parameters instead")
         except Exception as e:
@@ -818,7 +817,6 @@ class GJRGARCHModel(GARCHModel):
                     converged = True
                     break
                 else:
-                    print(f"Warning: {current_method} did not converge: {result.message}")
             except Exception as e:
                 print(f"Error with {current_method} method: {e}")
 
