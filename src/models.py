@@ -816,7 +816,6 @@ class GJRGARCHModel(GARCHModel):
                     self.omega, self.alpha, self.beta, self.gamma = result.x
                     converged = True
                     break
-                else:
             except Exception as e:
                 print(f"Error with {current_method} method: {e}")
 
