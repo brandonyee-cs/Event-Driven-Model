@@ -2,7 +2,12 @@ import numpy as np
 import polars as pl # Use Polars for type hints if applicable, but core logic is NumPy/Sklearn
 from sklearn.linear_model import Ridge
 import xgboost as xgb
+from scipy.optimize import minimize
 import warnings
+import numpy as np
+import pandas as pd
+from typing import Tuple, List, Dict, Optional, Union
+
 
 pl.Config.set_engine_affinity(engine="streaming")
 
@@ -430,3 +435,539 @@ class XGBoostDecileModel:
              ensemble_preds = xgb_preds
 
         return ensemble_preds
+
+class GARCHModel:
+    """
+    GARCH(1,1) volatility model for event study analysis.
+    
+    Implements sigma^2_t = omega + alpha * epsilon^2_{t-1} + beta * sigma^2_{t-1}
+    
+    Used for baseline volatility estimation in the event study framework.
+    """
+    def __init__(self, omega: float = 0.00001, alpha: float = 0.05, beta: float = 0.90):
+        """
+        Initialize GARCH(1,1) model with parameters.
+        
+        Parameters:
+        -----------
+        omega : float
+            Long-run average variance (constant term)
+        alpha : float
+            ARCH parameter that measures the impact of past shocks
+        beta : float
+            GARCH parameter that measures the persistence of volatility
+        """
+        self._check_parameters(omega, alpha, beta)
+        self.omega = omega
+        self.alpha = alpha
+        self.beta = beta
+        self.is_fitted = False
+        self.variance_history = None
+        self.residuals_history = None
+        self.sigma2_t = None
+        self.mean = 0.0
+    
+    def _check_parameters(self, omega, alpha, beta):
+        """Validate GARCH parameters for stationarity and positivity."""
+        if omega <= 0:
+            raise ValueError("omega must be positive")
+        if alpha < 0 or beta < 0:
+            raise ValueError("alpha and beta must be non-negative")
+        if alpha + beta >= 1:
+            raise ValueError("alpha + beta must be less than 1 for stationarity")
+    
+    def _neg_log_likelihood(self, params, returns):
+        """
+        Calculate negative log-likelihood for GARCH(1,1) model.
+        Used for parameter estimation.
+        """
+        omega, alpha, beta = params
+        
+        # Safety check
+        if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 1:
+            return np.inf
+        
+        T = len(returns)
+        sigma2 = np.zeros(T)
+        
+        # Initialize with unconditional variance
+        sigma2[0] = np.var(returns)
+        
+        # Calculate variance series
+        for t in range(1, T):
+            sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
+        
+        # Log-likelihood
+        llh = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
+        
+        return -llh
+    
+    def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
+            method: str = 'BFGS', 
+            max_iter: int = 1000) -> 'GARCHModel':
+        """
+        Fit GARCH model to return series.
+        
+        Parameters:
+        -----------
+        returns : array-like
+            Return series for fitting
+        method : str
+            Optimization method for scipy.optimize.minimize
+        max_iter : int
+            Maximum iterations for optimization
+            
+        Returns:
+        --------
+        self : GARCHModel
+            Fitted model
+        """
+        # Convert input to numpy array
+        if isinstance(returns, pl.Series):
+            returns_np = returns.to_numpy()
+        elif isinstance(returns, pl.DataFrame):
+            if returns.width != 1:
+                raise ValueError("If returns is a DataFrame, it must have only one column")
+            returns_np = returns.to_numpy().flatten()
+        else:
+            returns_np = np.asarray(returns)
+        
+        # Remove NaN values
+        returns_np = returns_np[~np.isnan(returns_np)]
+        
+        # Demean returns
+        self.mean = np.mean(returns_np)
+        returns_centered = returns_np - self.mean
+        
+        # Initial parameters
+        initial_params = [self.omega, self.alpha, self.beta]
+        
+        # Fit GARCH parameters using MLE
+        try:
+            result = minimize(
+                self._neg_log_likelihood,
+                initial_params,
+                args=(returns_centered,),
+                method=method,
+                bounds=[(1e-6, 1), (0, 0.5), (0.5, 0.999)],
+                options={'maxiter': max_iter}
+            )
+            
+            if result.success:
+                self.omega, self.alpha, self.beta = result.x
+                print(f"Fitted GARCH parameters: omega={self.omega:.6f}, alpha={self.alpha:.4f}, beta={self.beta:.4f}")
+            else:
+                print(f"Warning: GARCH fitting did not converge: {result.message}")
+                # Fall back to initial parameters
+                print("Using initial parameters instead")
+        except Exception as e:
+            print(f"Error fitting GARCH model: {e}")
+            print("Using initial parameters instead")
+        
+        # Calculate fitted variance series
+        T = len(returns_centered)
+        sigma2 = np.zeros(T)
+        sigma2[0] = np.var(returns_centered)
+        
+        for t in range(1, T):
+            sigma2[t] = self.omega + self.alpha * returns_centered[t-1]**2 + self.beta * sigma2[t-1]
+        
+        # Store history
+        self.variance_history = sigma2
+        self.residuals_history = returns_centered
+        self.sigma2_t = sigma2[-1]  # Most recent variance
+        self.is_fitted = True
+        
+        return self
+    
+    def predict(self, n_steps: int = 1) -> np.ndarray:
+        """
+        Forecast volatility n steps ahead.
+        
+        Parameters:
+        -----------
+        n_steps : int
+            Number of steps to forecast
+            
+        Returns:
+        --------
+        forecasts : np.ndarray
+            Array of variance forecasts
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before prediction")
+        
+        forecasts = np.zeros(n_steps)
+        forecasts[0] = self.omega + self.alpha * self.residuals_history[-1]**2 + self.beta * self.sigma2_t
+        
+        # Multi-step forecasts
+        for h in range(1, n_steps):
+            forecasts[h] = self.omega + (self.alpha + self.beta) * forecasts[h-1]
+        
+        return forecasts
+    
+    def conditional_volatility(self) -> np.ndarray:
+        """Return the conditional volatility (std dev) series from the model fit."""
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before accessing volatility")
+        
+        return np.sqrt(self.variance_history)
+    
+    def volatility_innovations(self) -> np.ndarray:
+        """
+        Calculate volatility innovations (impact uncertainty measure).
+        
+        Returns the difference between realized and expected conditional variance.
+        
+        Returns:
+        --------
+        innovations : np.ndarray
+            Array of volatility innovations
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before calculating innovations")
+        
+        T = len(self.variance_history)
+        innovations = np.zeros(T-1)
+        
+        for t in range(1, T):
+            expected_var_t = self.omega + self.alpha * self.residuals_history[t-2]**2 + self.beta * self.variance_history[t-2]
+            realized_var_t = self.variance_history[t-1]
+            innovations[t-1] = realized_var_t - expected_var_t
+        
+        return innovations
+
+
+class GJRGARCHModel(GARCHModel):
+    """
+    GJR-GARCH model for asymmetric volatility response.
+    
+    Implements sigma^2_t = omega + alpha * epsilon^2_{t-1} + beta * sigma^2_{t-1} + gamma * I_{t-1} * epsilon^2_{t-1}
+    
+    Where I_{t-1} = 1 if epsilon_{t-1} < 0 and 0 otherwise, accounting for leverage effect
+    where negative returns have larger impacts on volatility than positive returns.
+    """
+    def __init__(self, omega: float = 0.00001, alpha: float = 0.03, beta: float = 0.90, gamma: float = 0.04):
+        """
+        Initialize GJR-GARCH model with parameters.
+        
+        Parameters:
+        -----------
+        omega : float
+            Long-run average variance (constant term)
+        alpha : float
+            ARCH parameter
+        beta : float
+            GARCH parameter
+        gamma : float
+            Asymmetry parameter (leverage effect)
+        """
+        # Call parent initialization
+        super().__init__(omega, alpha, beta)
+        self.gamma = gamma
+        # Check extended parameter constraint
+        self._check_gjr_parameters()
+    
+    def _check_gjr_parameters(self):
+        """Validate GJR-GARCH parameters for stationarity and positivity."""
+        if self.alpha + self.beta + 0.5 * self.gamma >= 1:
+            raise ValueError("alpha + beta + 0.5*gamma must be less than 1 for stationarity")
+        if self.gamma < 0:
+            raise ValueError("gamma must be non-negative")
+    
+    def _neg_log_likelihood(self, params, returns):
+        """
+        Calculate negative log-likelihood for GJR-GARCH model.
+        Used for parameter estimation.
+        """
+        omega, alpha, beta, gamma = params
+        
+        # Safety check
+        if (omega <= 0 or alpha < 0 or beta < 0 or gamma < 0 or 
+            alpha + beta + 0.5 * gamma >= 1):
+            return np.inf
+        
+        T = len(returns)
+        sigma2 = np.zeros(T)
+        
+        # Initialize with unconditional variance
+        sigma2[0] = np.var(returns)
+        
+        # Calculate variance series with asymmetry term
+        for t in range(1, T):
+            # Indicator for negative return
+            I_t_minus_1 = 1.0 if returns[t-1] < 0 else 0.0
+            sigma2[t] = (omega + alpha * returns[t-1]**2 + 
+                         beta * sigma2[t-1] + 
+                         gamma * I_t_minus_1 * returns[t-1]**2)
+        
+        # Log-likelihood
+        llh = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
+        
+        return -llh
+    
+    def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
+            method: str = 'BFGS', 
+            max_iter: int = 1000) -> 'GJRGARCHModel':
+        """
+        Fit GJR-GARCH model to return series.
+        
+        Parameters:
+        -----------
+        returns : array-like
+            Return series for fitting
+        method : str
+            Optimization method for scipy.optimize.minimize
+        max_iter : int
+            Maximum iterations for optimization
+            
+        Returns:
+        --------
+        self : GJRGARCHModel
+            Fitted model
+        """
+        # Convert input to numpy array
+        if isinstance(returns, pl.Series):
+            returns_np = returns.to_numpy()
+        elif isinstance(returns, pl.DataFrame):
+            if returns.width != 1:
+                raise ValueError("If returns is a DataFrame, it must have only one column")
+            returns_np = returns.to_numpy().flatten()
+        else:
+            returns_np = np.asarray(returns)
+        
+        # Remove NaN values
+        returns_np = returns_np[~np.isnan(returns_np)]
+        
+        # Demean returns
+        self.mean = np.mean(returns_np)
+        returns_centered = returns_np - self.mean
+        
+        # Initial parameters
+        initial_params = [self.omega, self.alpha, self.beta, self.gamma]
+        
+        # Fit GJR-GARCH parameters using MLE
+        try:
+            result = minimize(
+                self._neg_log_likelihood,
+                initial_params,
+                args=(returns_centered,),
+                method=method,
+                bounds=[(1e-6, 1), (0, 0.3), (0.6, 0.999), (0, 0.3)],
+                options={'maxiter': max_iter}
+            )
+            
+            if result.success:
+                self.omega, self.alpha, self.beta, self.gamma = result.x
+                print(f"Fitted GJR-GARCH parameters: omega={self.omega:.6f}, alpha={self.alpha:.4f}, "
+                      f"beta={self.beta:.4f}, gamma={self.gamma:.4f}")
+            else:
+                print(f"Warning: GJR-GARCH fitting did not converge: {result.message}")
+                # Fall back to initial parameters
+                print("Using initial parameters instead")
+        except Exception as e:
+            print(f"Error fitting GJR-GARCH model: {e}")
+            print("Using initial parameters instead")
+        
+        # Calculate fitted variance series
+        T = len(returns_centered)
+        sigma2 = np.zeros(T)
+        sigma2[0] = np.var(returns_centered)
+        
+        for t in range(1, T):
+            # Indicator for negative return
+            I_t_minus_1 = 1.0 if returns_centered[t-1] < 0 else 0.0
+            sigma2[t] = (self.omega + self.alpha * returns_centered[t-1]**2 + 
+                         self.beta * sigma2[t-1] + 
+                         self.gamma * I_t_minus_1 * returns_centered[t-1]**2)
+        
+        # Store history
+        self.variance_history = sigma2
+        self.residuals_history = returns_centered
+        self.sigma2_t = sigma2[-1]  # Most recent variance
+        self.is_fitted = True
+        
+        return self
+    
+    def predict(self, n_steps: int = 1) -> np.ndarray:
+        """
+        Forecast volatility n steps ahead.
+        
+        For GJR-GARCH, we need to account for the expected value of the asymmetry term.
+        For a zero-mean process, this expectation is approximately 0.5*gamma.
+        
+        Parameters:
+        -----------
+        n_steps : int
+            Number of steps to forecast
+            
+        Returns:
+        --------
+        forecasts : np.ndarray
+            Array of variance forecasts
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before prediction")
+        
+        # For one-step ahead, we know the sign of the last return
+        I_last = 1.0 if self.residuals_history[-1] < 0 else 0.0
+        
+        forecasts = np.zeros(n_steps)
+        forecasts[0] = (self.omega + 
+                       self.alpha * self.residuals_history[-1]**2 + 
+                       self.beta * self.sigma2_t + 
+                       self.gamma * I_last * self.residuals_history[-1]**2)
+        
+        # Multi-step forecasts - approximation using expected value of I_t
+        # For zero-mean process, E[I_t] = 0.5
+        for h in range(1, n_steps):
+            forecasts[h] = self.omega + (self.alpha + 0.5 * self.gamma) * forecasts[h-1] + self.beta * forecasts[h-1]
+        
+        return forecasts
+
+
+class ThreePhaseVolatilityModel:
+    """
+    Three-phase volatility model for event studies as described in the paper.
+    
+    This model combines a baseline GARCH or GJR-GARCH process with event-specific
+    volatility dynamics including pre-event rise, post-event rising phase, and 
+    post-event decay.
+    """
+    def __init__(self, baseline_model: Union[GARCHModel, GJRGARCHModel],
+                 k1: float = 1.5, k2: float = 2.0, 
+                 delta_t1: float = 5.0, delta_t2: float = 3.0, delta_t3: float = 10.0, 
+                 delta: int = 5):
+        """
+        Initialize three-phase volatility model.
+        
+        Parameters:
+        -----------
+        baseline_model : GARCHModel or GJRGARCHModel
+            The base volatility model for estimation
+        k1 : float
+            Pre-event volatility multiplier (peak at event)
+        k2 : float
+            Post-event volatility multiplier (peak after event)
+        delta_t1 : float
+            Pre-event volatility duration parameter
+        delta_t2 : float
+            Post-event rising phase rate parameter
+        delta_t3 : float
+            Post-event decay rate parameter
+        delta : int
+            Duration of post-event rising phase in days
+        """
+        self.baseline_model = baseline_model
+        self.k1 = k1
+        self.k2 = k2
+        self.delta_t1 = delta_t1
+        self.delta_t2 = delta_t2
+        self.delta_t3 = delta_t3
+        self.delta = delta
+        
+        if k1 <= 1:
+            raise ValueError("k1 must be greater than 1")
+        if k2 <= 1:
+            raise ValueError("k2 must be greater than 1")
+        if k2 <= k1:
+            print("Warning: Typically k2 > k1 to reflect higher post-event peak due to secondary uncertainties")
+    
+    def phi1(self, t: int, t_event: int) -> float:
+        """
+        Pre-event rise function.
+        Peaks at t_event with value (k1-1).
+        
+        phi1(t) = (k1-1) * exp(-((t - t_event)^2) / (2 * delta_t1^2))
+        """
+        return (self.k1 - 1) * np.exp(-((t - t_event)**2) / (2 * self.delta_t1**2))
+    
+    def phi2(self, t: int, t_event: int) -> float:
+        """
+        Post-event rising phase function.
+        Starts at 0 at t_event, rises to (k2-1).
+        
+        phi2(t) = (k2-1) * (1 - exp(-(t - t_event) / delta_t2))
+        """
+        return (self.k2 - 1) * (1 - np.exp(-(t - t_event) / self.delta_t2))
+    
+    def phi3(self, t: int, t_event: int) -> float:
+        """
+        Post-event decay function.
+        Starts at (k2-1) at t_event + delta, decays to 0.
+        
+        phi3(t) = (k2-1) * exp(-(t - (t_event + delta)) / delta_t3)
+        """
+        return (self.k2 - 1) * np.exp(-(t - (t_event + self.delta)) / self.delta_t3)
+    
+    def calculate_volatility(self, t: int, t_event: int, sigma_e0: float) -> float:
+        """
+        Calculate volatility at time t relative to event at t_event.
+        
+        Parameters:
+        -----------
+        t : int
+            Current time point
+        t_event : int
+            Event time point
+        sigma_e0 : float
+            Baseline volatility (from GARCH model)
+            
+        Returns:
+        --------
+        sigma_e : float
+            Volatility adjusted for event effect
+        """
+        if t <= t_event:
+            # Pre-event rise
+            phi = self.phi1(t, t_event)
+        elif t <= t_event + self.delta:
+            # Post-event rising phase
+            phi = self.phi2(t, t_event)
+        else:
+            # Post-event decay
+            phi = self.phi3(t, t_event)
+        
+        # Adjust baseline volatility
+        sigma_e = sigma_e0 * (1 + phi)
+        
+        return sigma_e
+    
+    def calculate_volatility_series(self, 
+                                   days_to_event: Union[List[int], np.ndarray], 
+                                   baseline_volatility: Optional[float] = None) -> np.ndarray:
+        """
+        Calculate volatility for a series of days relative to the event.
+        
+        Parameters:
+        -----------
+        days_to_event : array-like
+            Array of days relative to event (e.g., -30 to +30)
+        baseline_volatility : float, optional
+            Baseline volatility. If None, use the fitted GARCH model's unconditional volatility
+            
+        Returns:
+        --------
+        volatility_series : np.ndarray
+            Array of volatilities for each day
+        """
+        if not isinstance(days_to_event, np.ndarray):
+            days_to_event = np.array(days_to_event)
+        
+        # Get baseline volatility if not provided
+        if baseline_volatility is None:
+            if not self.baseline_model.is_fitted:
+                raise RuntimeError("Baseline model must be fitted or baseline_volatility provided")
+            # Use unconditional volatility as baseline
+            sigma_e0 = np.sqrt(self.baseline_model.omega / (1 - self.baseline_model.alpha - self.baseline_model.beta))
+        else:
+            sigma_e0 = baseline_volatility
+        
+        # Calculate volatility for each day
+        volatility_series = np.zeros_like(days_to_event, dtype=float)
+        t_event = 0  # Event is at day 0 in days_to_event
+        
+        for i, t in enumerate(days_to_event):
+            volatility_series[i] = self.calculate_volatility(t, t_event, sigma_e0)
+        
+        return volatility_series

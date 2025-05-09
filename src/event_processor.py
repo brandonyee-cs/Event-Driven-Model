@@ -17,7 +17,7 @@ import pandas as pd  # Required for plotting/CSV saving of some outputs
 # Import shared models (assuming models.py is accessible)
 try:
     # models.py now handles Polars input but uses NumPy internally
-    from src.models import TimeSeriesRidge, XGBoostDecileModel
+    from src.models import TimeSeriesRidge, XGBoostDecileModel, GARCHModel, GJRGARCHModel, ThreePhaseVolatilityModel
 except ImportError:
     print("Error: Could not import models from 'models'.")
     print("Ensure models.py is in the same directory or Python path.")
@@ -2148,3 +2148,661 @@ class EventAnalysis:
             del analysis_data_rvr, phase_summary_df
             gc.collect()
             return rvr_daily_df
+
+    def analyze_three_phase_volatility(self,
+                                    results_dir: str,
+                                    file_prefix: str = "event",
+                                    return_col: str = 'ret',
+                                    analysis_window: Tuple[int, int] = (-30, 30),
+                                    garch_type: str = 'gjr',
+                                    k1: float = 1.5,
+                                    k2: float = 2.0,
+                                    delta_t1: float = 5.0,
+                                    delta_t2: float = 3.0,
+                                    delta_t3: float = 10.0,
+                                    delta: int = 5):
+        """
+        Analyze event volatility using the three-phase volatility model with GARCH baseline.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str
+            Prefix for output files
+        return_col : str
+            Column containing returns
+        analysis_window : Tuple[int, int]
+            Window around event for analysis (days_to_event)
+        garch_type : str
+            Type of GARCH model ('garch' or 'gjr')
+        k1 : float
+            Pre-event volatility multiplier
+        k2 : float
+            Post-event volatility multiplier
+        delta_t1 : float
+            Pre-event volatility duration parameter
+        delta_t2 : float
+            Post-event rising phase rate parameter
+        delta_t3 : float
+            Post-event decay rate parameter
+        delta : int
+            Duration of post-event rising phase in days
+        """
+        print(f"\n--- Analyzing Three-Phase Volatility (GARCH Type: {garch_type}) ---")
+
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or return column missing.")
+            return None
+
+        # Prepare data - extend window for GARCH estimation
+        extended_window = (min(analysis_window[0], -60), max(analysis_window[1], 60))
+        analysis_data = self.data.filter(
+            (pl.col('days_to_event') >= extended_window[0]) &
+            (pl.col('days_to_event') <= extended_window[1])
+        ).sort(['event_id', 'days_to_event'])
+
+        # Check if we have enough data
+        if analysis_data.is_empty():
+            print(f"Error: No data found within extended window {extended_window}")
+            return None
+
+        # Group by event_id and fit GARCH models
+        event_ids = analysis_data.select('event_id').unique().to_series().to_list()
+        print(f"Fitting GARCH models for {len(event_ids)} events...")
+
+        # Sample a few events for detailed analysis
+        if len(event_ids) > 10:
+            np.random.seed(42)
+            sample_event_ids = np.random.choice(event_ids, size=5, replace=False)
+        else:
+            sample_event_ids = event_ids
+
+        # Set up volatility models
+        all_events_results = []
+        sample_events_data = []
+
+        # Process events
+        for event_id in event_ids:
+            event_data = analysis_data.filter(pl.col('event_id') == event_id)
+            event_days = event_data.select('days_to_event').to_series().to_list()
+            event_returns = event_data.select(return_col).to_series()
+
+            # Skip if insufficient data
+            if len(event_returns) < 20:  # Need minimum data for GARCH
+                continue
+            
+            # Initialize and fit GARCH model
+            try:
+                if garch_type.lower() == 'gjr':
+                    garch_model = GJRGARCHModel()
+                else:
+                    garch_model = GARCHModel()
+
+                garch_model.fit(event_returns)
+
+                # Create three-phase volatility model
+                vol_model = ThreePhaseVolatilityModel(
+                    baseline_model=garch_model,
+                    k1=k1, k2=k2, 
+                    delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3,
+                    delta=delta
+                )
+
+                # Calculate volatility for analysis window
+                analysis_days = np.array(range(analysis_window[0], analysis_window[1]+1))
+                predicted_vol = vol_model.calculate_volatility_series(analysis_days)
+
+                # Store results for this event
+                event_results = {
+                    'event_id': event_id,
+                    'days_to_event': analysis_days,
+                    'predicted_volatility': predicted_vol
+                }
+                all_events_results.append(event_results)
+
+                # Save detailed data for sample events
+                if event_id in sample_event_ids:
+                    # Get GARCH volatility and three-phase volatility
+                    garch_vol = np.sqrt(garch_model.variance_history)
+
+                    # Map days in GARCH history to days_to_event
+                    event_days_np = np.array(event_days)
+
+                    # Collect data for this event
+                    sample_data = {
+                        'event_id': event_id,
+                        'garch_days': event_days_np[:len(garch_vol)],
+                        'garch_vol': garch_vol,
+                        'three_phase_days': analysis_days,
+                        'three_phase_vol': predicted_vol,
+                        'returns': event_returns.to_numpy()[:len(garch_vol)],
+                        'ticker': event_data.select('ticker').head(1).item()
+                    }
+                    sample_events_data.append(sample_data)
+
+            except Exception as e:
+                print(f"Error processing event {event_id}: {e}")
+                continue
+            
+        # Aggregate results across events
+        if not all_events_results:
+            print("No valid results to analyze.")
+            return None
+
+        # Create a time series of average volatility
+        aggregated_data = {}
+        for day in range(analysis_window[0], analysis_window[1]+1):
+            day_volatilities = []
+            for event_result in all_events_results:
+                day_idx = np.where(event_result['days_to_event'] == day)[0]
+                if day_idx.size > 0:
+                    day_volatilities.append(event_result['predicted_volatility'][day_idx[0]])
+
+            if day_volatilities:
+                aggregated_data[day] = {
+                    'avg_volatility': np.mean(day_volatilities),
+                    'median_volatility': np.median(day_volatilities),
+                    'std_volatility': np.std(day_volatilities),
+                    'count': len(day_volatilities)
+                }
+
+        # Convert to DataFrame
+        volatility_df = pl.DataFrame({
+            'days_to_event': list(aggregated_data.keys()),
+            'avg_volatility': [data['avg_volatility'] for data in aggregated_data.values()],
+            'median_volatility': [data['median_volatility'] for data in aggregated_data.values()],
+            'std_volatility': [data['std_volatility'] for data in aggregated_data.values()],
+            'event_count': [data['count'] for data in aggregated_data.values()]
+        }).sort('days_to_event')
+
+        # Define volatility phases
+        phases = {
+            'pre_event': (analysis_window[0], -1),
+            'event_window': (0, 0),
+            'post_event_rising': (1, delta),
+            'post_event_decay': (delta+1, analysis_window[1])
+        }
+
+        # Calculate average volatility by phase
+        phase_stats = []
+        for phase_name, (start_day, end_day) in phases.items():
+            phase_data = volatility_df.filter(
+                (pl.col('days_to_event') >= start_day) &
+                (pl.col('days_to_event') <= end_day)
+            )
+
+            if not phase_data.is_empty():
+                avg_vol = phase_data['avg_volatility'].mean()
+                median_vol = phase_data['median_volatility'].mean()
+                phase_stats.append({
+                    'phase': phase_name,
+                    'start_day': start_day,
+                    'end_day': end_day,
+                    'avg_volatility': avg_vol,
+                    'median_volatility': median_vol,
+                    'avg_event_count': phase_data['event_count'].mean()
+                })
+
+        phase_stats_df = pl.DataFrame(phase_stats)
+
+        # Save results
+        try:
+            volatility_df.write_csv(os.path.join(results_dir, f"{file_prefix}_three_phase_volatility.csv"))
+            phase_stats_df.write_csv(os.path.join(results_dir, f"{file_prefix}_volatility_phase_stats.csv"))
+            print(f"Saved volatility analysis to {results_dir}")
+        except Exception as e:
+            print(f"Error saving volatility analysis: {e}")
+
+        # Plotting
+        try:
+            import matplotlib.pyplot as plt
+
+            # Plot average volatility
+            fig, ax = plt.subplots(figsize=(12, 7))
+            volatility_pd = volatility_df.to_pandas()
+
+            ax.plot(volatility_pd['days_to_event'], volatility_pd['avg_volatility'], 
+                    color='blue', linewidth=2, label='Average Volatility')
+
+            # Add phase markers
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            ax.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
+
+            # Highlight phases
+            ax.axvspan(0, delta, color='yellow', alpha=0.2, label='Post-Event Rising Phase')
+
+            ax.set_title(f'Three-Phase Volatility Around Events ({garch_type.upper()}-GARCH Model)')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Volatility')
+            ax.legend(loc='best')
+            ax.grid(True, linestyle=':', alpha=0.7)
+
+            # Add phase statistics annotations
+            for phase in phase_stats_df.to_dicts():
+                midpoint = (phase['start_day'] + phase['end_day']) / 2
+                ax.annotate(
+                    f"{phase['phase']}: {phase['avg_volatility']:.4f}",
+                    xy=(midpoint, phase['avg_volatility']),
+                    xytext=(midpoint, phase['avg_volatility'] * 1.1),
+                    arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                )
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(results_dir, f"{file_prefix}_three_phase_volatility.png"), dpi=200)
+            plt.close()
+
+            # Plot sample events
+            for sample_data in sample_events_data:
+                fig, ax = plt.subplots(figsize=(12, 7))
+
+                # Plot GARCH volatility
+                ax.plot(sample_data['garch_days'], sample_data['garch_vol'], 
+                        color='blue', linewidth=1, alpha=0.7, label='GARCH Volatility')
+
+                # Plot three-phase volatility
+                ax.plot(sample_data['three_phase_days'], sample_data['three_phase_vol'], 
+                        color='red', linewidth=2, label='Three-Phase Model')
+
+                ax.axvline(x=0, color='black', linestyle='--', label='Event Day')
+                ax.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
+
+                ax.set_title(f"Volatility for {sample_data['ticker']} (Event ID: {sample_data['event_id']})")
+                ax.set_xlabel('Days Relative to Event')
+                ax.set_ylabel('Volatility')
+                ax.legend(loc='best')
+                ax.grid(True, linestyle=':', alpha=0.7)
+
+                plt.tight_layout()
+                plt.savefig(os.path.join(results_dir, f"{file_prefix}_volatility_sample_{sample_data['event_id']}.png"), dpi=200)
+                plt.close()
+
+            print(f"Saved volatility plots to {results_dir}")
+
+        except Exception as e:
+            print(f"Error plotting volatility analysis: {e}")
+
+        return volatility_df, phase_stats_df
+
+
+    def analyze_rvr_with_optimistic_bias(self,
+                                       results_dir: str,
+                                       file_prefix: str = "event",
+                                       return_col: str = 'ret',
+                                       analysis_window: Tuple[int, int] = (-30, 30),
+                                       garch_type: str = 'gjr',
+                                       k1: float = 1.5,
+                                       k2: float = 2.0,
+                                       delta_t1: float = 5.0,
+                                       delta_t2: float = 3.0,
+                                       delta_t3: float = 10.0,
+                                       delta: int = 5,
+                                       optimistic_bias: float = 0.01,
+                                       risk_free_rate: float = 0.0):
+        """
+        Analyze Return-to-Variance Ratio with optimistic bias for post-event rising phase.
+        Tests Hypothesis 1 from the paper.
+
+        Parameters:
+        -----------
+        results_dir : str
+            Directory to save results
+        file_prefix : str
+            Prefix for output files
+        return_col : str
+            Column containing returns
+        analysis_window : Tuple[int, int]
+            Window around event for analysis (days_to_event)
+        garch_type : str
+            Type of GARCH model ('garch' or 'gjr')
+        k1 : float
+            Pre-event volatility multiplier
+        k2 : float
+            Post-event volatility multiplier
+        delta_t1 : float
+            Pre-event volatility duration parameter
+        delta_t2 : float
+            Post-event rising phase rate parameter
+        delta_t3 : float
+            Post-event decay rate parameter
+        delta : int
+            Duration of post-event rising phase in days
+        optimistic_bias : float
+            Bias parameter for post-event expected returns (decimal form)
+        risk_free_rate : float
+            Daily risk-free rate
+        """
+        print(f"\n--- Analyzing Return-to-Variance Ratio with Optimistic Bias ---")
+        print(f"Analysis Window: {analysis_window}, Post-Event Rising Phase: 0 to {delta}")
+
+        if self.data is None or return_col not in self.data.columns:
+            print("Error: Data not loaded or return column missing.")
+            return None
+
+        # Define phases
+        phases = {
+            'pre_event': (analysis_window[0], -1),
+            'event_day': (0, 0),
+            'post_event_rising': (1, delta),
+            'post_event_decay': (delta+1, analysis_window[1])
+        }
+
+        # Prepare data
+        extended_window = (min(analysis_window[0], -60), max(analysis_window[1], 60))
+        analysis_data = self.data.filter(
+            (pl.col('days_to_event') >= extended_window[0]) &
+            (pl.col('days_to_event') <= extended_window[1])
+        ).sort(['event_id', 'days_to_event'])
+
+        # Check if we have enough data
+        if analysis_data.is_empty():
+            print(f"Error: No data found within extended window {extended_window}")
+            return None
+
+        # Detect return format (percentage or decimal)
+        sample_returns = analysis_data.select(pl.col(return_col)).sample(n=min(100, analysis_data.height))
+        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item()
+        returns_in_pct = avg_abs_return > 0.05
+
+        print(f"Detected returns format: {'Percentage form' if returns_in_pct else 'Decimal form'} (avg abs: {avg_abs_return:.4f})")
+
+        # Convert returns if necessary and calculate expected returns with bias
+        if returns_in_pct:
+            print("Converting percentage returns to decimal form for RVR calculation")
+            analysis_data = analysis_data.with_columns(
+                (pl.col(return_col) / 100).alias('decimal_return')
+            )
+            return_col_for_calc = 'decimal_return'
+            # Adjust bias to decimal form
+            adj_bias = optimistic_bias / 100
+        else:
+            return_col_for_calc = return_col
+            adj_bias = optimistic_bias
+
+        # Add expected return with bias for post-event rising phase
+        analysis_data = analysis_data.with_columns([
+            pl.col(return_col_for_calc).alias('expected_return'),
+            pl.lit(np.nan).cast(pl.Float64).alias('volatility'),
+            pl.lit(np.nan).cast(pl.Float64).alias('rvr')
+        ])
+
+        # Group by event_id
+        event_ids = analysis_data.select('event_id').unique().to_series().to_list()
+        print(f"Processing {len(event_ids)} events...")
+
+        # Process events to estimate volatility and calculate RVR
+        all_rvr_data = []
+
+        for event_id in event_ids:
+            try:
+                # Get data for this event
+                event_data = analysis_data.filter(pl.col('event_id') == event_id)
+                event_days = event_data.select('days_to_event').to_series().to_list()
+                event_returns = event_data.select(return_col_for_calc).to_series()
+
+                # Skip if insufficient data
+                if len(event_returns) < 30:  # Need minimum data for GARCH
+                    continue
+                
+                # Fit GARCH model
+                if garch_type.lower() == 'gjr':
+                    garch_model = GJRGARCHModel()
+                else:
+                    garch_model = GARCHModel()
+
+                garch_model.fit(event_returns)
+
+                # Create three-phase volatility model
+                vol_model = ThreePhaseVolatilityModel(
+                    baseline_model=garch_model,
+                    k1=k1, k2=k2, 
+                    delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3,
+                    delta=delta
+                )
+
+                # Calculate expected returns
+                mean_return = np.mean(event_returns.to_numpy())
+
+                # Add optimistic bias for post-event rising phase
+                expected_returns = np.array([
+                    mean_return + adj_bias if phases['post_event_rising'][0] <= day <= phases['post_event_rising'][1] else mean_return
+                    for day in event_days
+                ])
+
+                # Calculate volatility for each day
+                volatility = [vol_model.calculate_volatility(day, 0, np.sqrt(garch_model.sigma2_t)) 
+                              for day in event_days]
+
+                # Calculate RVR
+                rvr = expected_returns / (np.array(volatility)**2 + 1e-10)  # Add small value to avoid division by zero
+
+                # Create result dataset
+                event_rvr_data = pd.DataFrame({
+                    'event_id': [event_id] * len(event_days),
+                    'days_to_event': event_days,
+                    'expected_return': expected_returns,
+                    'volatility': volatility,
+                    'rvr': rvr
+                })
+
+                all_rvr_data.append(event_rvr_data)
+
+            except Exception as e:
+                print(f"Error processing event {event_id}: {e}")
+                continue
+            
+        # Combine all events
+        if not all_rvr_data:
+            print("No valid results to analyze.")
+            return None
+
+        combined_rvr = pd.concat(all_rvr_data, ignore_index=True)
+
+        # Aggregate by days_to_event
+        agg_rvr = combined_rvr.groupby('days_to_event').agg({
+            'expected_return': ['mean', 'median'],
+            'volatility': ['mean', 'median'],
+            'rvr': ['mean', 'median', 'count']
+        }).reset_index()
+
+        # Flatten column names
+        agg_rvr.columns = ['days_to_event', 'mean_expected_return', 'median_expected_return',
+                           'mean_volatility', 'median_volatility', 'mean_rvr', 'median_rvr', 'count']
+
+        # Convert to Polars DataFrame
+        rvr_df = pl.from_pandas(agg_rvr)
+
+        # Calculate average RVR by phase
+        phase_stats = []
+        for phase_name, (start_day, end_day) in phases.items():
+            phase_data = rvr_df.filter(
+                (pl.col('days_to_event') >= start_day) &
+                (pl.col('days_to_event') <= end_day)
+            )
+
+            if not phase_data.is_empty():
+                avg_rvr = phase_data['mean_rvr'].mean()
+                median_rvr = phase_data['median_rvr'].mean()
+                avg_vol = phase_data['mean_volatility'].mean()
+                avg_ret = phase_data['mean_expected_return'].mean()
+
+                phase_stats.append({
+                    'phase': phase_name,
+                    'start_day': start_day,
+                    'end_day': end_day,
+                    'avg_rvr': avg_rvr,
+                    'median_rvr': median_rvr,
+                    'avg_volatility': avg_vol,
+                    'avg_expected_return': avg_ret,
+                    'avg_event_count': phase_data['count'].mean()
+                })
+
+        phase_stats_df = pl.DataFrame(phase_stats)
+
+        # Print phase RVR statistics
+        print("\nRVR by Phase:")
+        phases_to_highlight = ['pre_event', 'post_event_rising', 'post_event_decay']
+        for row in phase_stats_df.filter(pl.col('phase').is_in(phases_to_highlight)).iter_rows(named=True):
+            print(f"Phase: {row['phase']} ({row['start_day']} to {row['end_day']} days)")
+            print(f"  Avg RVR: {row['avg_rvr']:.4f}, Median RVR: {row['median_rvr']:.4f}")
+            print(f"  Avg Volatility: {row['avg_volatility']:.4f}, Avg Expected Return: {row['avg_expected_return']:.6f}")
+
+        # Test Hypothesis 1 - Does RVR peak during post-event rising phase?
+        pre_event_rvr = phase_stats_df.filter(pl.col('phase') == 'pre_event')['avg_rvr'].item()
+        post_rising_rvr = phase_stats_df.filter(pl.col('phase') == 'post_event_rising')['avg_rvr'].item()
+        post_decay_rvr = phase_stats_df.filter(pl.col('phase') == 'post_event_decay')['avg_rvr'].item()
+
+        h1_result = post_rising_rvr > pre_event_rvr and post_rising_rvr > post_decay_rvr
+
+        print("\nHypothesis 1 Test:")
+        print(f"Does RVR peak during post-event rising phase? {'YES' if h1_result else 'NO'}")
+        print(f"  Pre-event RVR: {pre_event_rvr:.4f}")
+        print(f"  Post-event Rising RVR: {post_rising_rvr:.4f}")
+        print(f"  Post-event Decay RVR: {post_decay_rvr:.4f}")
+
+        # Save results
+        try:
+            rvr_df.write_csv(os.path.join(results_dir, f"{file_prefix}_rvr_timeseries.csv"))
+            phase_stats_df.write_csv(os.path.join(results_dir, f"{file_prefix}_rvr_phase_stats.csv"))
+
+            # Save hypothesis test results
+            h1_df = pl.DataFrame({
+                'hypothesis': ['H1: RVR peaks during post-event rising phase'],
+                'result': [h1_result],
+                'pre_event_rvr': [pre_event_rvr],
+                'post_rising_rvr': [post_rising_rvr],
+                'post_decay_rvr': [post_decay_rvr]
+            })
+            h1_df.write_csv(os.path.join(results_dir, f"{file_prefix}_hypothesis1_test.csv"))
+
+            print(f"Saved RVR analysis to {results_dir}")
+        except Exception as e:
+            print(f"Error saving RVR analysis: {e}")
+
+        # Plotting
+        try:
+            import matplotlib.pyplot as plt
+
+            # Plot RVR time series
+            fig, ax = plt.subplots(figsize=(12, 7))
+            rvr_pd = rvr_df.to_pandas()
+
+            ax.plot(rvr_pd['days_to_event'], rvr_pd['mean_rvr'], 
+                    color='blue', linewidth=2, label='Mean RVR')
+
+            # Add phase markers
+            ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+            ax.axvline(x=delta, color='green', linestyle=':', 
+                       label=f'End Rising Phase (t+{delta})')
+
+            # Highlight phases
+            ax.axvspan(phases['post_event_rising'][0], phases['post_event_rising'][1], 
+                       color='yellow', alpha=0.2, label='Post-Event Rising Phase')
+
+            ax.set_title(f'Return-to-Variance Ratio with Optimistic Bias = {optimistic_bias*100 if not returns_in_pct else optimistic_bias}%')
+            ax.set_xlabel('Days Relative to Event')
+            ax.set_ylabel('Return-to-Variance Ratio')
+            ax.legend(loc='best')
+            ax.grid(True, linestyle=':', alpha=0.7)
+
+            # Add phase statistics annotations
+            for phase in phase_stats_df.to_dicts():
+                midpoint = (phase['start_day'] + phase['end_day']) / 2
+                ax.annotate(
+                    f"{phase['phase']}: {phase['avg_rvr']:.4f}",
+                    xy=(midpoint, phase['avg_rvr']),
+                    xytext=(midpoint, phase['avg_rvr'] * 1.1),
+                    arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                )
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(results_dir, f"{file_prefix}_rvr_timeseries.png"), dpi=200)
+            plt.close()
+
+            # Plot volatility and expected returns
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12), sharex=True)
+
+            # Volatility
+            ax1.plot(rvr_pd['days_to_event'], rvr_pd['mean_volatility'], 
+                     color='red', linewidth=2, label='Mean Volatility')
+            ax1.set_title('Volatility Around Events')
+            ax1.set_ylabel('Volatility')
+            ax1.legend(loc='best')
+            ax1.grid(True, linestyle=':', alpha=0.7)
+
+            # Expected returns
+            ax2.plot(rvr_pd['days_to_event'], rvr_pd['mean_expected_return'], 
+                     color='green', linewidth=2, label='Mean Expected Return')
+            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+
+            # Add phase markers to both plots
+            for ax in [ax1, ax2]:
+                ax.axvline(x=0, color='red', linestyle='--', label='Event Day')
+                ax.axvline(x=delta, color='green', linestyle=':', 
+                          label=f'End Rising Phase (t+{delta})')
+                ax.axvspan(phases['post_event_rising'][0], phases['post_event_rising'][1], 
+                          color='yellow', alpha=0.2, label='Post-Event Rising Phase')
+
+            ax2.set_title('Expected Returns Around Events')
+            ax2.set_xlabel('Days Relative to Event')
+            ax2.set_ylabel('Expected Return')
+            ax2.legend(loc='best')
+            ax2.grid(True, linestyle=':', alpha=0.7)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(results_dir, f"{file_prefix}_volatility_returns.png"), dpi=200)
+            plt.close()
+
+            # Plot RVR by phase - bar chart
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            phases_to_plot = phase_stats_df.filter(pl.col('phase').is_in(phases_to_highlight))
+            phases_to_plot = phases_to_plot.with_columns(
+                pl.col('phase').cast(pl.Categorical).cast(pl.Utf8)
+            )
+
+            phases_pd = phases_to_plot.to_pandas()
+
+            # Define colors
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+            hatches = ['/', '\\', 'x']
+
+            # Create bar chart
+            bars = ax.bar(phases_pd['phase'], phases_pd['avg_rvr'], 
+                          color=colors, alpha=0.7)
+
+            # Add hatching
+            for bar, hatch in zip(bars, hatches):
+                bar.set_hatch(hatch)
+
+            # Add value labels
+            for i, v in enumerate(phases_pd['avg_rvr']):
+                ax.text(i, v + 0.02, f"{v:.4f}", ha='center', fontweight='bold')
+
+            # Highlight the highest bar
+            max_idx = phases_pd['avg_rvr'].argmax()
+            bars[max_idx].set_edgecolor('red')
+            bars[max_idx].set_linewidth(2)
+
+            ax.set_title('Return-to-Variance Ratio by Phase')
+            ax.set_ylabel('Average RVR')
+            ax.grid(True, axis='y', linestyle=':', alpha=0.7)
+
+            # Add hypothesis test result
+            result_text = "Hypothesis 1 SUPPORTED: RVR peaks during post-event rising phase" if h1_result else "Hypothesis 1 NOT SUPPORTED"
+            ax.text(0.5, -0.1, result_text, ha='center', transform=ax.transAxes, 
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8),
+                    fontweight='bold', color='green' if h1_result else 'red')
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(results_dir, f"{file_prefix}_rvr_by_phase.png"), dpi=200)
+            plt.close()
+
+            print(f"Saved RVR plots to {results_dir}")
+
+        except Exception as e:
+            print(f"Error plotting RVR analysis: {e}")
+
+        return rvr_df, phase_stats_df
