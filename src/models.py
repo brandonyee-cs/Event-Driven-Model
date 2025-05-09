@@ -815,8 +815,6 @@ class GJRGARCHModel(GARCHModel):
 
                 if result.success:
                     self.omega, self.alpha, self.beta, self.gamma = result.x
-                         f"omega={self.omega:.6f}, alpha={self.alpha:.4f}, "
-                         f"beta={self.beta:.4f}, gamma={self.gamma:.4f}")
                     converged = True
                     break
                 else:
