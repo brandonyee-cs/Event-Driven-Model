@@ -478,35 +478,42 @@ class GARCHModel:
     
     def _neg_log_likelihood(self, params, returns):
         """
-        Calculate negative log-likelihood for GARCH(1,1) model.
-        Used for parameter estimation.
+        Calculate negative log-likelihood for GARCH(1,1) model with improved numerical stability.
         """
         omega, alpha, beta = params
-        
-        # Safety check
+
+        # Safety check for parameters
         if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 1:
             return np.inf
-        
+
         T = len(returns)
         sigma2 = np.zeros(T)
-        
-        # Initialize with unconditional variance
-        sigma2[0] = np.var(returns)
-        
-        # Calculate variance series
+
+        # Initialize with unconditional variance with safety
+        sigma2[0] = max(1e-6, np.var(returns))
+
+        # Calculate variance series with safety checks
         for t in range(1, T):
+            # Calculate next variance
             sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
-        
-        # Log-likelihood
-        llh = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
-        
-        return -llh
+
+            # Add lower bound to prevent numerical issues
+            sigma2[t] = max(1e-6, sigma2[t])
+
+        # Calculate log-likelihood with safety checks
+        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
+
+        # If we get an invalid value, return infinity
+        if not np.isfinite(log_likelihood):
+            return np.inf
+
+        return -log_likelihood
     
     def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
-            method: str = 'BFGS', 
+            method: str = 'SLSQP', 
             max_iter: int = 1000) -> 'GARCHModel':
         """
-        Fit GARCH model to return series.
+        Fit GARCH model to return series with improved numerical stability.
         
         Parameters:
         -----------
@@ -535,6 +542,11 @@ class GARCHModel:
         # Remove NaN values
         returns_np = returns_np[~np.isnan(returns_np)]
         
+        # Clip extreme values to prevent numerical issues
+        std_dev = np.std(returns_np)
+        clip_threshold = 10 * std_dev
+        returns_np = np.clip(returns_np, -clip_threshold, clip_threshold)
+        
         # Demean returns
         self.mean = np.mean(returns_np)
         returns_centered = returns_np - self.mean
@@ -544,6 +556,7 @@ class GARCHModel:
         
         # Fit GARCH parameters using MLE
         try:
+            # Use SLSQP method which is generally more robust for this problem
             result = minimize(
                 self._neg_log_likelihood,
                 initial_params,
@@ -567,10 +580,12 @@ class GARCHModel:
         # Calculate fitted variance series
         T = len(returns_centered)
         sigma2 = np.zeros(T)
-        sigma2[0] = np.var(returns_centered)
+        sigma2[0] = max(1e-6, np.var(returns_centered))
         
         for t in range(1, T):
             sigma2[t] = self.omega + self.alpha * returns_centered[t-1]**2 + self.beta * sigma2[t-1]
+            # Add safety bounds
+            sigma2[t] = max(1e-6, sigma2[t])
         
         # Store history
         self.variance_history = sigma2
@@ -677,35 +692,43 @@ class GJRGARCHModel(GARCHModel):
     
     def _neg_log_likelihood(self, params, returns):
         """
-        Calculate negative log-likelihood for GJR-GARCH model.
-        Used for parameter estimation.
+        Calculate negative log-likelihood for GJR-GARCH model with improved numerical stability.
         """
         omega, alpha, beta, gamma = params
-        
-        # Safety check
+
+        # Safety check for parameters
         if (omega <= 0 or alpha < 0 or beta < 0 or gamma < 0 or 
             alpha + beta + 0.5 * gamma >= 1):
             return np.inf
-        
+
         T = len(returns)
         sigma2 = np.zeros(T)
-        
-        # Initialize with unconditional variance
-        sigma2[0] = np.var(returns)
-        
-        # Calculate variance series with asymmetry term
+
+        # Initialize with unconditional variance with safety
+        sigma2[0] = max(1e-6, np.var(returns))
+
+        # Calculate variance series with safety checks
         for t in range(1, T):
             # Indicator for negative return
             I_t_minus_1 = 1.0 if returns[t-1] < 0 else 0.0
+
+            # Calculate next variance
             sigma2[t] = (omega + alpha * returns[t-1]**2 + 
                          beta * sigma2[t-1] + 
                          gamma * I_t_minus_1 * returns[t-1]**2)
-        
-        # Log-likelihood
-        llh = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
-        
-        return -llh
-    
+
+            # Add lower bound to prevent numerical issues
+            sigma2[t] = max(1e-6, sigma2[t])
+
+        # Calculate log-likelihood with safety checks
+        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
+
+        # If we get an invalid value, return infinity
+        if not np.isfinite(log_likelihood):
+            return np.inf
+
+        return -log_likelihood
+
     def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
             method: str = 'BFGS', 
             max_iter: int = 1000) -> 'GJRGARCHModel':
