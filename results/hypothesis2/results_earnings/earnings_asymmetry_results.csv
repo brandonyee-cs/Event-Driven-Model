@@ -1,0 +1,2 @@
+avg_diff_negative,avg_diff_positive,diff_of_diffs,t_stat,p_value,n_negative,n_positive,significant,hypothesis_supported
+-0.005898642326645484,-0.008163780167904129,0.0022651378412586447,0.4556214771218989,0.6499655895316054,34,46,0,0

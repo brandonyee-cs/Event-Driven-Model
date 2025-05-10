@@ -1,0 +1,4 @@
+sub_hypothesis,result,details
+H2.1: Pre-event volatility innovations predict returns,true,1/6 significant tests
+H2.2: Post-event volatility persistence extends elevated returns,true,2/2 significant tests
+H2.3: Asymmetric volatility response correlates with price adjustment,false,"p=0.6500, diff=0.002265"
