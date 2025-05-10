@@ -350,23 +350,38 @@ class Hypothesis2Analyzer:
                     X = np.array(X_data).reshape(-1, 1)
                     y = np.array(y_data)
                     
-                    # Simple OLS regression
-                    slope, intercept, r_value, p_value, std_err = stats.linregress(X.flatten(), y)
-                    
-                    # Store results
-                    regression_results[model_type][window] = {
-                        'slope': slope,
-                        'intercept': intercept,
-                        'r_squared': r_value**2,
-                        'p_value': p_value,
-                        'std_err': std_err,
-                        'n_samples': len(X),
-                        'X_data': X,
-                        'y_data': y
-                    }
-                    
-                    print(f"  Regression results: slope={slope:.4f}, R²={r_value**2:.4f}, p={p_value:.4f}, n={len(X)}")
+                    # Add this new check here
+                    if np.var(X) < 1e-10:  # Check for effectively zero variance
+                        print(f"  Warning: Insufficient variance in X data for {model_type} innovations and {window}-day returns.")
+                        print(f"  X variance: {np.var(X):.10f}, X range: [{np.min(X):.6f}, {np.max(X):.6f}]")
+                        regression_results[model_type][window] = {
+                            'slope': 0,
+                            'intercept': np.mean(y) if len(y) > 0 else 0,
+                            'r_squared': 0,
+                            'p_value': 1.0,
+                            'std_err': 0,
+                            'n_samples': len(X),
+                            'error': 'Insufficient X variance for regression'
+                        }
+                    else:
+                        # Simple OLS regression - existing code
+                        slope, intercept, r_value, p_value, std_err = stats.linregress(X.flatten(), y)
+                        
+                        # Store results - existing code
+                        regression_results[model_type][window] = {
+                            'slope': slope,
+                            'intercept': intercept,
+                            'r_squared': r_value**2,
+                            'p_value': p_value,
+                            'std_err': std_err,
+                            'n_samples': len(X),
+                            'X_data': X,
+                            'y_data': y
+                        }
+                        
+                        print(f"  Regression results: slope={slope:.4f}, R²={r_value**2:.4f}, p={p_value:.4f}, n={len(X)}")
                 else:
+                    # Keep existing code for insufficient data case
                     print(f"  Insufficient data for regression (n={len(X_data)})")
                     regression_results[model_type][window] = None
         
