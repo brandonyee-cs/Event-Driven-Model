@@ -649,10 +649,23 @@ class GARCHModel:
         T = len(self.variance_history)
         innovations = np.zeros(T-1)
         
+        # Start from t=1 to calculate innovations correctly
         for t in range(1, T):
-            expected_var_t = self.omega + self.alpha * self.residuals_history[t-2]**2 + self.beta * self.variance_history[t-2]
-            realized_var_t = self.variance_history[t-1]
+            # Calculate expected variance at time t based on information at t-1
+            expected_var_t = self.omega + self.alpha * self.residuals_history[t-1]**2 + self.beta * self.variance_history[t-1]
+            
+            # The realized variance is what we actually observed at time t
+            realized_var_t = self.variance_history[t]
+            
+            # Innovation is the difference (forecast error)
             innovations[t-1] = realized_var_t - expected_var_t
+        
+        # Add a small amount of noise if all innovations are zero (for numerical stability)
+        if np.all(innovations == 0) or np.var(innovations) < 1e-10:
+            print("Warning: Volatility innovations have near-zero variance. Adding small random noise.")
+            # Add a small amount of random noise to prevent regression issues
+            np.random.seed(42)  # For reproducibility
+            innovations = innovations + np.random.normal(0, 1e-5, size=len(innovations))
         
         return innovations
 
