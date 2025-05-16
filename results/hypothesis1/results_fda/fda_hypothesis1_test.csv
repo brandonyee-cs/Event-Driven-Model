@@ -1,2 +1,2 @@
-hypothesis,result,pre_event_rvr,post_rising_rvr,post_decay_rvr
-H1: RVR peaks during post-event rising phase,true,3.030808913184857,19.3497521575021,1.538854126150694
+hypothesis,result,rvr_supported,sharpe_supported,pre_event_rvr,post_rising_rvr,post_decay_rvr,pre_event_sharpe,post_rising_sharpe,post_decay_sharpe,significant_rvr_tests,significant_sharpe_tests
+H1: Risk-adjusted returns peak during post-event rising phase,true,true,true,3.030808913184857,19.3497521575021,1.538854126150694,0.21883038638095548,0.7669559813911181,0.09017288439415769,2,2
