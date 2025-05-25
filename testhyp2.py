@@ -1,5 +1,9 @@
 # testhyp2.py
-# Aligned with the paper: "Modeling Equilibrium Asset Pricing Around Events..."
+# Script to test Hypothesis 2:
+# GARCH-estimated conditional volatility innovations serve as an effective proxy for impact uncertainty.
+#   2.1: Pre-event volatility innovations predict subsequent returns.
+#   2.2: Post-event volatility persistence extends elevated expected returns.
+#   2.3: Asymmetric volatility response (GJR-GARCH gamma) correlates with asymmetric price adjustment.
 
 import pandas as pd
 import numpy as np
@@ -7,26 +11,34 @@ import os
 import sys
 import traceback
 import polars as pl
-from typing import List, Tuple, Dict, Any
-from scipy import stats
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FormatStrFormatter
+from scipy import stats
+from typing import List, Tuple, Dict, Optional, Any
+from datetime import timedelta
 
 # --- Configuration ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path: sys.path.append(current_dir)
+
+project_root = os.path.dirname(current_dir)
+src_path = os.path.join(project_root, 'src')
+if src_path not in sys.path:
+    sys.path.append(src_path)
+
 try:
-    from src.event_processor import EventDataLoader, EventFeatureEngineer, EventAnalysis
-    from src.models import GARCHModel, GJRGARCHModel # ThreePhaseVolatilityModel not directly used by H2 tests
-    print("Successfully imported Event processor classes and models.")
+    from models import UnifiedVolatilityModel # Using GJR-GARCH component
+    # Data loading similar to testhyp1.py
+    print("Successfully imported models from models.py.")
 except ImportError as e:
     print(f"Error importing modules: {e}")
-    print("Ensure 'event_processor.py' and 'models.py' are in the same directory or Python path.")
+    print(f"Python Path: {sys.path}")
     sys.exit(1)
 
-pl.Config.set_engine_affinity(engine="streaming")
+pl.Config.set_tbl_rows(20)
+pl.Config.set_tbl_cols(10)
+pl.Config.set_fmt_str_lengths(80)
 
-# --- Hardcoded Analysis Parameters (aligned with paper) ---
+# --- Hardcoded Analysis Parameters ---
 STOCK_FILES = [
     "/home/d87016661/crsp_dsf-2000-2001.parquet",
     "/home/d87016661/crsp_dsf-2002-2003.parquet",
@@ -56,598 +68,504 @@ EARNINGS_EVENT_DATE_COL = "ANNDATS"
 EARNINGS_TICKER_COL = "ticker"
 
 # Shared analysis parameters
-WINDOW_DAYS = 60 # General window for data loading
-ANALYSIS_WINDOW = (-30, 30) # Analysis window for features around event
-PRE_EVENT_WINDOW_H2_1 = (-15, -1)  # Window for pre-event volatility innovations (H2.1)
-POST_EVENT_WINDOW_H2_2 = (1, 15)   # Window for post-event volatility persistence & returns (H2.2)
+ANALYSIS_WINDOW_DAYS = 30 # Days before and after event for analysis
+GARCH_ESTIMATION_WINDOW_DAYS = 60 # Days before event for GARCH fitting
+PREDICTION_HORIZONS = [1, 5, 10] # Days for return prediction
+VOL_PERSISTENCE_WINDOW_DAYS = 10 # Days post-event to measure persistence
 
-# GARCH model parameters (initial guesses for fitting)
-# Paper uses GJR-GARCH for h_t, so it's the primary model. GARCH can be for comparison.
-MODEL_TYPES = ['gjr', 'garch'] # Test GJR (primary) and GARCH
-GARCH_PARAMS = {
-    'garch': {'omega': 0.00001, 'alpha': 0.05, 'beta': 0.90}, # Standard GARCH(1,1)
-    'gjr': {'omega': 0.00001, 'alpha': 0.03, 'beta': 0.90, 'gamma': 0.04} # GJR-GARCH(1,1)
+# Unified Volatility Model Parameters (example, adjust as needed)
+VOL_PARAMS_DEFAULT = {
+    'omega': 1e-6, 'alpha': 0.08, 'beta': 0.9, 'gamma': 0.04, # GJR-GARCH
+    'k1': 1.3, 'k2': 1.5, 'delta': 5,
+    'delta_t1': 5.0, 'delta_t2': 3.0, 'delta_t3': 10.0
 }
-PREDICTION_WINDOWS = [1, 3, 5]  # Days ahead to predict returns for H2.1
 
-class Hypothesis2Analyzer:
-    """
-    Analyzer for testing Hypothesis 2:
-    GARCH-estimated conditional volatility innovations serve as an effective proxy for impact uncertainty.
-    Sub-hypotheses:
-    H2.1: Pre-event volatility innovations predict subsequent returns.
-    H2.2: Post-event volatility persistence extends the period of elevated expected returns.
-    H2.3: Asymmetric volatility response (GJR-GARCH) correlates with asymmetric price adjustment.
-    """
-    def __init__(self, analyzer: EventAnalysis, results_dir: str, file_prefix: str):
-        self.analyzer = analyzer
+class Hypothesis2Framework:
+    def __init__(self, results_dir: str, file_prefix: str, vol_params_override: Optional[Dict] = None):
         self.results_dir = results_dir
         self.file_prefix = file_prefix
-        self.return_col = 'ret'
-        self.analysis_window = ANALYSIS_WINDOW # General features window
-        self.pre_event_window_h2_1 = PRE_EVENT_WINDOW_H2_1
-        self.post_event_window_h2_2 = POST_EVENT_WINDOW_H2_2
-        self.prediction_windows = PREDICTION_WINDOWS
-        self.model_types = MODEL_TYPES
-        self.garch_params = GARCH_PARAMS
+        os.makedirs(self.results_dir, exist_ok=True)
 
-        self.event_garch_fits = {} # Store fitted models and innovations per event
-        self.prediction_results_h2_1 = {}
-        self.persistence_results_h2_2 = {}
-        self.asymmetry_results_h2_3 = {}
+        vol_params_dict = VOL_PARAMS_DEFAULT.copy()
+        if vol_params_override:
+            vol_params_dict.update(vol_params_override)
+        # We primarily need the GJR-GARCH component for H2
+        self.vol_model_template = UnifiedVolatilityModel(**vol_params_dict) # Template to get params
+        self.h2_results_summary = {}
 
-        os.makedirs(results_dir, exist_ok=True)
 
-    def _fit_garch_for_events(self):
-        """Fit GARCH models to each event's return series."""
-        print("\n--- Fitting GARCH/GJR-GARCH models for each event ---")
-        if self.analyzer.data is None:
-            print("Error: No data loaded for GARCH fitting.")
-            return False
+    def _load_and_prepare_data(self, event_file_path: str, stock_file_paths: List[str],
+                               event_date_col: str, ticker_col: str) -> Optional[pl.DataFrame]:
+        # Same data loading as in Hypothesis1Framework
+        try:
+            print(f"Loading event data from: {event_file_path}")
+            event_df = pl.read_csv(event_file_path, try_parse_dates=True)
+            event_df = event_df.rename({event_date_col: "event_date", ticker_col: "ticker"})
+            event_df = event_df.with_columns([
+                pl.col("event_date").cast(pl.Date),
+                pl.col("ticker").cast(pl.Utf8)
+            ])
+            event_df = event_df.drop_nulls(subset=["event_date", "ticker"]).unique(subset=["ticker", "event_date"])
+            if event_df.is_empty(): return None
+            print(f"Loaded {event_df.height} unique events.")
 
-        # Extend window slightly for GARCH estimation stability if needed, but paper uses h_t
-        # The main analysis window is fine for extracting returns for GARCH.
-        garch_estimation_window = (min(self.analysis_window[0], -60), max(self.analysis_window[1], 60)) # Window for GARCH estimation
-        
-        # Ensure data is sorted for consistent processing
-        analysis_data = self.analyzer.data.filter(
-            (pl.col('days_to_event') >= garch_estimation_window[0]) &
-            (pl.col('days_to_event') <= garch_estimation_window[1])
-        ).sort(['event_id', 'days_to_event'])
-
-        if analysis_data.is_empty():
-            print(f"Error: No data found within GARCH estimation window {garch_estimation_window}")
-            return False
-
-        event_ids = analysis_data.select('event_id').unique().to_series().to_list()
-        print(f"Processing {len(event_ids)} events for GARCH fitting...")
-
-        # Limit samples for dev/testing speed if necessary
-        # sample_event_ids = np.random.choice(event_ids, size=min(100, len(event_ids)), replace=False) if len(event_ids) > 100 else event_ids
-        sample_event_ids = event_ids # Process all for production
-
-        processed_count = 0
-        for event_id in sample_event_ids:
-            event_data_series = analysis_data.filter(pl.col('event_id') == event_id)
-            event_returns = event_data_series.select(self.return_col).to_series()
-            
-            if len(event_returns.drop_nulls()) < 30: # Min data for GARCH
-                continue
-
-            self.event_garch_fits[event_id] = {
-                'ticker': event_data_series.select('ticker').head(1).item(),
-                'event_date_polars': event_data_series.select('Event Date').head(1).item(), # Keep Polars datetime
-                'days_to_event': event_data_series.select('days_to_event').to_series().to_list(),
-                'returns': event_returns.to_numpy(), # Full returns series for this event
-                'fitted_models': {},
-                'innovations': {}, # h_t - E[h_t]
-                'cond_volatility': {}, # sqrt(h_t)
-                'persistence_metric': {} # For H2.2
-            }
-
-            for model_type in self.model_types:
+            stock_df_list = []
+            for f_path in stock_file_paths:
                 try:
-                    params = self.garch_params[model_type]
-                    if model_type == 'gjr':
-                        model = GJRGARCHModel(**params)
-                    else:
-                        model = GARCHModel(**params)
-                    
-                    model.fit(event_returns.drop_nulls()) # Fit on non-null returns
+                    df = pl.read_parquet(f_path)
+                    rename_map = {}
+                    if 'PERMNO' in df.columns and 'ticker' not in df.columns : rename_map['PERMNO'] = 'ticker' # Example
+                    if 'date' not in df.columns and 'DATE' in df.columns: rename_map['DATE'] = 'date'
+                    if 'PRC' not in df.columns and 'prc' in df.columns: rename_map['prc'] = 'PRC'
+                    if 'RET' not in df.columns and 'ret' in df.columns: rename_map['ret'] = 'RET'
+                    if rename_map: df = df.rename(rename_map)
 
-                    self.event_garch_fits[event_id]['fitted_models'][model_type] = model
-                    self.event_garch_fits[event_id]['innovations'][model_type] = model.volatility_innovations()
-                    self.event_garch_fits[event_id]['cond_volatility'][model_type] = model.conditional_volatility()
-                    
-                    # Calculate persistence for H2.2 (e.g., beta or alpha+beta for GARCH, or post/pre vol ratio)
-                    # Paper suggests "post-event volatility persistence extends elevated returns"
-                    # Let's use ratio of post-event avg volatility to pre-event avg volatility
-                    days_np = np.array(self.event_garch_fits[event_id]['days_to_event'])
-                    vol_series = self.event_garch_fits[event_id]['cond_volatility'][model_type]
-                    
-                    # Align vol_series with days_np (GARCH output might be shorter due to drop_nulls or lags)
-                    # This alignment is tricky if GARCH model.fit() doesn't return original indexing.
-                    # For simplicity, assume GARCH output aligns with the start of the non-null return series.
-                    # A more robust way would be to ensure GARCH models preserve original indexing or return aligned series.
-                    # Current GARCHModel class implies variance_history aligns with input `returns_centered`.
-                    
-                    # We need to map innovations and cond_volatility back to original days_to_event indices.
-                    # The GARCH models are fit on `event_returns.drop_nulls()`.
-                    # The `volatility_innovations` has length T-1 of fitted data.
-                    # `conditional_volatility` has length T of fitted data.
-                    
-                    # This part needs careful handling of indices if GARCH output isn't directly aligned
-                    # with the full 'days_to_event' series that includes NaNs.
-                    # For now, we'll assume the GARCH outputs correspond to the returns it was fit on.
-                    # The selection of pre/post windows will be on the `days_to_event` that correspond to these outputs.
-                    
-                    # Placeholder for persistence metric for H2.2
-                    # This will be calculated more carefully in _test_h2_2_volatility_persistence
-                    
-                except Exception as e:
-                    # print(f" Error fitting {model_type} for {event_id}: {e}")
-                    self.event_garch_fits[event_id]['fitted_models'][model_type] = None
-            processed_count +=1
-            if processed_count % 50 == 0: print(f"  Fitted GARCH for {processed_count}/{len(sample_event_ids)} events...")
-        
-        print(f"Finished GARCH fitting. Successful fits for {len(self.event_garch_fits)} events.")
-        return bool(self.event_garch_fits)
+                    required_cols = ['date', 'ticker', 'PRC', 'RET']
+                    if not all(col in df.columns for col in required_cols): continue
+                    df = df.select(required_cols).with_columns([
+                        pl.col("date").cast(pl.Date), pl.col("ticker").cast(pl.Utf8),
+                        pl.col("PRC").cast(pl.Float64), pl.col("RET").cast(pl.Float64)
+                    ])
+                    stock_df_list.append(df)
+                except Exception as e: print(f"Error loading stock file {f_path}: {e}")
+            if not stock_df_list: return None
+            stock_df = pl.concat(stock_df_list).drop_nulls().unique(subset=["ticker", "date"])
+            print(f"Loaded and combined {stock_df.height} stock records.")
 
-    def _test_h2_1_innovations_predict_returns(self):
-        print("\n--- H2.1: Testing Pre-event Volatility Innovations' Predictive Power ---")
-        if not self.event_garch_fits:
-            print("Error: GARCH models not fitted. Cannot test H2.1.")
-            return
+            merged_df = event_df.join(stock_df, on="ticker", how="inner")
+            merged_df = merged_df.with_columns(
+                (pl.col("date") - pl.col("event_date")).dt.total_days().cast(pl.Int32).alias("days_to_event")
+            )
+            # Window needs to be large enough for GARCH estimation + analysis
+            merged_df = merged_df.filter(
+                (pl.col("days_to_event") >= -(GARCH_ESTIMATION_WINDOW_DAYS + ANALYSIS_WINDOW_DAYS)) &
+                (pl.col("days_to_event") <= ANALYSIS_WINDOW_DAYS)
+            )
+            merged_df = merged_df.sort(["ticker", "event_date", "date"])
+            merged_df = merged_df.with_columns(
+                pl.col("ticker").cast(str) + "_" + pl.col("event_date").dt.strftime("%Y%m%d")
+            ).rename({"literal": "event_id"})
+            merged_df = merged_df.with_columns(
+                pl.when(pl.col("RET").is_null() & pl.col("PRC").is_not_null() & pl.col("PRC").shift(1).over("event_id").is_not_null())
+                .then( (pl.col("PRC") / pl.col("PRC").shift(1).over("event_id")) - 1)
+                .otherwise(pl.col("RET"))
+                .alias("RET")
+            ).drop_nulls(subset=["RET"])
+            if merged_df.is_empty(): return None
+            print(f"Prepared data shape for H2: {merged_df.shape}")
+            return merged_df
+        except Exception as e:
+            print(f"Error in _load_and_prepare_data (H2): {e}")
+            traceback.print_exc()
+            return None
 
-        results_h2_1 = {}
-        for model_type in self.model_types:
-            results_h2_1[model_type] = {}
-            for pred_window in self.prediction_windows:
-                X_innovations, y_future_returns = [], []
-                
-                for event_id, data in self.event_garch_fits.items():
-                    if data['fitted_models'].get(model_type) is None: continue
-
-                    # Innovations: h_t - E[h_t]. Length is T-1 of fitted GARCH returns.
-                    # GARCH models are fit on non-NaN returns.
-                    # We need to align these innovations and original days_to_event.
-                    
-                    # Get the part of the original event data that has non-null returns
-                    event_full_data = self.analyzer.data.filter(pl.col('event_id') == event_id).sort('days_to_event')
-                    event_nn_returns_data = event_full_data.filter(pl.col(self.return_col).is_not_null())
-                    
-                    # GARCH innovations and cond_volatility align with event_nn_returns_data
-                    innovations_series = data['innovations'].get(model_type) # length T_nn - 1
-                    
-                    # We need innovations for days in PRE_EVENT_WINDOW_H2_1
-                    # And future returns starting from day 0
-                    
-                    # 1. Get average pre-event innovation
-                    # Innovations are for t=1 to T_nn. So innovations_series[k] corresponds to info at day k, predicting for day k+1 of nn_returns
-                    # days_for_innov_calc = event_nn_returns_data['days_to_event'].to_list() # These are the days GARCH was fit on.
-                    
-                    # Let's use days_to_event from the fitted data (event_nn_returns_data) for indexing innovations
-                    nn_days_to_event = event_nn_returns_data.select('days_to_event').to_series()
-
-                    # Pre-event innovations: innovations for days in PRE_EVENT_WINDOW_H2_1
-                    # Note: innovations_series has length T_nn-1. It corresponds to nn_days_to_event[1:].
-                    # So, innovations_series[i] is the innovation for nn_days_to_event[i+1]
-                    
-                    avg_pre_event_innovation = np.nan
-                    if innovations_series is not None and len(innovations_series) > 0:
-                        pre_event_innovs_for_avg = []
-                        # Iterate through the non-null days for which we have innovations
-                        for i in range(len(innovations_series)):
-                            day_val = nn_days_to_event[i+1] # Day corresponding to innovations_series[i]
-                            if self.pre_event_window_h2_1[0] <= day_val <= self.pre_event_window_h2_1[1]:
-                                pre_event_innovs_for_avg.append(innovations_series[i])
-                        if pre_event_innovs_for_avg:
-                            avg_pre_event_innovation = np.mean(pre_event_innovs_for_avg)
-
-                    if np.isnan(avg_pre_event_innovation): continue
-                    
-                    # 2. Get future return (from day 0 over `pred_window` days)
-                    # Use the original full event data for future returns
-                    day_0_data = event_full_data.filter(pl.col('days_to_event') == 0)
-                    if day_0_data.is_empty(): continue
-                    
-                    day_0_index_in_full = event_full_data.with_row_count().filter(pl.col('days_to_event') == 0)['row_nr'].item()
-                    
-                    actual_future_return = np.nan
-                    if day_0_index_in_full + pred_window < event_full_data.height:
-                        # Sum of log returns or compound return
-                        # Using simple sum of arithmetic returns for now, as in H1
-                        future_period_returns = event_full_data.slice(day_0_index_in_full + 1, pred_window).select(self.return_col).to_series().drop_nulls()
-                        if len(future_period_returns) == pred_window : # Ensure full window of returns
-                           actual_future_return = future_period_returns.sum() # Or (1+future_period_returns).product() - 1
-
-                    if np.isnan(actual_future_return): continue
-
-                    X_innovations.append(avg_pre_event_innovation)
-                    y_future_returns.append(actual_future_return)
-
-                if len(X_innovations) > 10:
-                    X_arr = np.array(X_innovations)
-                    y_arr = np.array(y_future_returns)
-                    
-                    if np.var(X_arr) < 1e-10: # Check for effectively zero variance
-                        print(f"  Warning: Insufficient variance in X_innovations for {model_type}, pred_window {pred_window}.")
-                        slope, intercept, r_value, p_value, std_err = 0, np.mean(y_arr), 0, 1.0, 0
-                    else:
-                        slope, intercept, r_value, p_value, std_err = stats.linregress(X_arr, y_arr)
-                    
-                    results_h2_1[model_type][pred_window] = {
-                        'slope': slope, 'intercept': intercept, 'r_squared': r_value**2,
-                        'p_value': p_value, 'std_err': std_err, 'n_samples': len(X_arr)
-                    }
-                    print(f"  {model_type}, {pred_window}-day ret: slope={slope:.4f}, R²={r_value**2:.4f}, p={p_value:.3f}, N={len(X_arr)}")
-                else:
-                    results_h2_1[model_type][pred_window] = None
-                    print(f"  {model_type}, {pred_window}-day ret: Insufficient data (N={len(X_innovations)})")
-
-        self.prediction_results_h2_1 = results_h2_1
-        self._save_and_plot_h2_1_results()
-
-
-    def _save_and_plot_h2_1_results(self):
-        summary_rows = []
-        supported_count = 0
-        for model_type, preds in self.prediction_results_h2_1.items():
-            for window, res in preds.items():
-                if res:
-                    is_supported = res['p_value'] < 0.1 # Arbitrary significance for "supported"
-                    if is_supported: supported_count +=1
-                    summary_rows.append({
-                        'model_type': model_type, 'prediction_window': window,
-                        'slope': res['slope'], 'r_squared': res['r_squared'],
-                        'p_value': res['p_value'], 'n_samples': res['n_samples'],
-                        'supported_by_p_0.1': is_supported
-                    })
-        if summary_rows:
-            summary_df = pl.DataFrame(summary_rows)
-            summary_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_H2_1_prediction_summary.csv"))
-            print(f"\nH2.1 Summary: {supported_count}/{len(summary_rows)} tests supported (p<0.1).")
-            # Plotting logic can be added here if needed, similar to original testhyp2.py
-        else:
-            print("\nNo results for H2.1 to save/plot.")
-
-
-    def _test_h2_2_volatility_persistence(self):
-        print("\n--- H2.2: Testing Post-event Volatility Persistence and Expected Returns ---")
-        if not self.event_garch_fits:
-            print("Error: GARCH models not fitted. Cannot test H2.2.")
-            return
-
-        results_h2_2 = {}
-        for model_type in self.model_types:
-            persistence_metrics, post_event_avg_returns = [], []
+    def _calculate_garch_vol_and_innovations(self, data: pl.DataFrame) -> pl.DataFrame:
+        """
+        Estimate GJR-GARCH for each event's pre-event period.
+        Calculate baseline GJR-GARCH volatility (h_t) and volatility innovations.
+        Volatility Innovation = Realized Vol (or Event-Adjusted Vol) - GARCH Predicted Vol
+        """
+        results_list = []
+        for event_id_val, group_df_pl in data.group_by("event_id"):
+            group_df = group_df_pl.to_pandas().sort_values("days_to_event").reset_index(drop=True)
             
-            for event_id, data in self.event_garch_fits.items():
-                if data['fitted_models'].get(model_type) is None: continue
+            # GARCH estimation period: e.g., -60 to -1 days_to_event
+            garch_estimation_data = group_df[
+                (group_df['days_to_event'] < 0) &
+                (group_df['days_to_event'] >= -GARCH_ESTIMATION_WINDOW_DAYS)
+            ]['RET'].dropna().to_numpy()
 
-                event_full_data = self.analyzer.data.filter(pl.col('event_id') == event_id).sort('days_to_event')
-                event_nn_returns_data = event_full_data.filter(pl.col(self.return_col).is_not_null())
-                nn_days_to_event = event_nn_returns_data.select('days_to_event').to_series()
-                
-                cond_vol_series = data['cond_volatility'].get(model_type) # Aligns with nn_days_to_event
-
-                if cond_vol_series is None or len(cond_vol_series) == 0: continue
-
-                # Persistence: ratio of post-event avg cond. volatility to pre-event avg cond. volatility
-                pre_vols, post_vols = [], []
-                for i in range(len(cond_vol_series)):
-                    day_val = nn_days_to_event[i]
-                    if self.pre_event_window_h2_1[0] <= day_val <= self.pre_event_window_h2_1[1]: # Use H2.1 pre-window for consistency
-                        pre_vols.append(cond_vol_series[i])
-                    if self.post_event_window_h2_2[0] <= day_val <= self.post_event_window_h2_2[1]:
-                        post_vols.append(cond_vol_series[i])
-                
-                if not pre_vols or not post_vols: continue
-                avg_pre_vol = np.mean(pre_vols)
-                avg_post_vol = np.mean(post_vols)
-
-                if avg_pre_vol < 1e-9: continue # Avoid division by zero
-                persistence_metric = avg_post_vol / avg_pre_vol
-                
-                # Average actual return in the post-event window
-                post_event_actual_returns = event_full_data.filter(
-                    (pl.col('days_to_event') >= self.post_event_window_h2_2[0]) &
-                    (pl.col('days_to_event') <= self.post_event_window_h2_2[1])
-                ).select(self.return_col).to_series().drop_nulls()
-
-                if post_event_actual_returns.is_empty(): continue
-                avg_post_event_return = post_event_actual_returns.mean()
-
-                persistence_metrics.append(persistence_metric)
-                post_event_avg_returns.append(avg_post_event_return)
-
-            if len(persistence_metrics) > 10:
-                X_arr = np.array(persistence_metrics)
-                y_arr = np.array(post_event_avg_returns)
-                slope, intercept, r_value, p_value, std_err = stats.linregress(X_arr, y_arr)
-                results_h2_2[model_type] = {
-                    'slope': slope, 'intercept': intercept, 'r_squared': r_value**2,
-                    'p_value': p_value, 'std_err': std_err, 'n_samples': len(X_arr)
-                }
-                print(f"  {model_type}: slope={slope:.4f}, R²={r_value**2:.4f}, p={p_value:.3f}, N={len(X_arr)}")
-            else:
-                results_h2_2[model_type] = None
-                print(f"  {model_type}: Insufficient data (N={len(persistence_metrics)})")
-
-        self.persistence_results_h2_2 = results_h2_2
-        self._save_and_plot_h2_2_results()
-
-    def _save_and_plot_h2_2_results(self):
-        summary_rows = []
-        supported_count = 0
-        for model_type, res in self.persistence_results_h2_2.items():
-            if res:
-                is_supported = res['p_value'] < 0.1 and res['slope'] > 0 # Positive relationship
-                if is_supported: supported_count +=1
-                summary_rows.append({
-                    'model_type': model_type,
-                    'slope': res['slope'], 'r_squared': res['r_squared'],
-                    'p_value': res['p_value'], 'n_samples': res['n_samples'],
-                    'supported_by_p_0.1_and_positive_slope': is_supported
-                })
-        if summary_rows:
-            summary_df = pl.DataFrame(summary_rows)
-            summary_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_H2_2_persistence_summary.csv"))
-            print(f"\nH2.2 Summary: {supported_count}/{len(summary_rows)} tests supported (p<0.1 & slope>0).")
-        else:
-            print("\nNo results for H2.2 to save/plot.")
-
-
-    def _test_h2_3_asymmetric_volatility_response(self):
-        print("\n--- H2.3: Testing Asymmetric Volatility Response (GJR-GARCH) ---")
-        if 'gjr' not in self.model_types or 'garch' not in self.model_types:
-            print("Error: Both GJR and GARCH models needed for H2.3.")
-            return
-        if not self.event_garch_fits:
-            print("Error: GARCH models not fitted. Cannot test H2.3.")
-            return
-
-        # H2.3: Asymmetric volatility response (GJR-GARCH gamma) correlates with asymmetric price adjustment.
-        # We test if GJR-GARCH (which has gamma) explains volatility better after negative returns
-        # compared to standard GARCH.
-        # We look at the difference in conditional volatility: GJR_vol - GARCH_vol
-        # This difference should be larger (more positive) following negative shocks if GJR captures asymmetry.
-        
-        vol_diffs_after_neg_ret = []
-        vol_diffs_after_pos_ret = []
-
-        for event_id, data in self.event_garch_fits.items():
-            if data['fitted_models'].get('gjr') is None or data['fitted_models'].get('garch') is None:
+            if len(garch_estimation_data) < 30: # Min obs for GARCH
                 continue
 
-            # Align GJR and GARCH outputs with common set of days_to_event (from non-null returns)
-            event_full_data = self.analyzer.data.filter(pl.col('event_id') == event_id).sort('days_to_event')
-            event_nn_returns_data = event_full_data.filter(pl.col(self.return_col).is_not_null())
-            nn_days_to_event = event_nn_returns_data.select('days_to_event').to_series()
-            nn_returns = event_nn_returns_data.select(self.return_col).to_series()
+            try:
+                # Use the GJR-GARCH part of UnifiedVolatilityModel
+                # Here, baseline_volatility method estimates h_t
+                # This method in `models.py` needs to be callable with just returns.
+                # Let's assume it is, or we use a direct GJR-GARCH fit here.
+                # For simplicity with the current `models.py` structure,
+                # we'll use `arch` package directly for GJR-GARCH as in new event_processor.
 
-            gjr_vol = data['cond_volatility'].get('gjr') # sqrt(h_t) from GJR
-            garch_vol = data['cond_volatility'].get('garch') # sqrt(h_t) from GARCH
-            
-            if gjr_vol is None or garch_vol is None or len(gjr_vol) != len(garch_vol): continue
-            if len(gjr_vol) != len(nn_days_to_event): continue # Ensure alignment
+                from arch import arch_model # Local import for this part
+                
+                # Ensure returns are in percentage for arch model if it expects that
+                model_fit = arch_model(garch_estimation_data * 100, vol='GARCH', p=1, o=1, q=1, dist='normal').fit(disp='off')
+                
+                # Get GJR-GARCH parameters for this event's pre-period
+                event_gjr_params = {
+                    'omega': model_fit.params['omega'],
+                    'alpha': model_fit.params['alpha[1]'],
+                    'beta': model_fit.params['beta[1]'],
+                    'gamma': model_fit.params.get('gamma[1]', 0.0) # Handle if GARCH was fit
+                }
+                
+                # Create a temporary UVM instance with these event-specific GJR params
+                # but use the global event-adjustment params (k1,k2 etc.)
+                temp_uvm_params = {**self.vol_model_template.__dict__, **event_gjr_params}
+                temp_uvm = UnifiedVolatilityModel(**{k: v for k, v in temp_uvm_params.items() if k in UnifiedVolatilityModel.__init__.__code__.co_varnames})
 
-            # Compare vol_t based on return_{t-1}
-            for i in range(1, len(nn_returns)): # Start from second obs as we need return_{t-1}
-                prev_return = nn_returns[i-1]
-                vol_diff = gjr_vol[i] - garch_vol[i] # Volatility at time t
 
-                if prev_return < 0:
-                    vol_diffs_after_neg_ret.append(vol_diff)
-                else: # prev_return >= 0
-                    vol_diffs_after_pos_ret.append(vol_diff)
+                # Now, calculate h_t (baseline GJR-GARCH vol) for the *entire* event window
+                # using the fitted parameters on the *full* return series for the event.
+                full_event_returns = group_df['RET'].to_numpy()
+                
+                # The `baseline_volatility` method in `models.py` calculates sqrt(h_t)
+                h_sqrt_series = temp_uvm.baseline_volatility(full_event_returns) # This should return sqrt of variance
+                h_series = h_sqrt_series**2 # This is h_t (variance)
+
+                # Calculate GARCH predicted volatility for t based on t-1
+                # h_pred_t = omega + alpha*eps_{t-1}^2 + beta*h_{t-1} + gamma*I*eps_{t-1}^2
+                h_pred_series = np.zeros_like(h_series)
+                h_pred_series[0] = h_series[0] # Or some initial value
+                for t_idx in range(1, len(full_event_returns)):
+                    eps_prev_sq = full_event_returns[t_idx-1]**2 # Simplified eps^2 (actual ret^2)
+                    indicator_prev = 1 if full_event_returns[t_idx-1] < 0 else 0
+                    h_pred_series[t_idx] = (
+                        event_gjr_params['omega'] +
+                        event_gjr_params['alpha'] * eps_prev_sq +
+                        event_gjr_params['beta'] * h_series[t_idx-1] + # Use actual h_{t-1}
+                        event_gjr_params['gamma'] * indicator_prev * eps_prev_sq
+                    )
+                
+                # Volatility Innovation: Realized (actual h_t) - Predicted (GARCH h_t based on t-1)
+                # Using h_series as "realized" conditional variance
+                vol_innovations = h_series - h_pred_series
+                
+                group_df['garch_h_t'] = h_series
+                group_df['garch_vol_innov'] = vol_innovations
+                group_df['gjr_gamma'] = event_gjr_params['gamma'] # Store gamma for H2.3
+
+                results_list.append(pl.from_pandas(group_df))
+
+            except Exception as e:
+                # print(f"Error in GARCH for event {event_id_val}: {e}") # Can be noisy
+                continue
         
-        if len(vol_diffs_after_neg_ret) > 10 and len(vol_diffs_after_pos_ret) > 10:
-            mean_diff_neg = np.mean(vol_diffs_after_neg_ret)
-            mean_diff_pos = np.mean(vol_diffs_after_pos_ret)
+        if not results_list: return pl.DataFrame()
+        return pl.concat(results_list)
+
+    def _test_h2_1_innovations_predict_returns(self, data: pl.DataFrame):
+        """
+        Test H2.1: Pre-event volatility innovations predict subsequent returns.
+        Regression: FutureReturn_k = a + b * AvgPreEventVolInnovation + e
+        """
+        print("\n--- Testing H2.1: Volatility Innovations Predict Returns ---")
+        # Filter for pre-event period to get innovations
+        # e.g., days_to_event from -10 to -1 for "pre-event innovations"
+        pre_event_innov_window = (-10, -1)
+        
+        # Aggregate average pre-event innovation per event_id
+        avg_pre_innov = data.filter(
+            (pl.col('days_to_event') >= pre_event_innov_window[0]) &
+            (pl.col('days_to_event') <= pre_event_innov_window[1])
+        ).group_by("event_id").agg(
+            pl.mean("garch_vol_innov").alias("avg_pre_event_vol_innov")
+        )
+
+        h2_1_results = []
+        for k in PREDICTION_HORIZONS:
+            # Get future returns starting from event day (days_to_event = 0)
+            # Shift returns by -k to get future returns
+            data_with_future_ret = data.with_columns(
+                pl.col("RET").shift(-k).over("event_id").alias(f"future_ret_{k}d")
+            )
             
-            # T-test: is mean_diff_neg significantly greater than mean_diff_pos?
-            t_stat, p_value_ttest = stats.ttest_ind(vol_diffs_after_neg_ret, vol_diffs_after_pos_ret, equal_var=False, alternative='greater')
+            # Join future returns at event day with pre-event innovations
+            regression_df = data_with_future_ret.filter(pl.col("days_to_event") == 0).join(
+                avg_pre_innov, on="event_id", how="inner"
+            ).select(["event_id", f"future_ret_{k}d", "avg_pre_event_vol_innov"]).drop_nulls()
+
+            if regression_df.height > 10: # Min samples for regression
+                X = regression_df["avg_pre_event_vol_innov"].to_numpy().reshape(-1, 1)
+                y = regression_df[f"future_ret_{k}d"].to_numpy()
+                
+                # Check for near-zero variance in X
+                if np.var(X) < 1e-10:
+                    print(f"  H2.1 (Future Ret {k}d): Insufficient variance in predictor. Slope=0, p=1.")
+                    slope, intercept, r_value, p_value, std_err = 0, np.mean(y), 0, 1.0, 0
+                else:
+                    slope, intercept, r_value, p_value, std_err = stats.linregress(X.flatten(), y)
+                
+                supported = p_value < 0.05 and slope > 0 # Assuming positive relation
+                h2_1_results.append({
+                    "horizon": k, "slope": slope, "r_squared": r_value**2,
+                    "p_value": p_value, "supported": supported, "n_obs": len(regression_df)
+                })
+                print(f"  H2.1 (Future Ret {k}d): Slope={slope:.4f}, R2={r_value**2:.3f}, p={p_value:.3f}, Supported={supported}, N={len(regression_df)}")
+            else:
+                print(f"  H2.1 (Future Ret {k}d): Insufficient data (N={len(regression_df)})")
+                h2_1_results.append({
+                    "horizon": k, "slope": None, "r_squared": None,
+                    "p_value": None, "supported": False, "n_obs": len(regression_df)
+                })
+        
+        self.h2_results_summary['H2_1'] = pl.DataFrame(h2_1_results)
+        self.h2_results_summary['H2_1'].write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_h2_1_results.csv"))
+
+    def _test_h2_2_vol_persistence_extends_returns(self, data: pl.DataFrame):
+        """
+        Test H2.2: Post-event volatility persistence extends elevated expected returns.
+        Regression: AvgPostEventReturn = a + b * VolPersistenceRatio + e
+        VolPersistenceRatio = AvgPostEventVol / AvgPreEventVol
+        """
+        print("\n--- Testing H2.2: Volatility Persistence Extends Returns ---")
+        pre_event_vol_window = (-GARCH_ESTIMATION_WINDOW_DAYS, -1) # Match GARCH est. window
+        post_event_vol_window = (1, VOL_PERSISTENCE_WINDOW_DAYS)
+        post_event_ret_window = (1, VOL_PERSISTENCE_WINDOW_DAYS)
+
+        # Calculate avg pre-event and post-event GARCH h_t (variance)
+        event_vol_metrics = data.group_by("event_id").agg(
+            pl.mean("garch_h_t").filter(
+                (pl.col("days_to_event") >= pre_event_vol_window[0]) &
+                (pl.col("days_to_event") <= pre_event_vol_window[1])
+            ).alias("avg_pre_event_h_t"),
+            pl.mean("garch_h_t").filter(
+                (pl.col("days_to_event") >= post_event_vol_window[0]) &
+                (pl.col("days_to_event") <= post_event_vol_window[1])
+            ).alias("avg_post_event_h_t"),
+             pl.mean("RET").filter( # Use actual returns for "elevated expected returns"
+                (pl.col("days_to_event") >= post_event_ret_window[0]) &
+                (pl.col("days_to_event") <= post_event_ret_window[1])
+            ).alias("avg_post_event_return")
+        ).drop_nulls()
+
+        if event_vol_metrics.is_empty():
+             print("  H2.2: No events with valid pre/post volatility metrics.")
+             self.h2_results_summary['H2_2'] = pl.DataFrame({"supported": [False], "n_obs": [0]})
+             return
+
+        event_vol_metrics = event_vol_metrics.with_columns(
+            (pl.col("avg_post_event_h_t") / pl.col("avg_pre_event_h_t").clip_min(1e-8) # Avoid div by zero
+            ).alias("vol_persistence_ratio")
+        ).drop_nulls()
+        
+        if event_vol_metrics.height > 10:
+            X = event_vol_metrics["vol_persistence_ratio"].to_numpy().reshape(-1, 1)
+            y = event_vol_metrics["avg_post_event_return"].to_numpy()
+
+            if np.var(X) < 1e-10:
+                print(f"  H2.2: Insufficient variance in predictor. Slope=0, p=1.")
+                slope, intercept, r_value, p_value, std_err = 0, np.mean(y), 0, 1.0, 0
+            else:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(X.flatten(), y)
             
-            is_supported = p_value_ttest < 0.05 # One-sided test, GJR vol > GARCH vol more after neg shocks
-            self.asymmetry_results_h2_3 = {
-                'mean_vol_diff_after_neg_ret': mean_diff_neg,
-                'mean_vol_diff_after_pos_ret': mean_diff_pos,
-                't_stat': t_stat, 'p_value': p_value_ttest,
-                'n_neg_shocks': len(vol_diffs_after_neg_ret),
-                'n_pos_shocks': len(vol_diffs_after_pos_ret),
-                'supported': is_supported
+            supported = p_value < 0.05 and slope > 0 # Assuming positive relation
+            result = {
+                "slope": slope, "r_squared": r_value**2, "p_value": p_value,
+                "supported": supported, "n_obs": len(event_vol_metrics)
             }
-            print(f"  Mean (GJR_vol - GARCH_vol) after neg shocks: {mean_diff_neg:.6f}")
-            print(f"  Mean (GJR_vol - GARCH_vol) after pos shocks: {mean_diff_pos:.6f}")
-            print(f"  T-test (one-sided, H_alt: diff_neg > diff_pos): t={t_stat:.2f}, p={p_value_ttest:.3f}")
-            print(f"  H2.3 Supported (p<0.05): {'YES' if is_supported else 'NO'}")
-            
-            res_df = pl.DataFrame([self.asymmetry_results_h2_3])
-            res_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_H2_3_asymmetry_summary.csv"))
+            print(f"  H2.2: Slope={slope:.4f}, R2={r_value**2:.3f}, p={p_value:.3f}, Supported={supported}, N={len(event_vol_metrics)}")
         else:
-            print("  Insufficient data for H2.3 t-test.")
-            self.asymmetry_results_h2_3 = None
-            
-    def generate_summary_report(self):
-        print("\n--- Generating Hypothesis 2 Summary Report ---")
-        h2_1_supported_overall = any(
-            preds.get(w, {}).get('p_value', 1.0) < 0.1
-            for mt, preds in self.prediction_results_h2_1.items()
-            for w in self.prediction_windows
-        )
+            print(f"  H2.2: Insufficient data (N={len(event_vol_metrics)})")
+            result = {"slope": None, "r_squared": None, "p_value": None, "supported": False, "n_obs": len(event_vol_metrics)}
+
+        self.h2_results_summary['H2_2'] = pl.DataFrame([result])
+        self.h2_results_summary['H2_2'].write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_h2_2_results.csv"))
+
+
+    def _test_h2_3_asymmetric_vol_response(self, data: pl.DataFrame):
+        """
+        Test H2.3: Asymmetric volatility response (GJR-GARCH gamma) correlates with asymmetric price adjustment.
+        Compare returns on days with high gamma vs low gamma, conditional on negative news.
+        Or, simpler: check if avg gamma is significantly positive.
+        """
+        print("\n--- Testing H2.3: Asymmetric Volatility Response (GJR-GARCH Gamma) ---")
+        if 'gjr_gamma' not in data.columns:
+            print("  H2.3: 'gjr_gamma' column not found. Skipping test.")
+            self.h2_results_summary['H2_3'] = pl.DataFrame({"supported": [False], "avg_gamma": [None], "p_value_gamma_gt_0": [None]})
+            return
+
+        # Get unique gamma per event_id (as it's estimated once per event's pre-period)
+        event_gammas = data.select(["event_id", "gjr_gamma"]).unique(subset="event_id")["gjr_gamma"].drop_nulls().to_numpy()
+
+        if len(event_gammas) > 1:
+            avg_gamma = np.mean(event_gammas)
+            # Test if gamma is significantly greater than 0
+            t_stat, p_value = stats.ttest_1samp(event_gammas, 0, alternative='greater')
+            supported = p_value < 0.05 and avg_gamma > 0
+            print(f"  H2.3: Average GJR-GARCH Gamma = {avg_gamma:.4f}")
+            print(f"  T-test (gamma > 0): t-stat={t_stat:.3f}, p-value={p_value:.3f}, Supported={supported}, N_events={len(event_gammas)}")
+            result = {"avg_gamma": avg_gamma, "p_value_gamma_gt_0": p_value, "supported": supported, "n_events": len(event_gammas)}
+        else:
+            print("  H2.3: Insufficient events with GJR-GARCH gamma values.")
+            result = {"avg_gamma": None, "p_value_gamma_gt_0": None, "supported": False, "n_events": len(event_gammas)}
+
+        self.h2_results_summary['H2_3'] = pl.DataFrame([result])
+        self.h2_results_summary['H2_3'].write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_h2_3_results.csv"))
+
+    def _generate_h2_visualizations(self, data: pl.DataFrame):
+        # Placeholder for H2 visualizations (e.g., scatter plot for H2.1)
+        # Plot for H2.1 if any horizon was significant
+        if 'H2_1' in self.h2_results_summary and self.h2_results_summary['H2_1'] is not None:
+            h2_1_res = self.h2_results_summary['H2_1']
+            for row_dict in h2_1_res.filter(pl.col("supported") == True).to_dicts():
+                k = row_dict['horizon']
+                slope = row_dict['slope']
+                intercept = slope * data["avg_pre_event_vol_innov"].mean() if slope is not None and not data.filter(pl.col("avg_pre_event_vol_innov").is_not_null()).is_empty() else 0
+
+
+                # Re-create data for plotting this specific significant result
+                pre_event_innov_window = (-10, -1)
+                avg_pre_innov = data.filter(
+                    (pl.col('days_to_event') >= pre_event_innov_window[0]) &
+                    (pl.col('days_to_event') <= pre_event_innov_window[1])
+                ).group_by("event_id").agg(
+                    pl.mean("garch_vol_innov").alias("avg_pre_event_vol_innov")
+                )
+                data_with_future_ret = data.with_columns(
+                    pl.col("RET").shift(-k).over("event_id").alias(f"future_ret_{k}d")
+                )
+                plot_df = data_with_future_ret.filter(pl.col("days_to_event") == 0).join(
+                    avg_pre_innov, on="event_id", how="inner"
+                ).select(["event_id", f"future_ret_{k}d", "avg_pre_event_vol_innov"]).drop_nulls().to_pandas()
+
+                if not plot_df.empty and slope is not None:
+                    plt.figure(figsize=(8,6))
+                    plt.scatter(plot_df["avg_pre_event_vol_innov"], plot_df[f"future_ret_{k}d"], alpha=0.5, label="Data points")
+                    x_vals = np.array(plt.xlim())
+                    y_vals = intercept + slope * x_vals
+                    plt.plot(x_vals, y_vals, color='red', label=f"Fit: y={slope:.3f}x+{intercept:.3f}\np={row_dict['p_value']:.3f}")
+                    plt.xlabel("Avg Pre-Event Volatility Innovation")
+                    plt.ylabel(f"{k}-day Future Return")
+                    plt.title(f"H2.1: {self.file_prefix.upper()} - Vol Innovation vs {k}d Future Return")
+                    plt.legend()
+                    plt.grid(True, linestyle=':')
+                    plt.savefig(os.path.join(self.results_dir, f"{self.file_prefix}_h2_1_plot_horizon{k}.png"), dpi=150)
+                    plt.close()
+
+
+    def run_full_analysis(self, event_file_path: str, stock_file_paths: List[str],
+                          event_date_col: str, ticker_col: str):
+        print(f"\n--- Starting Hypothesis 2 Analysis for {self.file_prefix.upper()} ---")
+        data = self._load_and_prepare_data(event_file_path, stock_file_paths, event_date_col, ticker_col)
+        if data is None or data.is_empty():
+            print(f"Failed to load or prepare data for {self.file_prefix}. Aborting H2 analysis.")
+            return False
+
+        print("Calculating GARCH volatility and innovations...")
+        data_with_garch = self._calculate_garch_vol_and_innovations(data)
+        if data_with_garch.is_empty():
+            print(f"Failed to calculate GARCH metrics for {self.file_prefix}. Aborting H2 analysis.")
+            return False
         
-        h2_2_supported_overall = any(
-            res.get('p_value', 1.0) < 0.1 and res.get('slope', -1) > 0
-            for mt, res_dict in self.persistence_results_h2_2.items()
-            for res_key, res in (res_dict.items() if isinstance(res_dict, dict) else [(None, res_dict)]) if res # handle if res_dict is None or contains None
-        )
+        data_with_garch.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_h2_data_with_garch.csv"))
+
+        self._test_h2_1_innovations_predict_returns(data_with_garch)
+        self._test_h2_2_vol_persistence_extends_returns(data_with_garch)
+        self._test_h2_3_asymmetric_vol_response(data_with_garch)
         
-        h2_3_supported_overall = self.asymmetry_results_h2_3.get('supported', False) if self.asymmetry_results_h2_3 else False
+        self._generate_h2_visualizations(data_with_garch) # Pass data with necessary columns
 
-        report_data = {
-            'Sub-Hypothesis': [
-                "H2.1: Pre-event volatility innovations predict subsequent returns",
-                "H2.2: Post-event volatility persistence extends elevated expected returns",
-                "H2.3: Asymmetric volatility response correlates with asymmetric price adjustment"
-            ],
-            'Supported': [h2_1_supported_overall, h2_2_supported_overall, h2_3_supported_overall],
-            'Details': [
-                f"{sum(1 for mt, preds in self.prediction_results_h2_1.items() for w_res in preds.values() if w_res and w_res['p_value'] < 0.1)} significant tests (p<0.1)",
-                f"{sum(1 for mt, res_dict in self.persistence_results_h2_2.items() for res_key, res in (res_dict.items() if isinstance(res_dict,dict) else [(None,res_dict)]) if res and res['p_value'] < 0.1 and res['slope'] > 0)} significant tests (p<0.1, slope>0)",
-                f"p-value={self.asymmetry_results_h2_3.get('p_value',1.0):.3f}" if self.asymmetry_results_h2_3 else "N/A"
-            ]
-        }
-        summary_df = pl.DataFrame(report_data)
-        
-        overall_h2_supported = all(report_data['Supported'])
-        
-        report_file = os.path.join(self.results_dir, f"{self.file_prefix}_H2_summary_report.md")
-        with open(report_file, 'w') as f:
-            f.write(f"# Hypothesis 2 Analysis Report: {self.file_prefix.upper()}\n\n")
-            f.write("## Hypothesis Statement (from paper)\n")
-            f.write("> GARCH-estimated conditional volatility innovations serve as an effective proxy for impact uncertainty.\n\n")
-            f.write("## Overall Result\n")
-            f.write(f"**Hypothesis 2 is {'SUPPORTED' if overall_h2_supported else 'PARTIALLY SUPPORTED' if any(report_data['Supported']) else 'NOT SUPPORTED'}**.\n\n")
-            f.write(summary_df.to_pandas().to_markdown(index=False) + "\n") # Use pandas for markdown
-
-        print(f"Hypothesis 2 report saved to: {report_file}")
-        summary_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_H2_sub_hypotheses.csv"))
+        print(f"--- Hypothesis 2 Analysis for {self.file_prefix.upper()} Complete ---")
+        return True
 
 
-    def run_full_h2_analysis(self):
-        if self._fit_garch_for_events():
-            self._test_h2_1_innovations_predict_returns()
-            self._test_h2_2_volatility_persistence()
-            self._test_h2_3_asymmetric_volatility_response()
-            self.generate_summary_report()
-            return True
-        return False
-
-def run_fda_analysis():
-    print("\n=== Starting FDA Approval Event Analysis for Hypothesis 2 (Paper Version) ===")
-    os.makedirs(FDA_RESULTS_DIR, exist_ok=True)
-    print(f"FDA results will be saved to: {os.path.abspath(FDA_RESULTS_DIR)}")
-    try:
-        data_loader = EventDataLoader(
-            event_path=FDA_EVENT_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS,
+def run_specific_analysis(event_type: str):
+    if event_type == "FDA":
+        analyzer = Hypothesis2Framework(results_dir=FDA_RESULTS_DIR, file_prefix=FDA_FILE_PREFIX)
+        success = analyzer.run_full_analysis(
+            event_file_path=FDA_EVENT_FILE, stock_file_paths=STOCK_FILES,
             event_date_col=FDA_EVENT_DATE_COL, ticker_col=FDA_TICKER_COL
         )
-        feature_engineer = EventFeatureEngineer(prediction_window=max(PREDICTION_WINDOWS)) # Not heavily used by H2
-        analyzer = EventAnalysis(data_loader, feature_engineer)
-        
-        print("\nLoading and preparing FDA data (minimal features for H2)...")
-        analyzer.data = analyzer.load_and_prepare_data(run_feature_engineering=False) # H2 relies on returns for GARCH
-        if analyzer.data is None or analyzer.data.is_empty():
-            print("\n*** Error: FDA data loading failed. ***")
-            return False
-        print(f"FDA data loaded. Shape: {analyzer.data.shape}")
-
-        h2_analyzer = Hypothesis2Analyzer(analyzer, FDA_RESULTS_DIR, FDA_FILE_PREFIX)
-        success = h2_analyzer.run_full_h2_analysis()
-        
-        print(f"\n--- FDA Event Analysis for Hypothesis 2 {'Finished' if success else 'Failed'} (Results in '{FDA_RESULTS_DIR}') ---")
-        return success
-    except Exception as e:
-        print(f"\n*** An unexpected error occurred in FDA H2 analysis: {e} ***")
-        traceback.print_exc()
-    return False
-
-def run_earnings_analysis():
-    print("\n=== Starting Earnings Announcement Event Analysis for Hypothesis 2 (Paper Version) ===")
-    os.makedirs(EARNINGS_RESULTS_DIR, exist_ok=True)
-    print(f"Earnings results will be saved to: {os.path.abspath(EARNINGS_RESULTS_DIR)}")
-    try:
-        data_loader = EventDataLoader(
-            event_path=EARNINGS_EVENT_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS,
+    elif event_type == "Earnings":
+        analyzer = Hypothesis2Framework(results_dir=EARNINGS_RESULTS_DIR, file_prefix=EARNINGS_FILE_PREFIX)
+        success = analyzer.run_full_analysis(
+            event_file_path=EARNINGS_EVENT_FILE, stock_file_paths=STOCK_FILES,
             event_date_col=EARNINGS_EVENT_DATE_COL, ticker_col=EARNINGS_TICKER_COL
         )
-        feature_engineer = EventFeatureEngineer(prediction_window=max(PREDICTION_WINDOWS))
-        analyzer = EventAnalysis(data_loader, feature_engineer)
-
-        print("\nLoading and preparing Earnings data (minimal features for H2)...")
-        analyzer.data = analyzer.load_and_prepare_data(run_feature_engineering=False)
-        if analyzer.data is None or analyzer.data.is_empty():
-            print("\n*** Error: Earnings data loading failed. ***")
-            return False
-        print(f"Earnings data loaded. Shape: {analyzer.data.shape}")
-
-        h2_analyzer = Hypothesis2Analyzer(analyzer, EARNINGS_RESULTS_DIR, EARNINGS_FILE_PREFIX)
-        success = h2_analyzer.run_full_h2_analysis()
-
-        print(f"\n--- Earnings Event Analysis for Hypothesis 2 {'Finished' if success else 'Failed'} (Results in '{EARNINGS_RESULTS_DIR}') ---")
-        return success
-    except Exception as e:
-        print(f"\n*** An unexpected error occurred in Earnings H2 analysis: {e} ***")
-        traceback.print_exc()
-    return False
+    else:
+        print(f"Unknown event type: {event_type}")
+        return False
+    return success
 
 def compare_results():
-    """Compares Hypothesis 2 results between FDA and earnings events."""
     print("\n=== Comparing FDA and Earnings Results for Hypothesis 2 ===")
     comparison_dir = "results/hypothesis2/comparison/"
     os.makedirs(comparison_dir, exist_ok=True)
 
-    try:
-        fda_h2_subs_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_H2_sub_hypotheses.csv")
-        earn_h2_subs_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_H2_sub_hypotheses.csv")
+    results_files = {
+        "H2_1": ("h2_1_results.csv", ["horizon"]),
+        "H2_2": ("h2_2_results.csv", []),
+        "H2_3": ("h2_3_results.csv", [])
+    }
+    
+    overall_comparison_data = []
 
-        if not os.path.exists(fda_h2_subs_file) or not os.path.exists(earn_h2_subs_file):
-            print(f"Error: H2 sub-hypothesis summary files missing.")
-            return False
+    for h_key, (fname, id_vars) in results_files.items():
+        fda_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_{fname}")
+        earn_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_{fname}")
 
-        fda_subs = pl.read_csv(fda_h2_subs_file)
-        earn_subs = pl.read_csv(earn_h2_subs_file)
+        if not os.path.exists(fda_file) or not os.path.exists(earn_file):
+            print(f"Skipping comparison for {h_key}: one or both files missing.")
+            continue
 
-        # Align by sub-hypothesis name for comparison
-        fda_subs = fda_subs.rename({"Sub-Hypothesis": "sub_hypothesis", "Supported": "fda_supported", "Details": "fda_details"})
-        earn_subs = earn_subs.rename({"Sub-Hypothesis": "sub_hypothesis", "Supported": "earn_supported", "Details": "earn_details"})
+        fda_df = pl.read_csv(fda_file)
+        earn_df = pl.read_csv(earn_file)
+
+        # For H2.1, we might have multiple rows (horizons). For others, usually one.
+        # For simplicity, we'll report if *any* test for H2.1 was supported.
+        if h_key == "H2_1":
+            fda_supported_any = fda_df['supported'].any()
+            earn_supported_any = earn_df['supported'].any()
+            fda_details = f"{fda_df.filter(pl.col('supported')==True).height}/{fda_df.height} horizons supported"
+            earn_details = f"{earn_df.filter(pl.col('supported')==True).height}/{earn_df.height} horizons supported"
+        else: # H2.2, H2.3 should have one row
+            fda_supported_any = fda_df['supported'][0] if not fda_df.is_empty() else False
+            earn_supported_any = earn_df['supported'][0] if not earn_df.is_empty() else False
+            fda_details = f"p={fda_df['p_value'][0]:.3f}" if 'p_value' in fda_df.columns and not fda_df.is_empty() else f"gamma={fda_df['avg_gamma'][0]:.3f}" if 'avg_gamma' in fda_df.columns and not fda_df.is_empty() else ""
+            earn_details = f"p={earn_df['p_value'][0]:.3f}" if 'p_value' in earn_df.columns and not earn_df.is_empty() else f"gamma={earn_df['avg_gamma'][0]:.3f}" if 'avg_gamma' in earn_df.columns and not earn_df.is_empty() else ""
         
-        comp_df = fda_subs.join(earn_subs, on="sub_hypothesis", how="outer")
-        comp_df = comp_df.select(['sub_hypothesis', 'fda_supported', 'earn_supported', 'fda_details', 'earn_details'])
-        
-        comp_df.write_csv(os.path.join(comparison_dir, "H2_comparison_sub_hypotheses.csv"))
-        print("\nHypothesis 2 Sub-Hypothesis Comparison:")
-        print(comp_df)
+        overall_comparison_data.append({
+            "Hypothesis": h_key,
+            "FDA_Supported": fda_supported_any,
+            "FDA_Details": fda_details,
+            "Earnings_Supported": earn_supported_any,
+            "Earnings_Details": earn_details
+        })
 
-        # Plotting comparison (simplified)
-        fig, ax = plt.subplots(figsize=(10, len(comp_df) * 0.5 + 2)) # Dynamic height
-        bar_height = 0.35
-        y_pos = np.arange(len(comp_df))
+    if not overall_comparison_data:
+        print("No results to compare.")
+        return
 
-        ax.barh(y_pos + bar_height/2, comp_df['fda_supported'].cast(pl.Int8).to_numpy(), bar_height, label='FDA Supported', color='skyblue')
-        ax.barh(y_pos - bar_height/2, comp_df['earn_supported'].cast(pl.Int8).to_numpy(), bar_height, label='Earnings Supported', color='lightcoral')
-        
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(comp_df['sub_hypothesis'].to_list())
-        ax.set_xlabel('Supported (1=Yes, 0=No)')
-        ax.set_title('Hypothesis 2 Support Comparison')
-        ax.legend()
-        plt.gca().invert_yaxis() # Display H2.1 at top
-        plt.tight_layout()
-        plt.savefig(os.path.join(comparison_dir, "H2_comparison_plot.png"), dpi=200)
-        plt.close(fig)
-        print(f"H2 Comparison plot saved to {comparison_dir}")
-        return True
+    summary_df = pl.DataFrame(overall_comparison_data)
+    print("\n--- H2 Comparison Summary ---")
+    print(summary_df)
+    summary_df.write_csv(os.path.join(comparison_dir, "h2_comparison_summary.csv"))
 
-    except Exception as e:
-        print(f"Error comparing H2 results: {e}")
-        traceback.print_exc()
-    return False
+    # Simple plot for overall support
+    n_hypotheses = len(summary_df)
+    index = np.arange(n_hypotheses)
+    bar_width = 0.35
+
+    fda_support_plot = summary_df["FDA_Supported"].cast(pl.Int8).to_list()
+    earn_support_plot = summary_df["Earnings_Supported"].cast(pl.Int8).to_list()
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(index - bar_width/2, fda_support_plot, bar_width, label='FDA Supported', color='blue')
+    ax.bar(index + bar_width/2, earn_support_plot, bar_width, label='Earnings Supported', color='orange')
+
+    ax.set_xlabel('Sub-Hypothesis')
+    ax.set_ylabel('Supported (1=Yes, 0=No)')
+    ax.set_title('Hypothesis 2 Support Comparison: FDA vs Earnings')
+    ax.set_xticks(index)
+    ax.set_xticklabels(summary_df["Hypothesis"].to_list())
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['No', 'Yes'])
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(comparison_dir, "h2_comparison_plot.png"), dpi=200)
+    plt.close(fig)
+    print(f"Saved H2 comparison plot to {comparison_dir}")
 
 
 def main():
-    fda_success = run_fda_analysis()
-    earnings_success = run_earnings_analysis()
+    fda_success = run_specific_analysis("FDA")
+    earnings_success = run_specific_analysis("Earnings")
 
     if fda_success and earnings_success:
         compare_results()
-    elif fda_success:
-        print("\n=== FDA H2 analysis completed. Earnings analysis failed or was skipped. ===")
-    elif earnings_success:
-        print("\n=== Earnings H2 analysis completed. FDA analysis failed or was skipped. ===")
     else:
-        print("\n=== Both FDA and Earnings H2 analyses failed. ===")
+        print("One or both H2 analyses failed, skipping comparison.")
 
 if __name__ == "__main__":
     main()
