@@ -120,36 +120,76 @@ class Hypothesis1Tester:
                 print(f"  Loading file {i+1}/{len(file_paths)}...")
             
             try:
-                df = pl.read_parquet(path)
+                df_raw = pl.read_parquet(path) # Read raw dataframe
                 
-                # Standardize column names
-                rename_map = {}
-                for col in df.columns:
-                    col_upper = col.upper()
-                    if col_upper == 'PERMNO':
-                        rename_map[col] = 'ticker'
-                    elif col_upper == 'DATE':
-                        rename_map[col] = 'date'
-                    elif col_upper == 'PRC':
-                        rename_map[col] = 'price'
-                    elif col_upper == 'RET':
-                        rename_map[col] = 'returns'
+                # Identify source column names
+                source_ticker_col = None
+                source_date_col = None
+                source_price_col = None
+                source_returns_col = None
+
+                # Create a mapping of standardized uppercase names to actual column names found
+                col_map_upper = {col.upper(): col for col in df_raw.columns}
+
+                # For ticker: Prioritize PERMNO, then TICKER, then SYMBOL
+                if 'PERMNO' in col_map_upper:
+                    source_ticker_col = col_map_upper['PERMNO']
+                elif 'TICKER' in col_map_upper:
+                    source_ticker_col = col_map_upper['TICKER']
+                elif 'SYMBOL' in col_map_upper:
+                    source_ticker_col = col_map_upper['SYMBOL']
                 
-                df = df.rename(rename_map)
+                # For date:
+                if 'DATE' in col_map_upper:
+                    source_date_col = col_map_upper['DATE']
                 
-                # Select and cast required columns
-                required_cols = ['ticker', 'date', 'price', 'returns']
-                if all(col in df.columns for col in required_cols):
-                    df = df.select(required_cols).with_columns([
-                        pl.col('ticker').cast(pl.Utf8),
-                        pl.col('date').cast(pl.Date),
-                        pl.col('price').cast(pl.Float64).abs(),  # Handle negative prices
-                        pl.col('returns').cast(pl.Float64)
-                    ])
-                    dfs.append(df)
+                # For price: Prioritize PRC, then PRICE
+                if 'PRC' in col_map_upper:
+                    source_price_col = col_map_upper['PRC']
+                elif 'PRICE' in col_map_upper:
+                    source_price_col = col_map_upper['PRICE']
+
+                # For returns: Prioritize RET, then RETURNS, then RETURN
+                if 'RET' in col_map_upper:
+                    source_returns_col = col_map_upper['RET']
+                elif 'RETURNS' in col_map_upper:
+                    source_returns_col = col_map_upper['RETURNS']
+                elif 'RETURN' in col_map_upper: # Some files might use singular
+                    source_returns_col = col_map_upper['RETURN']
+
+                # Check if all required source columns were found
+                missing_cols = []
+                if not source_ticker_col: missing_cols.append("ticker (PERMNO/TICKER/SYMBOL)")
+                if not source_date_col: missing_cols.append("date (DATE)")
+                if not source_price_col: missing_cols.append("price (PRC/PRICE)")
+                if not source_returns_col: missing_cols.append("returns (RET/RETURNS/RETURN)")
+
+                if missing_cols:
+                    print(f"  Warning: Could not find all required source columns in {path}. Missing: {', '.join(missing_cols)}.")
+                    print(f"    Available columns (original): {df_raw.columns}")
+                    continue
+
+                # Select and rename in one go using expressions
+                # This ensures no intermediate duplicate names are created.
+                df = df_raw.select([
+                    pl.col(source_ticker_col).alias('ticker'),
+                    pl.col(source_date_col).alias('date'),
+                    pl.col(source_price_col).alias('price'),
+                    pl.col(source_returns_col).alias('returns')
+                ])
+                
+                # Now cast
+                df = df.with_columns([
+                    pl.col('ticker').cast(pl.Utf8),
+                    pl.col('date').cast(pl.Date),
+                    pl.col('price').cast(pl.Float64).abs(),  # Handle negative prices
+                    pl.col('returns').cast(pl.Float64)
+                ])
+                dfs.append(df)
                     
             except Exception as e:
-                print(f"  Warning: Could not load {path}: {e}")
+                # More specific error for loading vs processing
+                print(f"  Warning: Error processing file {path}: {e}")
                 continue
         
         if not dfs:
@@ -234,8 +274,8 @@ class Hypothesis1Tester:
         # Process events using EventProcessor
         print("\nProcessing events with unified volatility model...")
         self.processed_data = self.event_processor.process_events(
-            price_data=stock_df.to_pandas(),
-            event_data=event_df.to_pandas()
+            price_data=stock_df.to_pandas(), # EventProcessor expects pandas
+            event_data=event_df.to_pandas()  # EventProcessor expects pandas
         )
         
         if self.processed_data is None or self.processed_data.empty:
@@ -326,7 +366,11 @@ class Hypothesis1Tester:
         print("\nTesting Hypothesis 1...")
         
         results = {}
-        
+        if self.phase_metrics is None or self.phase_metrics.empty:
+            print("Warning: Phase metrics not calculated. Skipping hypothesis test.")
+            self.hypothesis_results = results
+            return
+
         # Get metrics for each phase
         metrics_dict = {
             row['phase']: row for _, row in self.phase_metrics.iterrows()
@@ -391,11 +435,14 @@ class Hypothesis1Tester:
     
     def _perform_statistical_tests(self, metric: str, test_phase: str) -> Dict[str, Any]:
         """Perform statistical tests comparing phases."""
-        test_data = self.processed_data[self.processed_data['phase'] == test_phase][metric].values
+        if self.processed_data is None or self.processed_data.empty:
+            return {}
+            
+        test_data = self.processed_data[self.processed_data['phase'] == test_phase][metric].dropna().values
         results = {}
         
         for compare_phase in ['pre_event_early', 'pre_event_late', 'post_event_decay']:
-            compare_data = self.processed_data[self.processed_data['phase'] == compare_phase][metric].values
+            compare_data = self.processed_data[self.processed_data['phase'] == compare_phase][metric].dropna().values
             
             if len(test_data) > 1 and len(compare_data) > 1:
                 # T-test (one-sided, testing if rising > other)
@@ -419,7 +466,13 @@ class Hypothesis1Tester:
     def _create_visualizations(self):
         """Create plots for Hypothesis 1 analysis."""
         print("\nGenerating visualizations...")
-        
+        if self.processed_data is None or self.processed_data.empty:
+            print("Warning: No processed data to visualize.")
+            return
+        if self.phase_metrics is None or self.phase_metrics.empty:
+            print("Warning: No phase metrics to visualize.")
+            return
+
         # 1. Time series plot of RVR and Sharpe around events
         self._plot_time_series()
         
@@ -443,7 +496,7 @@ class Hypothesis1Tester:
         }).reset_index()
         
         # Flatten column names
-        daily_avg.columns = ['_'.join(col).strip('_') for col in daily_avg.columns]
+        daily_avg.columns = ['_'.join(col).strip('_') for col in daily_avg.columns.values]
         
         # Create figure
         fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
@@ -461,10 +514,15 @@ class Hypothesis1Tester:
                        alpha=0.3, color='blue')
         
         # Mark phases
+        rising_phase_label_added = False
         for phase, (start, end) in self.phases.items():
             if 'rising' in phase:
-                ax.axvspan(start, end, alpha=0.2, color='red', label='Post-event rising')
-        
+                if not rising_phase_label_added:
+                    ax.axvspan(start, end, alpha=0.2, color='red', label='Post-event rising')
+                    rising_phase_label_added = True
+                else:
+                    ax.axvspan(start, end, alpha=0.2, color='red')
+
         ax.axvline(0, color='black', linestyle='--', label='Event day')
         ax.set_ylabel('Return-to-Variance Ratio')
         ax.set_title(f'{self.event_type.upper()}: Average RVR Around Events')
@@ -539,11 +597,13 @@ class Hypothesis1Tester:
         # Add significance markers
         if self.hypothesis_results and 'rvr' in self.hypothesis_results:
             stats_results = self.hypothesis_results['rvr'].get('statistical_tests', {})
-            rising_idx = list(phases).index('post_event_rising')
+            # rising_idx = list(phases).index('post_event_rising') # Not needed if comparing to rising
             
-            for i, phase in enumerate(phases):
-                if phase in stats_results and stats_results[phase].get('significant_at_5pct'):
-                    ax.annotate('*', xy=(i, rvr_means[i]), xytext=(i, rvr_means[i] + 0.001),
+            for i, phase_name in enumerate(phases):
+                if phase_name != 'post_event_rising' and phase_name in stats_results and \
+                   stats_results[phase_name].get('significant_at_5pct'):
+                    # This marks if post_event_rising is significantly greater than phase_name
+                    ax.annotate('*', xy=(i, rvr_means[i]), xytext=(i, rvr_means[i] + 0.001 * np.sign(rvr_means[i]) if rvr_means[i] != 0 else 0.001),
                                ha='center', fontsize=16, color='red')
         
         # Sharpe comparison
@@ -567,9 +627,10 @@ class Hypothesis1Tester:
         if self.hypothesis_results and 'sharpe' in self.hypothesis_results:
             stats_results = self.hypothesis_results['sharpe'].get('statistical_tests', {})
             
-            for i, phase in enumerate(phases):
-                if phase in stats_results and stats_results[phase].get('significant_at_5pct'):
-                    ax.annotate('*', xy=(i, sharpe_means[i]), xytext=(i, sharpe_means[i] + 0.01),
+            for i, phase_name in enumerate(phases):
+                if phase_name != 'post_event_rising' and phase_name in stats_results and \
+                   stats_results[phase_name].get('significant_at_5pct'):
+                    ax.annotate('*', xy=(i, sharpe_means[i]), xytext=(i, sharpe_means[i] + 0.01 * np.sign(sharpe_means[i]) if sharpe_means[i] != 0 else 0.01),
                                ha='center', fontsize=16, color='red')
         
         # Add overall result as title
@@ -593,14 +654,15 @@ class Hypothesis1Tester:
         # RVR distributions
         ax = axes[0, 0]
         for phase in self.phases.keys():
-            phase_data = self.processed_data[self.processed_data['phase'] == phase]['rvr']
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['rvr'].dropna()
             if len(phase_data) > 0:
                 # Remove extreme outliers for better visualization
-                q1, q99 = phase_data.quantile([0.01, 0.99])
-                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
+                q_low, q_high = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q_low) & (phase_data <= q_high)]
                 
-                ax.hist(phase_data_clean, bins=50, alpha=0.5, 
-                       label=phase.replace('_', ' ').title(), density=True)
+                if len(phase_data_clean) > 0:
+                    ax.hist(phase_data_clean, bins=50, alpha=0.5, 
+                           label=phase.replace('_', ' ').title(), density=True)
         
         ax.set_xlabel('RVR')
         ax.set_ylabel('Density')
@@ -614,22 +676,24 @@ class Hypothesis1Tester:
         labels = []
         
         for phase in self.phases.keys():
-            phase_data = self.processed_data[self.processed_data['phase'] == phase]['rvr']
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['rvr'].dropna()
             if len(phase_data) > 0:
                 # Remove extreme outliers
-                q1, q99 = phase_data.quantile([0.01, 0.99])
-                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
-                rvr_data.append(phase_data_clean)
-                labels.append(phase.replace('_', ' ').title())
+                q_low, q_high = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q_low) & (phase_data <= q_high)]
+                if len(phase_data_clean) > 0:
+                    rvr_data.append(phase_data_clean)
+                    labels.append(phase.replace('_', ' ').title())
         
-        bp = ax.boxplot(rvr_data, labels=labels, patch_artist=True)
-        
-        # Color the post-event rising box differently
-        for i, patch in enumerate(bp['boxes']):
-            if 'Rising' in labels[i]:
-                patch.set_facecolor('salmon')
-            else:
-                patch.set_facecolor('lightblue')
+        if rvr_data:
+            bp = ax.boxplot(rvr_data, labels=labels, patch_artist=True)
+            
+            # Color the post-event rising box differently
+            for i, patch in enumerate(bp['boxes']):
+                if 'Rising' in labels[i]:
+                    patch.set_facecolor('salmon')
+                else:
+                    patch.set_facecolor('lightblue')
         
         ax.set_ylabel('RVR')
         ax.set_title('RVR Distribution by Phase (1st-99th percentile)')
@@ -639,14 +703,15 @@ class Hypothesis1Tester:
         # Sharpe distributions
         ax = axes[1, 0]
         for phase in self.phases.keys():
-            phase_data = self.processed_data[self.processed_data['phase'] == phase]['sharpe_ratio']
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['sharpe_ratio'].dropna()
             if len(phase_data) > 0:
                 # Remove extreme outliers
-                q1, q99 = phase_data.quantile([0.01, 0.99])
-                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
+                q_low, q_high = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q_low) & (phase_data <= q_high)]
                 
-                ax.hist(phase_data_clean, bins=50, alpha=0.5,
-                       label=phase.replace('_', ' ').title(), density=True)
+                if len(phase_data_clean) > 0:
+                    ax.hist(phase_data_clean, bins=50, alpha=0.5,
+                           label=phase.replace('_', ' ').title(), density=True)
         
         ax.set_xlabel('Sharpe Ratio')
         ax.set_ylabel('Density')
@@ -657,23 +722,26 @@ class Hypothesis1Tester:
         # Sharpe box plot
         ax = axes[1, 1]
         sharpe_data = []
+        # labels are already defined from RVR box plot
         
         for phase in self.phases.keys():
-            phase_data = self.processed_data[self.processed_data['phase'] == phase]['sharpe_ratio']
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['sharpe_ratio'].dropna()
             if len(phase_data) > 0:
                 # Remove extreme outliers
-                q1, q99 = phase_data.quantile([0.01, 0.99])
-                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
-                sharpe_data.append(phase_data_clean)
+                q_low, q_high = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q_low) & (phase_data <= q_high)]
+                if len(phase_data_clean) > 0:
+                    sharpe_data.append(phase_data_clean)
         
-        bp = ax.boxplot(sharpe_data, labels=labels, patch_artist=True)
-        
-        # Color the post-event rising box differently
-        for i, patch in enumerate(bp['boxes']):
-            if 'Rising' in labels[i]:
-                patch.set_facecolor('salmon')
-            else:
-                patch.set_facecolor('lightgreen')
+        if sharpe_data:
+            bp = ax.boxplot(sharpe_data, labels=labels, patch_artist=True)
+            
+            # Color the post-event rising box differently
+            for i, patch in enumerate(bp['boxes']):
+                if 'Rising' in labels[i]:
+                    patch.set_facecolor('salmon')
+                else:
+                    patch.set_facecolor('lightgreen')
         
         ax.set_ylabel('Sharpe Ratio')
         ax.set_title('Sharpe Ratio Distribution by Phase (1st-99th percentile)')
@@ -709,9 +777,14 @@ class Hypothesis1Tester:
                        alpha=0.3, color='orange', label='Event adjustment (φ)')
         
         # Mark phases
+        rising_phase_label_added = False
         for phase, (start, end) in self.phases.items():
             if 'rising' in phase:
-                ax.axvspan(start, end, alpha=0.2, color='red')
+                if not rising_phase_label_added:
+                    ax.axvspan(start, end, alpha=0.2, color='red', label='Post-event rising')
+                    rising_phase_label_added = True
+                else:
+                    ax.axvspan(start, end, alpha=0.2, color='red')
         
         ax.axvline(0, color='black', linestyle='--', label='Event day')
         ax.set_xlabel('Days to Event')
@@ -729,34 +802,40 @@ class Hypothesis1Tester:
         """Save analysis results to files."""
         print("\nSaving results...")
         
+        if self.processed_data is None or self.processed_data.empty:
+            print("Warning: No processed data to save.")
+            return
+
         # Save processed data
         self.processed_data.to_csv(
             os.path.join(self.results_dir, f'{self.event_type}_h1_processed_data.csv'),
             index=False
         )
         
-        # Save phase metrics
-        self.phase_metrics.to_csv(
-            os.path.join(self.results_dir, f'{self.event_type}_h1_phase_metrics.csv'),
-            index=False
-        )
+        if self.phase_metrics is not None and not self.phase_metrics.empty:
+            # Save phase metrics
+            self.phase_metrics.to_csv(
+                os.path.join(self.results_dir, f'{self.event_type}_h1_phase_metrics.csv'),
+                index=False
+            )
         
-        # Save hypothesis test results
-        results_summary = pd.DataFrame([{
-            'event_type': self.event_type,
-            'rvr_peak_supported': self.hypothesis_results.get('rvr', {}).get('peak_in_rising_phase', None),
-            'rvr_rising_value': self.hypothesis_results.get('rvr', {}).get('rising_phase_value', None),
-            'sharpe_peak_supported': self.hypothesis_results.get('sharpe', {}).get('peak_in_rising_phase', None),
-            'sharpe_rising_value': self.hypothesis_results.get('sharpe', {}).get('rising_phase_value', None),
-            'n_total_obs': len(self.processed_data),
-            'n_events': self.processed_data['event_date'].nunique(),
-            'n_symbols': self.processed_data['symbol'].nunique()
-        }])
-        
-        results_summary.to_csv(
-            os.path.join(self.results_dir, f'{self.event_type}_h1_test_results.csv'),
-            index=False
-        )
+        if self.hypothesis_results is not None:
+            # Save hypothesis test results
+            results_summary = pd.DataFrame([{
+                'event_type': self.event_type,
+                'rvr_peak_supported': self.hypothesis_results.get('rvr', {}).get('peak_in_rising_phase', None),
+                'rvr_rising_value': self.hypothesis_results.get('rvr', {}).get('rising_phase_value', None),
+                'sharpe_peak_supported': self.hypothesis_results.get('sharpe', {}).get('peak_in_rising_phase', None),
+                'sharpe_rising_value': self.hypothesis_results.get('sharpe', {}).get('rising_phase_value', None),
+                'n_total_obs': len(self.processed_data),
+                'n_events': self.processed_data['event_date'].nunique(),
+                'n_symbols': self.processed_data['symbol'].nunique()
+            }])
+            
+            results_summary.to_csv(
+                os.path.join(self.results_dir, f'{self.event_type}_h1_test_results.csv'),
+                index=False
+            )
         
         print(f"Results saved to {self.results_dir}")
 
@@ -783,11 +862,13 @@ def run_hypothesis1_analysis(event_type: str, event_file: str, date_col: str,
     
     # Load data
     stock_df = tester.load_stock_data(stock_files)
-    if stock_df is None:
+    if stock_df is None or stock_df.is_empty():
+        print(f"Failed to load stock data for {event_type}.")
         return False
     
     event_df = tester.load_event_data(event_file, date_col, ticker_col)
-    if event_df is None:
+    if event_df is None or event_df.is_empty():
+        print(f"Failed to load event data for {event_type}.")
         return False
     
     # Run analysis
@@ -797,13 +878,27 @@ def run_hypothesis1_analysis(event_type: str, event_file: str, date_col: str,
 def compare_results():
     """Compare results between FDA and earnings events."""
     print("\n" + "="*60)
-    print("Comparing FDA and Earnings Results")
+    print("Comparing FDA and Earnings Results for Hypothesis 1")
     print("="*60)
     
+    fda_results_path = os.path.join(FDA_RESULTS_DIR, 'fda_h1_test_results.csv')
+    earnings_results_path = os.path.join(EARNINGS_RESULTS_DIR, 'earnings_h1_test_results.csv')
+
+    if not os.path.exists(fda_results_path):
+        print(f"FDA results file not found: {fda_results_path}")
+        return
+    if not os.path.exists(earnings_results_path):
+        print(f"Earnings results file not found: {earnings_results_path}")
+        return
+
     # Load results
-    fda_results = pd.read_csv(os.path.join(FDA_RESULTS_DIR, 'fda_h1_test_results.csv'))
-    earnings_results = pd.read_csv(os.path.join(EARNINGS_RESULTS_DIR, 'earnings_h1_test_results.csv'))
+    fda_results = pd.read_csv(fda_results_path)
+    earnings_results = pd.read_csv(earnings_results_path)
     
+    if fda_results.empty or earnings_results.empty:
+        print("One or both result files are empty. Cannot compare.")
+        return
+
     # Create comparison figure
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     
@@ -817,9 +912,10 @@ def compare_results():
     }, index=['RVR Peak', 'Sharpe Peak'])
     
     support_data.plot(kind='bar', ax=ax, color=['lightblue', 'lightgreen'])
-    ax.set_ylabel('Hypothesis Supported')
+    ax.set_ylabel('Hypothesis Supported (1=Yes, 0=No)')
     ax.set_title('Hypothesis 1 Support Comparison')
-    ax.set_ylim(0, 1.2)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['No', 'Yes'])
     ax.legend()
     ax.grid(True, alpha=0.3, axis='y')
     
@@ -881,6 +977,8 @@ def main():
     # Compare results if both succeeded
     if fda_success and earnings_success:
         compare_results()
+    else:
+        print("\nComparison skipped as one or both analyses did not complete successfully.")
     
     print("\nAnalysis complete!")
 
