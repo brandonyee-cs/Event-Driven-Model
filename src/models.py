@@ -1,675 +1,935 @@
-"""
-Theoretical Models Module - Unified Asset Pricing Framework
-
-Implements the theoretical models from "Modeling Equilibrium Asset Pricing 
-Around Events with Heterogeneous Beliefs, Dynamic Volatility, and a Two-Risk 
-Uncertainty Framework" by Brandon Yee.
-
-Key components:
-- Multi-period portfolio optimization with transaction costs
-- Equilibrium price dynamics with heterogeneous investors  
-- Unified volatility dynamics (GJR-GARCH + event adjustments)
-- Risk metrics for hypothesis testing
-"""
-
+import numpy as np
+import polars as pl # Use Polars for type hints if applicable, but core logic is NumPy/Sklearn
+from sklearn.linear_model import Ridge
+import xgboost as xgb
+from scipy.optimize import minimize
+import warnings
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Optional, List, Union
-from dataclasses import dataclass
-from scipy.optimize import minimize_scalar, brentq, minimize
-from scipy.stats import norm
-import warnings
+from typing import Tuple, List, Dict, Optional, Union
 
-warnings.filterwarnings('ignore')
 
-@dataclass
-class InvestorParams:
-    """Parameters for different investor types (Section 3.1, Assumption 6)"""
-    risk_aversion: float  # gamma
-    bias_baseline: float  # b_0
-    bias_sensitivity: float  # kappa
-    transaction_cost_buy: float  # tau_b
-    transaction_cost_sell: float  # tau_s
-    liquidity_constraint: float = 0.0  # lambda for liquidity traders
-    information_quality: float = 1.0  # precision of information
-    wealth: float = 1000000.0  # investor wealth
+pl.Config.set_engine_affinity(engine="streaming")
 
-@dataclass
-class MarketParams:
-    """Market-wide parameters (Section 3.1)"""
-    risk_free_rate: float  # r_t (daily)
-    generic_return: float  # mu_g (daily expected return)
-    generic_volatility: float  # sigma_g (daily volatility)
-    correlation: float  # rho between event and generic assets
-    event_asset_supply: float  # S_e (fixed supply)
-    
-class UnifiedVolatilityModel:
+class TimeSeriesRidge(Ridge):
     """
-    Implements the unified volatility model from Section 3.1, Assumption 4.
-    Combines GJR-GARCH baseline with event-specific adjustments.
-    
-    sigma_e(t) = sqrt(h_t) * (1 + phi(t))
+    Ridge regression with temporal smoothing penalty.
+
+    The model minimizes:
+    ||y - Xβ||² + α||β||² + λ₂||Dβ||²
+
+    Where D is a differencing matrix penalizing changes between *consecutive* coefficients
+    assuming features in X are ordered meaningfully (e.g., by time lag or window size).
+    Note: The effectiveness depends heavily on the order of features in X.
+
+    Accepts Polars DataFrame for X, converts to NumPy for internal calculation.
     """
+    def __init__(self, alpha=1.0, lambda2=0.1, feature_order=None, **kwargs):
+        """
+        Parameters:
+        alpha (float): L2 regularization strength (standard Ridge).
+        lambda2 (float): Temporal smoothing strength.
+        feature_order (list, optional): The list of feature names in the desired order
+                                         for applying the differencing penalty. If None,
+                                         the penalty is applied based on the column order
+                                         of X passed to fit().
+        kwargs: Additional arguments for Ridge.
+        """
+        super().__init__(alpha=alpha, **kwargs)
+        self.lambda2 = lambda2
+        self.feature_order = feature_order # Store the desired order
+        self.feature_names_in_ = None # Store actual feature names used in fit
+
+    def _get_differencing_matrix(self, n_features):
+        """Create differencing matrix D based on consecutive features."""
+        if n_features <= 1:
+            # No differences to compute for 0 or 1 feature
+            return np.zeros((0, n_features))
+
+        D = np.zeros((n_features - 1, n_features))
+        for i in range(n_features - 1):
+            D[i, i] = 1
+            D[i, i + 1] = -1
+        return D
+
+    def fit(self, X, y, sample_weight=None):
+        """
+        Fit model with the combined penalty.
+        If self.feature_order is set, X (Polars DF) is reordered before applying the penalty.
+        Converts X and y to NumPy arrays for Ridge fitting.
+        """
+        if not isinstance(X, pl.DataFrame):
+            raise TypeError("X must be a Polars DataFrame.")
+        if isinstance(y, pl.Series):
+            y_np = y.to_numpy()
+        elif isinstance(y, np.ndarray):
+            y_np = y
+        else:
+            raise TypeError("y must be a Polars Series or NumPy array.")
+
+        original_X_columns = X.columns # Keep track of original order/names
+
+        # Reorder X (Polars DF) according to feature_order if provided
+        if self.feature_order is not None:
+             missing_features = set(self.feature_order) - set(X.columns)
+             if missing_features:
+                 raise ValueError(f"Features specified in feature_order are missing from X: {missing_features}")
+             extra_features = set(X.columns) - set(self.feature_order)
+             if extra_features:
+                 # print(f"Warning: X contains features not in feature_order: {extra_features}. They will be placed at the end.")
+                 # Maintain all columns, but order according to feature_order first
+                 ordered_cols = self.feature_order + list(extra_features)
+                 X_ordered = X.select(ordered_cols) # Select columns in Polars
+             else:
+                 X_ordered = X.select(self.feature_order)
+             # print(f"Fitting TimeSeriesRidge with feature order: {X_ordered.columns}")
+             self.feature_names_in_ = X_ordered.columns # Store the order used for D matrix
+        else:
+             X_ordered = X # Use the DataFrame as is
+             # if isinstance(X_ordered, pl.DataFrame):
+             #     print(f"Fitting TimeSeriesRidge with default feature order: {X_ordered.columns}")
+             self.feature_names_in_ = X_ordered.columns
+
+        # Convert potentially reordered Polars DataFrame to NumPy array
+        try:
+            # Ensure numeric types before converting to NumPy
+            numeric_cols = X_ordered.columns
+            X_np = X_ordered.select(
+                [pl.col(c).cast(pl.Float64, strict=False) for c in numeric_cols]
+            ).to_numpy()
+        except Exception as e:
+             raise ValueError(f"Failed to convert Polars DataFrame X to NumPy: {e}. Check dtypes.")
+
+        # Ensure y is float64 numpy array
+        y_np = np.asarray(y_np, dtype=np.float64)
+
+        n_samples, n_features = X_np.shape
+
+        # Basic checks for NaN/inf in NumPy arrays
+        if np.isnan(X_np).any() or np.isinf(X_np).any():
+             nan_cols = [self.feature_names_in_[i] for i in np.where(np.isnan(X_np).any(axis=0))[0]]
+             inf_cols = [self.feature_names_in_[i] for i in np.where(np.isinf(X_np).any(axis=0))[0]]
+             # raise ValueError(f"NaN or Inf values detected in feature matrix X before fitting. NaN cols: {nan_cols}, Inf cols: {inf_cols}. Impute first.")
+             warnings.warn(f"NaN or Inf values detected in feature matrix X before fitting. NaN cols: {nan_cols}, Inf cols: {inf_cols}. Impute first.")
+        if np.isnan(y_np).any() or np.isinf(y_np).any():
+             raise ValueError("NaN or Inf values detected in target vector y before fitting.")
+
+        # Get differencing matrix based on the number of features used for D
+        D = self._get_differencing_matrix(n_features)
+
+        # If no differencing is possible (e.g., 1 feature), fall back to standard Ridge
+        if D.shape[0] == 0 or self.lambda2 == 0:
+            # print("Applying standard Ridge regression (lambda2=0 or n_features<=1).")
+            ridge_model = Ridge(alpha=self.alpha, fit_intercept=self.fit_intercept, **self.get_params(deep=False))
+            ridge_model.fit(X_np, y_np, sample_weight)
+            self.coef_ = ridge_model.coef_
+            self.intercept_ = ridge_model.intercept_
+            # Feature names already stored in self.feature_names_in_
+            return self
+
+        # --- Augmentation Method for Combined Penalty ---
+        sqrt_lambda2_D = np.sqrt(self.lambda2) * D
+        X_augmented = np.vstack([X_np, sqrt_lambda2_D])
+        y_augmented = np.concatenate([y_np, np.zeros(D.shape[0])])
+
+        # Fit standard Ridge on augmented data with the original alpha (self.alpha)
+        ridge_solver = Ridge(alpha=self.alpha, fit_intercept=self.fit_intercept, **self.get_params(deep=False))
+
+        if sample_weight is not None:
+             augmented_weights = np.concatenate([sample_weight, np.ones(D.shape[0])])
+             ridge_solver.fit(X_augmented, y_augmented, sample_weight=augmented_weights)
+        else:
+             ridge_solver.fit(X_augmented, y_augmented)
+
+        # Store the fitted coefficients and intercept
+        self.coef_ = ridge_solver.coef_
+        self.intercept_ = ridge_solver.intercept_
+
+        # If features were reordered for the D matrix, we need to ensure the final
+        # self.coef_ corresponds to the *original* feature order of X.
+        if self.feature_order is not None:
+            # self.feature_names_in_ holds the order used for D
+            # self.coef_ corresponds to self.feature_names_in_
+            # We need coefficients corresponding to original_X_columns
+            coef_dict = dict(zip(self.feature_names_in_, self.coef_))
+            # Reconstruct based on original_X_columns, filling with 0 if a column was somehow dropped (shouldn't happen here)
+            original_order_coef = [coef_dict.get(col, 0) for col in original_X_columns]
+            self.coef_ = np.array(original_order_coef)
+            # Update feature_names_in_ to reflect the final coefficient order
+            self.feature_names_in_ = original_X_columns
+        # else: self.feature_names_in_ already holds the correct (original) order
+
+        return self
+
+    def predict(self, X):
+        """Predict using the fitted model. Expects Polars DataFrame X."""
+        if not isinstance(X, pl.DataFrame):
+            raise TypeError("X must be a Polars DataFrame for prediction.")
+        if self.feature_names_in_ is None:
+            raise RuntimeError("Model not fitted or feature names not stored.")
+
+        # Ensure prediction X has the columns expected by the *fitted* model
+        # (self.feature_names_in_ reflects the order coef_ corresponds to)
+        missing_cols = set(self.feature_names_in_) - set(X.columns)
+        if missing_cols:
+            raise ValueError(f"Prediction data missing columns used during fit: {missing_cols}")
+
+        # Select and order columns in Polars DF
+        X_ordered = X.select(self.feature_names_in_)
+
+        # Convert Polars DF to NumPy
+        try:
+            X_np = X_ordered.select(
+                [pl.col(c).cast(pl.Float64, strict=False) for c in self.feature_names_in_]
+            ).to_numpy()
+        except Exception as e:
+             raise ValueError(f"Failed to convert prediction Polars DataFrame X to NumPy: {e}. Check dtypes.")
+
+        # Use the underlying Ridge predict method with the NumPy array
+        return super().predict(X_np)
+
+
+class XGBoostDecileModel:
+    """
+    XGBoostDecile Ensemble Model using Polars for data handling.
+    Combines an XGBoost model with decile-based TimeSeriesRidge models.
+
+    Prediction: yᵢ = w · yᵢ,XGBoost + (1 - w) · yᵢ,Decile
+    """
+    def __init__(self, weight=0.5, momentum_feature='momentum_5', n_deciles=10,
+                 alpha=0.1, lambda_smooth=0.1, xgb_params=None, ts_ridge_feature_order=None):
+        if not 0 <= weight <= 1:
+             raise ValueError("Weight must be between 0 and 1.")
+        self.weight = weight
+        self.momentum_feature = momentum_feature
+        self.n_deciles = n_deciles
+        self.alpha = alpha # For decile TimeSeriesRidge
+        self.lambda_smooth = lambda_smooth # For decile TimeSeriesRidge
+        self.ts_ridge_feature_order = ts_ridge_feature_order # Pass feature order to decile models
+
+        # Default XGBoost parameters
+        if xgb_params is None:
+            self.xgb_params = {
+                'n_estimators': 100, 'max_depth': 5, 'learning_rate': 0.1,
+                'objective': 'reg:squarederror', 'subsample': 0.8, 'colsample_bytree': 0.8,
+                'random_state': 42, 'n_jobs': -1
+                # 'early_stopping_rounds': 10 # Add this back if needed, handle in fit
+            }
+        else:
+            self.xgb_params = xgb_params
+
+        self.xgb_model = xgb.XGBRegressor(**self.xgb_params)
+        self.decile_models = [None] * n_deciles
+        self.decile_boundaries = None # Store NumPy array of boundaries
+        self.feature_names_in_ = None # Store feature names from training X
+
+    def _calculate_decile_boundaries(self, X: pl.DataFrame):
+        """Calculate decile boundaries using Polars quantile."""
+        if self.momentum_feature not in X.columns:
+             raise ValueError(f"Momentum feature '{self.momentum_feature}' not found in input data.")
+
+        # Calculate quantiles using Polars, ignoring nulls
+        quantiles_pl = X.select(
+            pl.col(self.momentum_feature).drop_nulls().quantile(q).alias(f"q_{q}")
+            for q in np.linspace(0, 1, self.n_deciles + 1)[1:-1] # Exclude 0 and 1
+        )
+        if quantiles_pl.is_empty() or quantiles_pl.height == 0: # Should not happen if X is not empty
+             raise ValueError("Could not calculate decile boundaries, possibly due to all-null momentum feature.")
+        
+        quantiles_values = quantiles_pl.row(0) # Get quantiles as a tuple
+
+        self.decile_boundaries = np.array(quantiles_values, dtype=np.float64)
+        # print(f"Calculated {len(self.decile_boundaries)} decile boundaries based on '{self.momentum_feature}'.")
+
+
+    def _assign_deciles(self, X: pl.DataFrame) -> pl.DataFrame:
+        """Assign observations to deciles based on momentum feature using WHEN/THEN."""
+        if self.decile_boundaries is None:
+             raise RuntimeError("Decile boundaries have not been calculated. Call fit first.")
+        if self.momentum_feature not in X.columns:
+             raise ValueError(f"Momentum feature '{self.momentum_feature}' not found in input data.")
+        if len(self.decile_boundaries) == 0: # Case where n_deciles might be 1 or problematic
+            # Assign all to decile 0 if no boundaries (e.g., for n_deciles=1)
+            return X.with_columns(pl.lit(0, dtype=pl.Int32).alias("decile_assignment"))
+
+        mom_col = pl.col(self.momentum_feature)
+        boundaries = self.decile_boundaries # NumPy array
+
+        # Handle NaNs: assign to decile 0
+        # Build chained when/then expression
+        decile_expr = pl.when(mom_col.is_nan()).then(pl.lit(0, dtype=pl.Int32))
+        # Decile 0: less than first boundary
+        decile_expr = decile_expr.when(mom_col < boundaries[0]).then(pl.lit(0, dtype=pl.Int32))
+        # Intermediate deciles
+        for i in range(len(boundaries) - 1):
+            decile_expr = decile_expr.when(
+                (mom_col >= boundaries[i]) & (mom_col < boundaries[i+1])
+            ).then(pl.lit(i + 1, dtype=pl.Int32))
+        # Last decile: greater than or equal to last boundary
+        decile_expr = decile_expr.when(mom_col >= boundaries[-1]).then(pl.lit(self.n_deciles - 1, dtype=pl.Int32))
+        # Fallback (should ideally not be reached if logic is complete)
+        decile_expr = decile_expr.otherwise(pl.lit(0, dtype=pl.Int32)) # Assign unexpected to 0
+
+        return X.with_columns(decile_expr.alias("decile_assignment"))
+
+    def fit(self, X: pl.DataFrame, y: pl.Series):
+        """
+        Fit both the XGBoost model and the decile-based TimeSeriesRidge models.
+        Converts data to NumPy for model fitting.
+        """
+        # print("Fitting XGBoostDecileModel (Polars input)...")
+        if not isinstance(X, pl.DataFrame): raise TypeError("X must be a Polars DataFrame.")
+        if not isinstance(y, pl.Series): raise TypeError("y must be a Polars Series.")
+        if X.height != y.height: raise ValueError("X and y must have the same height.")
+
+        self.feature_names_in_ = X.columns # Store feature names
+
+        # --- Convert to NumPy for XGBoost and Ridge ---
+        try:
+            X_np = X.select( # Ensure float type for models
+                [pl.col(c).cast(pl.Float64, strict=False) for c in self.feature_names_in_]
+            ).to_numpy()
+            y_np = y.cast(pl.Float64).to_numpy()
+        except Exception as e:
+             raise ValueError(f"Failed to convert Polars data to NumPy for fitting: {e}")
+
+        # Check for NaNs/Infs in NumPy arrays (should be handled by FeatureEngineer ideally)
+        if np.isnan(X_np).any() or np.isinf(X_np).any():
+             warnings.warn("NaNs or Infs detected in X_np before fitting XGBoostDecile.")
+             # Optionally raise error or impute here as a fallback
+        if np.isnan(y_np).any() or np.isinf(y_np).any():
+             raise ValueError("NaN or Inf values detected in target vector y before fitting.")
+
+        # --- Fit XGBoost Component ---
+        # print(f"Fitting XGBoost component (Weight: {self.weight})...")
+        try:
+            # XGBoost sklearn API generally expects NumPy
+            # Handle potential early stopping parameter
+            fit_params = {}
+            if 'early_stopping_rounds' in self.xgb_params and 'eval_set' in self.xgb_params : # Check if eval_set is also provided
+                 fit_params['eval_set'] = self.xgb_params['eval_set']
+                 fit_params['early_stopping_rounds'] = self.xgb_params['early_stopping_rounds']
+                 fit_params['verbose'] = self.xgb_params.get('verbose', False) # Suppress verbose output if not specified
+
+            self.xgb_model.fit(X_np, y_np, **fit_params)
+            # print("XGBoost fitting complete.")
+        except TypeError as e:
+             if "unexpected keyword argument 'early_stopping_rounds'" in str(e) or \
+                "got multiple values for keyword argument 'verbose'" in str(e) or \
+                "missing 1 required positional argument: 'eval_set'" in str(e): # Added check for missing eval_set
+                 # Older XGBoost or parameter conflict, try without early stopping
+                 warnings.warn(f"XGBoost parameter issue (e.g., early stopping / eval_set). Retrying without it. Original error: {e}")
+                 xgb_params_fallback = self.xgb_params.copy()
+                 xgb_params_fallback.pop('early_stopping_rounds', None)
+                 xgb_params_fallback.pop('eval_set', None) # Remove eval_set if causing issues
+                 self.xgb_model = xgb.XGBRegressor(**xgb_params_fallback)
+                 self.xgb_model.fit(X_np, y_np)
+                 # print("XGBoost fitting complete (potentially without early stopping).")
+             else: raise e
+        except Exception as e: print(f"Error during XGBoost fit: {e}"); raise e
+
+
+        # --- Fit Decile Components ---
+        if self.weight < 1.0:
+             # print(f"Fitting Decile TimeSeriesRidge components (Weight: {1 - self.weight})...")
+             # Calculate decile boundaries based on the training Polars data
+             self._calculate_decile_boundaries(X)
+
+             # Assign training data points to deciles using Polars
+             X_with_deciles = self._assign_deciles(X)
+
+             # Fit a separate TimeSeriesRidge model for each decile
+             for d in range(self.n_deciles):
+                 # Filter Polars DataFrame for the current decile
+                 decile_mask = pl.col("decile_assignment") == d
+                 X_decile_pl = X_with_deciles.filter(decile_mask)
+
+                 # Need corresponding y values. Get indices from Polars filter maybe?
+                 # Easier: Add row number, filter, get y by row number. Or just filter y along with X.
+                 # Let's filter y based on the same mask applied to X
+                 # Note: This assumes y is aligned row-wise with X originally
+                 y_decile_pl = y.filter(X_with_deciles.select(decile_mask).to_series()) # Filter y Series
+
+                 # print(f"  Decile {d+1}/{self.n_deciles}: {X_decile_pl.height} samples.")
+                 min_samples_required = max(5, len(self.feature_names_in_) + 1 if self.feature_names_in_ else 5)
+                 if X_decile_pl.height >= min_samples_required:
+                     try:
+                         # print(f"    Fitting TimeSeriesRidge for Decile {d+1}...")
+                         decile_model = TimeSeriesRidge(
+                             alpha=self.alpha,
+                             lambda2=self.lambda_smooth,
+                             feature_order=self.ts_ridge_feature_order # Pass feature order
+                         )
+                         # TimeSeriesRidge now expects Polars DF, converts internally
+                         decile_model.fit(X_decile_pl.drop("decile_assignment"), y_decile_pl)
+                         self.decile_models[d] = decile_model
+                         # print(f"    Decile {d+1} model fitted.")
+                     except Exception as e:
+                         warnings.warn(f"    Warning: Failed to fit model for Decile {d+1}. Reason: {e}")
+                         self.decile_models[d] = None # Mark as failed
+                 else:
+                     # print(f"    Warning: Not enough samples ({X_decile_pl.height} < {min_samples_required}) for Decile {d+1}. Skipping.")
+                     self.decile_models[d] = None
+        # else: print("Skipping Decile model fitting as weight is 1.0 (XGBoost only).")
+
+        # print("XGBoostDecileModel fitting complete.")
+        return self
+
+    def predict(self, X: pl.DataFrame) -> np.ndarray:
+        """
+        Generate predictions using the ensemble. Expects Polars DataFrame X.
+        Returns a NumPy array of predictions.
+        """
+        if self.feature_names_in_ is None:
+             raise RuntimeError("Model has not been fitted yet. Call fit first.")
+        if not isinstance(X, pl.DataFrame):
+             raise TypeError("X must be a Polars DataFrame for prediction.")
+
+        # Ensure prediction data has the same columns as training data, in the correct order
+        missing_cols = set(self.feature_names_in_) - set(X.columns)
+        if missing_cols:
+             raise ValueError(f"Missing columns in prediction data: {missing_cols}")
+        # Select columns in the order used for training
+        X_pred = X.select(self.feature_names_in_)
+
+        # --- Convert to NumPy for XGBoost ---
+        try:
+             X_np = X_pred.select( # Ensure float type
+                 [pl.col(c).cast(pl.Float64, strict=False) for c in self.feature_names_in_]
+             ).to_numpy()
+        except Exception as e:
+             raise ValueError(f"Failed to convert prediction Polars DataFrame to NumPy: {e}")
+
+        # --- Get XGBoost Predictions ---
+        xgb_preds = self.xgb_model.predict(X_np) # Returns NumPy array
+
+        # --- Get Decile Predictions (if needed) ---
+        if self.weight < 1.0:
+             if self.decile_boundaries is None:
+                 raise RuntimeError("Decile boundaries not set. Model needs fitting.")
+
+             decile_preds_np = np.zeros_like(xgb_preds)
+
+             # Assign test data to deciles using Polars
+             X_with_deciles = self._assign_deciles(X_pred) # Adds 'decile_assignment' col
+
+             for d in range(self.n_deciles):
+                 decile_mask_pl = pl.col("decile_assignment") == d
+                 # Create boolean mask Series to filter NumPy arrays later
+                 bool_mask_np = X_with_deciles.select(decile_mask_pl).to_series().to_numpy()
+
+                 if np.any(bool_mask_np): # If any samples fall into this decile
+                     # Filter the *original* selected Polars DF (X_pred) for this decile
+                     # Also drop the 'decile_assignment' column if it was added to X_pred,
+                     # or ensure X_decile_test_pl only contains original features.
+                     # X_pred does not have 'decile_assignment'. X_with_deciles does.
+                     # So we filter X_pred based on the mask from X_with_deciles.
+                     X_decile_test_pl = X_pred.filter(bool_mask_np)
+
+
+                     # Use the fitted TimeSeriesRidge model for this decile
+                     if self.decile_models[d] is not None:
+                         try:
+                             # Predict using the decile model (expects Polars DF)
+                             preds_d = self.decile_models[d].predict(X_decile_test_pl) # Returns NumPy array
+                             decile_preds_np[bool_mask_np] = preds_d
+                         except Exception as e:
+                             warnings.warn(f"Warning: Error predicting with model for Decile {d+1}. Using XGBoost prediction as fallback. Error: {e}")
+                             decile_preds_np[bool_mask_np] = xgb_preds[bool_mask_np] # Fallback
+                     else:
+                         # If no model was trained, use XGBoost prediction as fallback
+                         # print(f"Warning: No model available for Decile {d+1}. Using XGBoost prediction.")
+                         decile_preds_np[bool_mask_np] = xgb_preds[bool_mask_np] # Fallback
+
+             # Combine predictions with weight
+             ensemble_preds = self.weight * xgb_preds + (1 - self.weight) * decile_preds_np
+        else:
+             # If weight is 1, only use XGBoost predictions
+             ensemble_preds = xgb_preds
+
+        return ensemble_preds
+
+class GARCHModel:
+    """
+    GARCH(1,1) volatility model for event study analysis.
     
-    def __init__(self, omega: float, alpha: float, beta: float, gamma: float,
-                 k1: float = 1.3, k2: float = 1.5, delta: int = 5,
-                 delta_t1: float = 5.0, delta_t2: float = 3.0, delta_t3: float = 10.0):
-        """Initialize volatility model parameters"""
-        # GJR-GARCH parameters
+    Implements sigma^2_t = omega + alpha * epsilon^2_{t-1} + beta * sigma^2_{t-1}
+    
+    Used for baseline volatility estimation in the event study framework.
+    """
+    def __init__(self, omega: float = 0.00001, alpha: float = 0.05, beta: float = 0.90):
+        """
+        Initialize GARCH(1,1) model with parameters.
+        
+        Parameters:
+        -----------
+        omega : float
+            Long-run average variance (constant term)
+        alpha : float
+            ARCH parameter that measures the impact of past shocks
+        beta : float
+            GARCH parameter that measures the persistence of volatility
+        """
+        self._check_parameters(omega, alpha, beta)
         self.omega = omega
         self.alpha = alpha
         self.beta = beta
-        self.gamma = gamma  # Asymmetry parameter
-        
-        # Event-specific parameters
-        self.k1 = k1  # Pre-event peak
-        self.k2 = k2  # Post-event peak
-        self.delta = delta  # Post-event rising duration
-        self.delta_t1 = delta_t1  # Pre-event duration
-        self.delta_t2 = delta_t2  # Post-event rise rate
-        self.delta_t3 = delta_t3  # Post-event decay rate
-        
-        # Validate parameters
-        self._validate_parameters()
+        self.is_fitted = False
+        self.variance_history = None
+        self.residuals_history = None
+        self.sigma2_t = None
+        self.mean = 0.0
     
-    def _validate_parameters(self):
-        """Check parameter constraints"""
-        # Stationarity condition
-        persistence = self.alpha + self.beta + self.gamma/2
-        if persistence >= 1:
-            raise ValueError(f"GJR-GARCH parameters violate stationarity: {persistence} >= 1")
-        
-        # Event parameters
-        if self.k1 <= 1.0 or self.k2 <= 1.0:
-            raise ValueError("k1 and k2 must be > 1")
-        if self.k2 <= self.k1:
-            raise ValueError("k2 must be > k1 (post-event peak exceeds pre-event)")
+    def _check_parameters(self, omega, alpha, beta):
+        """Validate GARCH parameters for stationarity and positivity."""
+        if omega <= 0:
+            # raise ValueError("omega must be positive") # Relax for fitting, handled by bounds
+            pass 
+        if alpha < 0 or beta < 0:
+            # raise ValueError("alpha and beta must be non-negative") # Relax for fitting
+            pass
+        if alpha + beta >= 1:
+            # raise ValueError("alpha + beta must be less than 1 for stationarity") # Relax for fitting
+            pass
     
-    def baseline_volatility_path(self, returns: np.array, h0: Optional[float] = None) -> np.array:
+    def _neg_log_likelihood(self, params, returns):
         """
-        Calculate baseline volatility path using GJR-GARCH(1,1).
-        
-        h_t = omega + alpha * eps_{t-1}^2 + beta * h_{t-1} + gamma * I_{t-1} * eps_{t-1}^2
+        Calculate negative log-likelihood for GARCH(1,1) model with improved numerical stability.
         """
+        omega, alpha, beta = params
+
+        # Parameter constraints for valid GARCH process
+        if omega <= 1e-8 or alpha < 0 or beta < 0 or alpha + beta >= 0.9999: # Loosen sum slightly for optimizer
+            return np.inf
+
         T = len(returns)
-        h = np.zeros(T)
-        
-        # Initialize with unconditional variance or provided value
-        if h0 is None:
-            h[0] = self.omega / (1 - self.alpha - self.beta - self.gamma/2)
+        sigma2 = np.zeros(T)
+
+        # Initialize with unconditional variance with safety floor
+        # Or use empirical variance if unconditional is problematic
+        uncond_var_approx = omega / (1 - alpha - beta) if (1 - alpha - beta) > 1e-6 else np.var(returns)
+        sigma2[0] = max(1e-7, uncond_var_approx, np.var(returns))
+
+
+        # Calculate variance series with safety checks
+        for t in range(1, T):
+            # Calculate next variance
+            sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
+            sigma2[t] = max(1e-7, sigma2[t]) # Add lower bound to prevent numerical issues
+
+        # Calculate log-likelihood with safety checks
+        if np.any(sigma2 <= 0): # Should be caught by max(1e-7, ...)
+            return np.inf
+            
+        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
+
+        if not np.isfinite(log_likelihood):
+            return np.inf
+
+        return -log_likelihood
+    
+    def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
+            method: str = 'SLSQP', 
+            max_iter: int = 1000) -> 'GARCHModel':
+        """
+        Fit GARCH model to return series.
+
+        Parameters:
+        -----------
+        returns : array-like
+            Return series for fitting
+        method : str
+            Optimization method for scipy.optimize.minimize
+            Must be a method that supports bounds ('SLSQP', 'L-BFGS-B', 'trust-constr')
+        max_iter : int
+            Maximum iterations for optimization
+
+        Returns:
+        --------
+        self : GARCHModel
+            Fitted model
+        """
+        if isinstance(returns, pl.Series):
+            returns_np = returns.to_numpy()
+        elif isinstance(returns, pl.DataFrame):
+            if returns.width != 1:
+                raise ValueError("If returns is a DataFrame, it must have only one column")
+            returns_np = returns.to_numpy().flatten()
         else:
-            h[0] = h0
+            returns_np = np.asarray(returns)
+
+        returns_np = returns_np[~np.isnan(returns_np)]
+        if len(returns_np) < 10: # Not enough data
+            warnings.warn("Not enough data points to fit GARCH model. Using initial parameters.")
+            self.variance_history = np.full(len(returns_np), max(1e-7, np.var(returns_np))) if len(returns_np) > 0 else np.array([])
+            self.residuals_history = returns_np - np.mean(returns_np) if len(returns_np) > 0 else np.array([])
+            self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-6
+            self.is_fitted = True
+            return self
+
+        std_dev = np.std(returns_np)
+        if std_dev < 1e-8: # Handle constant series
+            warnings.warn("Return series has zero or near-zero variance. GARCH model may not be appropriate. Using simplified variance.")
+            self.mean = np.mean(returns_np)
+            self.variance_history = np.full(len(returns_np), max(1e-7, std_dev**2))
+            self.residuals_history = returns_np - self.mean
+            self.sigma2_t = self.variance_history[-1]
+            self.is_fitted = True
+            self.omega = max(1e-7, std_dev**2) * (1 - self.alpha - self.beta) # Make omega consistent
+            return self
+
+        clip_threshold = 10 * std_dev if std_dev > 1e-7 else 0.1 # ensure clip_threshold is reasonable
+        returns_np = np.clip(returns_np, -clip_threshold, clip_threshold)
+        self.mean = np.mean(returns_np)
+        returns_centered = returns_np - self.mean
+
+        initial_params = [self.omega, self.alpha, self.beta]
+        # Bounds: omega > 0, 0 <= alpha < 1, 0 <= beta < 1. Sum constraint handled in likelihood.
+        bounds = [(1e-8, None), (0.0, 0.999), (0.0, 0.999)] 
+
+        if method in ['BFGS', 'CG', 'Newton-CG', 'Nelder-Mead'] and method != 'trust-constr': # trust-constr supports bounds via Bound constraint obj
+            method = 'L-BFGS-B' if method != 'Nelder-Mead' else 'Nelder-Mead' # L-BFGS-B supports simple bounds
+
+        try:
+            result = minimize(
+                self._neg_log_likelihood,
+                initial_params,
+                args=(returns_centered,),
+                method=method,
+                bounds=bounds if method in ['SLSQP', 'L-BFGS-B', 'TNC'] else None, # Apply bounds if method supports them
+                options={'maxiter': max_iter, 'disp': False}
+            )
+
+            if result.success and (result.x[1] + result.x[2] < 0.9999) and result.x[0] > 1e-8: # Check sum constraint again
+                self.omega, self.alpha, self.beta = result.x
+                # print(f"Fitted GARCH parameters: omega={self.omega:.6f}, alpha={self.alpha:.4f}, beta={self.beta:.4f}")
+            else:
+                warnings.warn(f"GARCH optimization failed or params non-stationary (success: {result.success}, message: {result.message}). Using initial parameters.")
+                # Keep initial parameters if optimization fails
+        except Exception as e:
+            warnings.warn(f"Error fitting GARCH model: {e}. Using initial parameters.")
+            # Keep initial parameters on error
+
+        self._check_parameters(self.omega, self.alpha, self.beta) # Validate final params
+
+        T = len(returns_centered)
+        sigma2 = np.zeros(T)
+        uncond_var_approx = self.omega / (1 - self.alpha - self.beta) if (1 - self.alpha - self.beta) > 1e-6 else np.var(returns_centered)
+        sigma2[0] = max(1e-7, uncond_var_approx, np.var(returns_centered))
+
+
+        for t in range(1, T):
+            sigma2[t] = self.omega + self.alpha * returns_centered[t-1]**2 + self.beta * sigma2[t-1]
+            sigma2[t] = max(1e-7, sigma2[t])
+
+        self.variance_history = sigma2
+        self.residuals_history = returns_centered
+        self.sigma2_t = sigma2[-1] if T > 0 else max(1e-7, np.var(returns_centered))
+        self.is_fitted = True
+        return self
+    
+    def predict(self, n_steps: int = 1) -> np.ndarray:
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before prediction")
+        if self.residuals_history is None or len(self.residuals_history) == 0 or self.sigma2_t is None:
+            warnings.warn("GARCH model has insufficient history for prediction. Returning unconditional variance.")
+            uncond_var = self.omega / (1 - self.alpha - self.beta) if (1 - self.alpha - self.beta) > 1e-6 else 1e-6
+            return np.full(n_steps, max(1e-7, uncond_var))
+
+        forecasts = np.zeros(n_steps)
+        last_resid_sq = self.residuals_history[-1]**2
+        current_sigma2 = self.sigma2_t
+        
+        for h in range(n_steps):
+            if h == 0:
+                forecasts[h] = self.omega + self.alpha * last_resid_sq + self.beta * current_sigma2
+            else:
+                # For multi-step, E[resid^2_t+h-1] = forecasts[h-1]
+                forecasts[h] = self.omega + (self.alpha + self.beta) * forecasts[h-1]
+            forecasts[h] = max(1e-7, forecasts[h]) # Ensure positivity
+        
+        return forecasts
+    
+    def conditional_volatility(self) -> np.ndarray:
+        if not self.is_fitted or self.variance_history is None:
+            raise RuntimeError("Model must be fitted before accessing volatility")
+        return np.sqrt(self.variance_history)
+    
+    def volatility_innovations(self) -> np.ndarray:
+        if not self.is_fitted or self.variance_history is None or len(self.variance_history) <= 1:
+            # warnings.warn("Not enough data for volatility innovations. Returning empty array.")
+            return np.array([])
+        
+        T = len(self.variance_history)
+        innovations = np.zeros(T-1)
         
         for t in range(1, T):
-            eps_prev = returns[t-1] / np.sqrt(h[t-1]) if h[t-1] > 0 else 0
-            indicator = 1 if returns[t-1] < 0 else 0
-            
-            h[t] = (self.omega + 
-                   self.alpha * (eps_prev**2) * h[t-1] +
-                   self.beta * h[t-1] +
-                   self.gamma * indicator * (eps_prev**2) * h[t-1])
+            expected_var_t = self.omega + self.alpha * self.residuals_history[t-1]**2 + self.beta * self.variance_history[t-1]
+            realized_var_t = self.variance_history[t]
+            innovations[t-1] = realized_var_t - expected_var_t
         
-        return np.sqrt(h)  # Return volatility, not variance
-    
-    def phi_function(self, t: Union[int, np.ndarray], t_event: int = 0) -> Union[float, np.ndarray]:
-        """
-        Calculate phi adjustment factor based on event phase (Section 3.1).
+        if len(innovations) > 0 and (np.all(innovations == 0) or np.var(innovations) < 1e-10):
+            # print("Warning: GARCH Volatility innovations have near-zero variance. Adding small random noise.")
+            np.random.seed(42)
+            innovations = innovations + np.random.normal(0, 1e-6, size=len(innovations)) # Reduced noise
         
-        phi_1(t) for t <= t_event: Pre-event rise
-        phi_2(t) for t_event < t <= t_event + delta: Post-event rising
-        phi_3(t) for t > t_event + delta: Post-event decay
-        """
-        # Handle both scalar and array inputs
-        is_scalar = np.isscalar(t)
-        t_array = np.atleast_1d(t)
-        phi = np.zeros_like(t_array, dtype=float)
-        
-        # Pre-event phase
-        pre_mask = t_array <= t_event
-        if np.any(pre_mask):
-            phi[pre_mask] = (self.k1 - 1) * np.exp(
-                -((t_array[pre_mask] - t_event)**2) / (2 * self.delta_t1**2)
-            )
-        
-        # Post-event rising phase
-        rising_mask = (t_array > t_event) & (t_array <= t_event + self.delta)
-        if np.any(rising_mask):
-            phi[rising_mask] = (self.k2 - 1) * (
-                1 - np.exp(-(t_array[rising_mask] - t_event) / self.delta_t2)
-            )
-        
-        # Post-event decay phase
-        decay_mask = t_array > t_event + self.delta
-        if np.any(decay_mask):
-            phi[decay_mask] = (self.k2 - 1) * np.exp(
-                -(t_array[decay_mask] - t_event - self.delta) / self.delta_t3
-            )
-        
-        return phi[0] if is_scalar else phi
-    
-    def unified_volatility(self, t: Union[int, np.ndarray], baseline_vol: Union[float, np.ndarray], 
-                          t_event: int = 0) -> Union[float, np.ndarray]:
-        """
-        Calculate unified volatility: sigma_e(t) = sqrt(h_t) * (1 + phi(t))
-        """
-        phi = self.phi_function(t, t_event)
-        return baseline_vol * (1 + phi)
-    
-    def bias_parameter(self, t: Union[int, np.ndarray], baseline_vol: Union[float, np.ndarray], 
-                      b0: float, kappa: float, t_event: int = 0) -> Union[float, np.ndarray]:
-        """
-        Calculate time-varying bias parameter (Section 3.1, Assumption 5).
-        b_t = b_0 * (1 + kappa * (Psi_t - 1)/(k_2 - 1)) for post-event rising phase
-        """
-        is_scalar = np.isscalar(t)
-        t_array = np.atleast_1d(t)
-        bias = np.full_like(t_array, b0, dtype=float)
-        
-        # Only adjust during post-event rising phase
-        rising_mask = (t_array > t_event) & (t_array <= t_event + self.delta)
-        if np.any(rising_mask):
-            phi = self.phi_function(t_array[rising_mask], t_event)
-            psi_t = 1 + phi  # sigma_e(t) / sqrt(h_t)
-            bias[rising_mask] = b0 * (1 + kappa * (psi_t - 1) / (self.k2 - 1))
-        
-        return bias[0] if is_scalar else bias
+        return innovations
 
-class PortfolioOptimizer:
-    """
-    Implements multi-period portfolio optimization with transaction costs (Section 3.2).
-    Solves the mean-variance optimization problem with asymmetric transaction costs.
-    """
-    
-    def __init__(self, investor_params: InvestorParams, market_params: MarketParams,
-                 volatility_model: UnifiedVolatilityModel):
-        """Initialize optimizer with investor and market parameters"""
-        self.investor = investor_params
-        self.market = market_params
-        self.vol_model = volatility_model
-    
-    def optimal_weights(self, expected_return_e: float, volatility_e: float,
-                       previous_weight_e: float, t: int = 0, t_event: int = 0) -> Tuple[float, float]:
-        """
-        Calculate optimal portfolio weights for event and generic assets.
-        
-        Implements equations (14)-(15) from Section 3.2.1 with transaction costs.
-        
-        Returns:
-            Tuple of (weight_event, weight_generic)
-        """
-        gamma = self.investor.risk_aversion
-        rho = self.market.correlation
-        sigma_g = self.market.generic_volatility
-        sigma_e = volatility_e
-        wealth = self.investor.wealth
-        
-        # Check for liquidity constraints (pre-event)
-        is_pre_event = t <= t_event
-        
-        # Define objective function (negative utility for minimization)
-        def utility(w_e):
-            # Determine transaction cost
-            if w_e > previous_weight_e:
-                tau = self.investor.transaction_cost_buy
-                # Apply liquidity constraint for liquidity traders pre-event
-                if is_pre_event and self.investor.liquidity_constraint > 0:
-                    max_increase = (1 - self.investor.liquidity_constraint) * (1 - previous_weight_e)
-                    if w_e > previous_weight_e + max_increase:
-                        return -np.inf  # Constraint violated
-            elif w_e < previous_weight_e:
-                tau = self.investor.transaction_cost_sell
-            else:
-                tau = 0
-            
-            # Transaction cost adjustment
-            tc_adjustment = tau * abs(w_e - previous_weight_e) * wealth
-            
-            # Calculate optimal weight for generic asset given w_e
-            # From first-order conditions (Section 3.2.1)
-            denominator = gamma * (sigma_g**2 - rho * sigma_e * sigma_g)
-            if abs(denominator) < 1e-10:
-                return -np.inf
-            
-            numerator_g = self.market.generic_return - self.market.risk_free_rate
-            cross_term = (rho * sigma_e * sigma_g * (expected_return_e - self.market.risk_free_rate)) / \
-                        (sigma_g**2 * (sigma_e**2 - rho * sigma_e * sigma_g))
-            
-            w_g = numerator_g / denominator - cross_term * w_e
-            
-            # Risk-free weight
-            w_rf = 1 - w_e - w_g
-            
-            # Portfolio return (including transaction costs)
-            exp_return = (w_e * expected_return_e + 
-                         w_g * self.market.generic_return + 
-                         w_rf * self.market.risk_free_rate - 
-                         tc_adjustment / wealth)
-            
-            # Portfolio variance
-            variance = (w_e**2 * sigma_e**2 + 
-                       w_g**2 * sigma_g**2 + 
-                       2 * w_e * w_g * rho * sigma_e * sigma_g)
-            
-            # Mean-variance utility
-            utility_val = exp_return - (gamma / 2) * variance
-            
-            return utility_val
-        
-        # Find optimal weight for event asset
-        # Use bounded optimization to ensure weights are reasonable
-        bounds = (0, 1)
-        
-        # Try multiple starting points to avoid local optima
-        candidates = []
-        for start in [previous_weight_e, 0.1, 0.5]:
-            try:
-                result = minimize_scalar(lambda w: -utility(w), bounds=bounds, 
-                                       method='bounded', options={'xatol': 1e-6})
-                if result.success:
-                    candidates.append((result.x, utility(result.x)))
-            except:
-                continue
-        
-        if not candidates:
-            # Fallback to no change
-            return previous_weight_e, self._calculate_generic_weight(
-                previous_weight_e, expected_return_e, volatility_e
-            )
-        
-        # Select best candidate
-        w_e_optimal = max(candidates, key=lambda x: x[1])[0]
-        w_g_optimal = self._calculate_generic_weight(w_e_optimal, expected_return_e, volatility_e)
-        
-        return w_e_optimal, w_g_optimal
-    
-    def _calculate_generic_weight(self, w_e: float, expected_return_e: float, 
-                                 volatility_e: float) -> float:
-        """Calculate optimal generic asset weight given event asset weight"""
-        gamma = self.investor.risk_aversion
-        rho = self.market.correlation
-        sigma_g = self.market.generic_volatility
-        sigma_e = volatility_e
-        
-        denominator = gamma * (sigma_g**2 - rho * sigma_e * sigma_g)
-        if abs(denominator) < 1e-10:
-            return 0
-        
-        numerator_g = self.market.generic_return - self.market.risk_free_rate
-        cross_term = (rho * sigma_e * sigma_g * (expected_return_e - self.market.risk_free_rate)) / \
-                    (sigma_g**2 * (sigma_e**2 - rho * sigma_e * sigma_g))
-        
-        w_g = numerator_g / denominator - cross_term * w_e
-        
-        # Ensure non-negative
-        return max(0, min(1 - w_e, w_g))
-    
-    def no_trade_region(self, previous_weight_e: float, expected_return_e: float,
-                       volatility_e: float) -> Tuple[float, float]:
-        """
-        Calculate the no-trade region boundaries.
-        
-        Returns:
-            Tuple of (lower_bound, upper_bound) for event asset weight
-        """
-        gamma = self.investor.risk_aversion
-        tau_b = self.investor.transaction_cost_buy
-        tau_s = self.investor.transaction_cost_sell
-        
-        # Simplified calculation based on transaction cost impact
-        tc_impact = (tau_b + tau_s) * self.investor.wealth / (gamma * volatility_e**2)
-        
-        # Adjust for expected return differential
-        ret_adjustment = abs(expected_return_e - self.market.risk_free_rate) / volatility_e**2
-        width = tc_impact * (1 + ret_adjustment)
-        
-        lower_bound = max(0, previous_weight_e - width/2)
-        upper_bound = min(1, previous_weight_e + width/2)
-        
-        return lower_bound, upper_bound
 
-class EquilibriumModel:
-    """
-    Implements market equilibrium with heterogeneous investors (Section 3.3).
-    Solves for equilibrium prices where aggregate demand equals fixed supply.
-    """
+class GJRGARCHModel(GARCHModel):
+    def __init__(self, omega: float = 0.00001, alpha: float = 0.03, beta: float = 0.90, gamma: float = 0.04):
+        super().__init__(omega, alpha, beta) # Initializes omega, alpha, beta
+        self.gamma = gamma
+        self._check_gjr_parameters() # Check all params including gamma
     
-    def __init__(self, market_params: MarketParams, volatility_model: UnifiedVolatilityModel,
-                 n_informed: float = 0.3, n_uninformed: float = 0.5, n_liquidity: float = 0.2):
-        """Initialize equilibrium model"""
-        self.market = market_params
-        self.vol_model = volatility_model
-        
-        # Investor proportions
-        self.n_informed = n_informed
-        self.n_uninformed = n_uninformed
-        self.n_liquidity = n_liquidity
-        
-        # Define investor types based on paper
-        self.informed_investor = InvestorParams(
-            risk_aversion=2.0,
-            bias_baseline=0.001,
-            bias_sensitivity=0.3,
-            transaction_cost_buy=0.002,
-            transaction_cost_sell=0.001,
-            liquidity_constraint=0.0,
-            information_quality=0.9
-        )
-        
-        self.uninformed_investor = InvestorParams(
-            risk_aversion=3.0,
-            bias_baseline=0.003,
-            bias_sensitivity=0.5,
-            transaction_cost_buy=0.003,
-            transaction_cost_sell=0.002,
-            liquidity_constraint=0.0,
-            information_quality=0.5
-        )
-        
-        self.liquidity_trader = InvestorParams(
-            risk_aversion=2.5,
-            bias_baseline=0.0,
-            bias_sensitivity=0.0,
-            transaction_cost_buy=0.002,
-            transaction_cost_sell=0.001,
-            liquidity_constraint=0.3,  # 30% purchase reduction pre-event
-            information_quality=0.0
-        )
+    def _check_gjr_parameters(self):
+        # Stationarity for GJR-GARCH: alpha + beta + 0.5*gamma < 1
+        if self.alpha + self.beta + 0.5 * self.gamma >= 1:
+            # raise ValueError("alpha + beta + 0.5*gamma must be less than 1 for stationarity") # Relax for fitting
+            pass
+        if self.gamma < 0:
+            # raise ValueError("gamma must be non-negative") # Relax for fitting
+            pass
     
-    def aggregate_demand(self, mu_e: float, t: int, baseline_vol: float,
-                        information: float, previous_weights: Dict[str, float],
-                        t_event: int = 0) -> float:
-        """
-        Calculate aggregate demand for the event asset at given expected return.
-        Implements equation (20) from Section 3.3.
-        """
-        # Calculate unified volatility
-        vol_e = self.vol_model.unified_volatility(t, baseline_vol, t_event)
+    def _neg_log_likelihood(self, params, returns):
+        omega, alpha, beta, gamma = params
+
+        if omega <= 1e-8 or alpha < 0 or beta < 0 or gamma < 0 or \
+           alpha + beta + 0.5 * gamma >= 0.9999: # Loosen sum slightly
+            return np.inf
+
+        T = len(returns)
+        sigma2 = np.zeros(T)
         
-        total_demand = 0
-        total_wealth = 0
+        uncond_var_approx = omega / (1 - alpha - beta - 0.5*gamma) if (1 - alpha - beta - 0.5*gamma) > 1e-6 else np.var(returns)
+        sigma2[0] = max(1e-7, uncond_var_approx, np.var(returns))
+
+
+        for t in range(1, T):
+            I_t_minus_1 = 1.0 if returns[t-1] < 0 else 0.0
+            sigma2[t] = (omega + alpha * returns[t-1]**2 + 
+                         beta * sigma2[t-1] + 
+                         gamma * I_t_minus_1 * returns[t-1]**2)
+            sigma2[t] = max(1e-7, sigma2[t])
+
+        if np.any(sigma2 <= 0):
+            return np.inf
+            
+        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns**2 / sigma2)
+
+        if not np.isfinite(log_likelihood):
+            return np.inf
+        return -log_likelihood
+
+    def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
+            method: str = 'SLSQP',
+            max_iter: int = 1000) -> 'GJRGARCHModel':
+        if isinstance(returns, pl.Series):
+            returns_np = returns.to_numpy()
+        elif isinstance(returns, pl.DataFrame):
+            if returns.width != 1:
+                raise ValueError("If returns is a DataFrame, it must have only one column")
+            returns_np = returns.to_numpy().flatten()
+        else:
+            returns_np = np.asarray(returns)
+
+        returns_np = returns_np[~np.isnan(returns_np)]
+        if len(returns_np) < 10:
+            warnings.warn("Not enough data points to fit GJR-GARCH model. Using initial parameters.")
+            self.variance_history = np.full(len(returns_np), max(1e-7, np.var(returns_np))) if len(returns_np) > 0 else np.array([])
+            self.residuals_history = returns_np - np.mean(returns_np) if len(returns_np) > 0 else np.array([])
+            self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-6
+            self.is_fitted = True
+            return self
+
+        std_dev = np.std(returns_np)
+        if std_dev < 1e-8: # Handle constant series
+            warnings.warn("Return series has zero or near-zero variance. GJR-GARCH model may not be appropriate. Using simplified variance.")
+            self.mean = np.mean(returns_np)
+            self.variance_history = np.full(len(returns_np), max(1e-7, std_dev**2))
+            self.residuals_history = returns_np - self.mean
+            self.sigma2_t = self.variance_history[-1]
+            self.is_fitted = True
+            self.omega = max(1e-7, std_dev**2) * (1 - self.alpha - self.beta - 0.5*self.gamma) # Make omega consistent
+            return self
+
+        clip_threshold = 10 * std_dev if std_dev > 1e-7 else 0.1
+        returns_np = np.clip(returns_np, -clip_threshold, clip_threshold)
+        self.mean = np.mean(returns_np)
+        returns_centered = returns_np - self.mean
         
-        # Informed investor demand
-        bias_informed = self.vol_model.bias_parameter(
-            t, baseline_vol, self.informed_investor.bias_baseline,
-            self.informed_investor.bias_sensitivity, t_event
-        )
-        exp_return_informed = mu_e + bias_informed * information * self.informed_investor.information_quality
-        
-        optimizer_informed = PortfolioOptimizer(
-            self.informed_investor, self.market, self.vol_model
-        )
-        w_e_informed, _ = optimizer_informed.optimal_weights(
-            exp_return_informed, vol_e, previous_weights.get('informed', 0.1), t, t_event
-        )
-        
-        informed_wealth = self.n_informed * self.informed_investor.wealth
-        demand_informed = informed_wealth * w_e_informed
-        
-        # Uninformed investor demand
-        bias_uninformed = self.vol_model.bias_parameter(
-            t, baseline_vol, self.uninformed_investor.bias_baseline,
-            self.uninformed_investor.bias_sensitivity, t_event
-        )
-        # Uninformed have noisier information
-        noisy_info = information * self.uninformed_investor.information_quality + \
-                    np.random.normal(0, 0.1 * abs(information))
-        exp_return_uninformed = mu_e + bias_uninformed * noisy_info
-        
-        optimizer_uninformed = PortfolioOptimizer(
-            self.uninformed_investor, self.market, self.vol_model
-        )
-        w_e_uninformed, _ = optimizer_uninformed.optimal_weights(
-            exp_return_uninformed, vol_e, previous_weights.get('uninformed', 0.1), t, t_event
-        )
-        
-        uninformed_wealth = self.n_uninformed * self.uninformed_investor.wealth
-        demand_uninformed = uninformed_wealth * w_e_uninformed
-        
-        # Liquidity trader demand (no information-based bias)
-        optimizer_liquidity = PortfolioOptimizer(
-            self.liquidity_trader, self.market, self.vol_model
-        )
-        w_e_liquidity, _ = optimizer_liquidity.optimal_weights(
-            mu_e, vol_e, previous_weights.get('liquidity', 0.1), t, t_event
-        )
-        
-        liquidity_wealth = self.n_liquidity * self.liquidity_trader.wealth
-        demand_liquidity = liquidity_wealth * w_e_liquidity
-        
-        # Total demand
-        total_demand = demand_informed + demand_uninformed + demand_liquidity
-        total_wealth = informed_wealth + uninformed_wealth + liquidity_wealth
-        
-        return total_demand / total_wealth  # Return as fraction of total wealth
-    
-    def find_equilibrium_return(self, t: int, baseline_vol: float, information: float,
-                               previous_weights: Dict[str, float], t_event: int = 0) -> float:
-        """
-        Find equilibrium expected return where demand equals supply.
-        Implements market clearing condition from Section 3.3.
-        """
-        supply = self.market.event_asset_supply
-        
-        # Define excess demand function
-        def excess_demand(mu_e):
-            demand = self.aggregate_demand(
-                mu_e, t, baseline_vol, information, previous_weights, t_event
-            )
-            return demand - supply
-        
-        # Find equilibrium using bisection
+        initial_params = [self.omega, self.alpha, self.beta, self.gamma]
+        # Bounds: omega > 0, 0 <= alpha < 1, 0 <= beta < 1, 0 <= gamma < 1
+        bounds = [(1e-8, None), (0.0, 0.999), (0.0, 0.999), (0.0, 0.999)]
+
+        if method in ['BFGS', 'CG', 'Newton-CG', 'Nelder-Mead'] and method != 'trust-constr':
+             method = 'L-BFGS-B' if method != 'Nelder-Mead' else 'Nelder-Mead'
+
         try:
-            # Search for reasonable bounds
-            mu_low = -0.1  # -10% daily return
-            mu_high = 0.1  # +10% daily return
-            
-            # Check if bounds bracket the solution
-            ed_low = excess_demand(mu_low)
-            ed_high = excess_demand(mu_high)
-            
-            if ed_low * ed_high > 0:
-                # Bounds don't bracket, expand search
-                if ed_low > 0:  # Demand too high even at low return
-                    mu_low = -0.5
-                else:  # Demand too low even at high return
-                    mu_high = 0.5
-            
-            # Find equilibrium
-            mu_e_eq = brentq(excess_demand, mu_low, mu_high, xtol=1e-6)
-            
-            return mu_e_eq
-            
-        except Exception as e:
-            # Fallback to risk-free rate plus small premium
-            return self.market.risk_free_rate + 0.001
-    
-    def simulate_equilibrium_path(self, T_pre: int = 30, T_post: int = 30, 
-                                 baseline_vol: float = 0.02, information: float = 1.0) -> pd.DataFrame:
-        """
-        Simulate equilibrium price and return path around an event.
-        """
-        t_event = 0
-        times = range(-T_pre, T_post + 1)
-        
-        results = []
-        weights = {'informed': 0.1, 'uninformed': 0.1, 'liquidity': 0.1}
-        
-        # Initial price normalization
-        P0 = 100.0
-        prices = [P0]
-        
-        for i, t in enumerate(times):
-            # Find equilibrium return
-            mu_e = self.find_equilibrium_return(
-                t, baseline_vol, information, weights, t_event
+            result = minimize(
+                self._neg_log_likelihood,
+                initial_params,
+                args=(returns_centered,),
+                method=method,
+                bounds=bounds if method in ['SLSQP', 'L-BFGS-B', 'TNC'] else None,
+                options={'maxiter': max_iter, 'disp': False, 'ftol': 1e-9} # Added ftol
             )
-            
-            # Calculate unified volatility
-            vol_e = self.vol_model.unified_volatility(t, baseline_vol, t_event)
-            
-            # Update price based on return
-            if i > 0:
-                P_new = prices[-1] * (1 + mu_e)
-                prices.append(P_new)
-            
-            # Update weights based on new allocation
-            # Simplified: gradual mean reversion
-            for investor_type in weights:
-                weights[investor_type] = 0.9 * weights[investor_type] + 0.1 * 0.1
-            
-            # Store results
-            results.append({
-                'time': t,
-                'days_to_event': t,
-                'equilibrium_return': mu_e,
-                'price': prices[-1] if i > 0 else P0,
-                'unified_volatility': vol_e,
-                'baseline_volatility': baseline_vol,
-                'phi_adjustment': self.vol_model.phi_function(t, t_event),
-                'phase': self._identify_phase(t, t_event)
-            })
+            if result.success and (result.x[1] + result.x[2] + 0.5 * result.x[3] < 0.9999) and result.x[0] > 1e-8:
+                self.omega, self.alpha, self.beta, self.gamma = result.x
+                # print(f"Fitted GJR-GARCH parameters: omega={self.omega:.6f}, alpha={self.alpha:.4f}, beta={self.beta:.4f}, gamma={self.gamma:.4f}")
+            else:
+                warnings.warn(f"GJR-GARCH optimization failed or params non-stationary (success: {result.success}, message: {result.message}). Using initial parameters.")
+        except Exception as e:
+            warnings.warn(f"Error fitting GJR-GARCH model: {e}. Using initial parameters.")
         
-        return pd.DataFrame(results)
-    
-    def _identify_phase(self, t: int, t_event: int = 0) -> str:
-        """Identify market phase"""
-        if t < t_event - 5:
-            return 'pre_event_early'
-        elif t_event - 5 <= t <= t_event:
-            return 'pre_event_late'
-        elif t_event < t <= t_event + self.vol_model.delta:
-            return 'post_event_rising'
-        else:
-            return 'post_event_decay'
+        self._check_parameters(self.omega, self.alpha, self.beta) # Validate GARCH part
+        self._check_gjr_parameters() # Validate GJR part
 
-class RiskMetrics:
-    """
-    Calculate risk-adjusted return metrics for hypothesis testing.
-    Implements metrics from Section 4 of the paper.
-    """
+        T = len(returns_centered)
+        sigma2 = np.zeros(T)
+        uncond_var_approx = self.omega / (1 - self.alpha - self.beta - 0.5*self.gamma) if (1 - self.alpha - self.beta - 0.5*self.gamma) > 1e-6 else np.var(returns_centered)
+        sigma2[0] = max(1e-7, uncond_var_approx, np.var(returns_centered))
+
+        for t in range(1, T):
+            I_t_minus_1 = 1.0 if returns_centered[t-1] < 0 else 0.0
+            sigma2[t] = (self.omega + self.alpha * returns_centered[t-1]**2 + 
+                         self.beta * sigma2[t-1] + 
+                         self.gamma * I_t_minus_1 * returns_centered[t-1]**2)
+            sigma2[t] = max(1e-7, sigma2[t])
+
+        self.variance_history = sigma2
+        self.residuals_history = returns_centered
+        self.sigma2_t = sigma2[-1] if T > 0 else max(1e-7, np.var(returns_centered))
+        self.is_fitted = True
+        return self
     
-    @staticmethod
-    def return_to_variance_ratio(expected_return: float, risk_free_rate: float,
-                                volatility: float, transaction_cost: float = 0) -> float:
-        """
-        Calculate Return-to-Variance Ratio (RVR).
-        RVR = (E[R] - r_f - tau) / sigma^2
+    def predict(self, n_steps: int = 1) -> np.ndarray:
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before prediction")
+        if self.residuals_history is None or len(self.residuals_history) == 0 or self.sigma2_t is None:
+            warnings.warn("GJR-GARCH model has insufficient history for prediction. Returning unconditional variance.")
+            uncond_var_denom = (1 - self.alpha - self.beta - 0.5 * self.gamma)
+            uncond_var = self.omega / uncond_var_denom if uncond_var_denom > 1e-6 else 1e-6
+            return np.full(n_steps, max(1e-7, uncond_var))
+
+        forecasts = np.zeros(n_steps)
+        last_resid_sq = self.residuals_history[-1]**2
+        I_last = 1.0 if self.residuals_history[-1] < 0 else 0.0
+        current_sigma2 = self.sigma2_t
         
-        Key metric for Hypothesis 1.
-        """
-        excess_return = expected_return - risk_free_rate - transaction_cost
-        if volatility > 0:
-            return excess_return / (volatility ** 2)
-        else:
-            return 0
+        for h in range(n_steps):
+            if h == 0:
+                forecasts[h] = (self.omega + 
+                               self.alpha * last_resid_sq + 
+                               self.beta * current_sigma2 + 
+                               self.gamma * I_last * last_resid_sq)
+            else:
+                # For multi-step, E[resid^2] = forecasts[h-1], E[I*resid^2] = 0.5 * forecasts[h-1]
+                forecasts[h] = self.omega + (self.alpha + self.beta + 0.5 * self.gamma) * forecasts[h-1]
+            forecasts[h] = max(1e-7, forecasts[h]) # Ensure positivity
+
+        return forecasts
+
+    def volatility_innovations(self) -> np.ndarray:
+        if not self.is_fitted or self.variance_history is None or len(self.variance_history) <= 1:
+            # warnings.warn("Not enough data for GJR volatility innovations. Returning empty array.")
+            return np.array([])
+        
+        T = len(self.variance_history)
+        innovations = np.zeros(T-1)
+        
+        for t in range(1, T):
+            I_t_minus_1 = 1.0 if self.residuals_history[t-1] < 0 else 0.0
+            expected_var_t = (self.omega + 
+                              self.alpha * self.residuals_history[t-1]**2 + 
+                              self.beta * self.variance_history[t-1] + 
+                              self.gamma * I_t_minus_1 * self.residuals_history[t-1]**2)
+            
+            realized_var_t = self.variance_history[t]
+            innovations[t-1] = realized_var_t - expected_var_t
+        
+        if len(innovations) > 0 and (np.all(innovations == 0) or np.var(innovations) < 1e-10):
+            # print("Warning: GJR Volatility innovations have near-zero variance. Adding small random noise.")
+            np.random.seed(42) 
+            innovations = innovations + np.random.normal(0, 1e-6, size=len(innovations)) # Reduced noise
+            
+        return innovations
+
+class ThreePhaseVolatilityModel:
+    def __init__(self, baseline_model: Union[GARCHModel, GJRGARCHModel],
+                 k1: float = 1.5, k2: float = 2.0, 
+                 delta_t1: float = 5.0, delta_t2: float = 3.0, delta_t3: float = 10.0, 
+                 delta: int = 5):
+        self.baseline_model = baseline_model
+        self.k1 = k1
+        self.k2 = k2
+        self.delta_t1 = delta_t1
+        self.delta_t2 = delta_t2
+        self.delta_t3 = delta_t3
+        self.delta = delta
+        
+        if k1 <= 1:
+            raise ValueError("k1 must be greater than 1")
+        if k2 <= 1:
+            raise ValueError("k2 must be greater than 1")
+        if k2 <= k1:
+            warnings.warn("Typically k2 > k1 to reflect higher post-event peak due to secondary uncertainties")
     
-    @staticmethod
-    def sharpe_ratio(expected_return: float, risk_free_rate: float,
-                    volatility: float, transaction_cost: float = 0) -> float:
-        """
-        Calculate Sharpe Ratio.
-        SR = (E[R] - r_f - tau) / sigma
-        """
-        excess_return = expected_return - risk_free_rate - transaction_cost
-        if volatility > 0:
-            return excess_return / volatility
-        else:
-            return 0
+    def phi1(self, t: int, t_event: int) -> float:
+        return (self.k1 - 1) * np.exp(-((t - t_event)**2) / (2 * self.delta_t1**2))
     
-    @staticmethod
-    def calculate_phase_metrics(data: pd.DataFrame, risk_free_rate: float = 0.00018) -> pd.DataFrame:
-        """
-        Calculate average risk-adjusted metrics by event phase.
-        Used for testing Hypothesis 1 about RVR/Sharpe peaks.
-        """
-        phases = ['pre_event_early', 'pre_event_late', 'post_event_rising', 'post_event_decay']
-        results = []
-        
-        for phase in phases:
-            phase_data = data[data['phase'] == phase] if 'phase' in data.columns else data
-            
-            if len(phase_data) > 0:
-                # Use expected_return if available, otherwise use returns
-                return_col = 'expected_return' if 'expected_return' in phase_data.columns else 'returns'
-                vol_col = 'unified_volatility' if 'unified_volatility' in phase_data.columns else 'volatility'
-                
-                avg_return = phase_data[return_col].mean()
-                avg_volatility = phase_data[vol_col].mean()
-                
-                # Calculate metrics
-                rvr = RiskMetrics.return_to_variance_ratio(
-                    avg_return, risk_free_rate, avg_volatility
-                )
-                
-                sharpe = RiskMetrics.sharpe_ratio(
-                    avg_return, risk_free_rate, avg_volatility
-                )
-                
-                # Additional statistics
-                results.append({
-                    'phase': phase,
-                    'avg_return': avg_return,
-                    'avg_volatility': avg_volatility,
-                    'return_volatility': phase_data[return_col].std(),
-                    'rvr': rvr,
-                    'sharpe_ratio': sharpe,
-                    'n_obs': len(phase_data),
-                    'median_return': phase_data[return_col].median(),
-                    'return_skewness': phase_data[return_col].skew(),
-                    'return_kurtosis': phase_data[return_col].kurtosis()
-                })
-        
-        return pd.DataFrame(results)
+    def phi2(self, t: int, t_event: int) -> float:
+        return (self.k2 - 1) * (1 - np.exp(-(t - t_event) / self.delta_t2))
     
-    @staticmethod
-    def test_rvr_peak_hypothesis(phase_metrics: pd.DataFrame, 
-                                significance_level: float = 0.05) -> Dict[str, bool]:
-        """
-        Test Hypothesis 1: RVR and Sharpe ratios peak during post-event rising phase.
-        
-        Returns:
-            Dictionary with test results for RVR and Sharpe ratio
-        """
-        results = {}
-        
-        # Get metrics for each phase
-        pre_early = phase_metrics[phase_metrics['phase'] == 'pre_event_early']
-        pre_late = phase_metrics[phase_metrics['phase'] == 'pre_event_late']
-        post_rising = phase_metrics[phase_metrics['phase'] == 'post_event_rising']
-        post_decay = phase_metrics[phase_metrics['phase'] == 'post_event_decay']
-        
-        # Test for RVR
-        if len(post_rising) > 0:
-            rvr_rising = post_rising['rvr'].iloc[0]
-            
-            # Check if RVR in rising phase exceeds other phases
-            rvr_peak = True
-            for phase_data in [pre_early, pre_late, post_decay]:
-                if len(phase_data) > 0 and phase_data['rvr'].iloc[0] >= rvr_rising:
-                    rvr_peak = False
-                    break
-            
-            results['rvr_peak_supported'] = rvr_peak
-            results['rvr_post_rising'] = rvr_rising
+    def phi3(self, t: int, t_event: int) -> float:
+        return (self.k2 - 1) * np.exp(-(t - (t_event + self.delta)) / self.delta_t3)
+    
+    def calculate_volatility(self, t: int, t_event: int, sigma_e0: float) -> float:
+        if t <= t_event:
+            phi = self.phi1(t, t_event)
+        elif t <= t_event + self.delta:
+            phi = self.phi2(t, t_event)
         else:
-            results['rvr_peak_supported'] = False
-            results['rvr_post_rising'] = None
+            phi = self.phi3(t, t_event)
+        return sigma_e0 * (1 + phi)
+    
+    def calculate_volatility_series(self, 
+                                   days_to_event: Union[List[int], np.ndarray], 
+                                   baseline_conditional_vol_series: Optional[np.ndarray] = None) -> np.ndarray:
+        if not isinstance(days_to_event, np.ndarray):
+            days_to_event = np.array(days_to_event)
         
-        # Test for Sharpe ratio
-        if len(post_rising) > 0:
-            sharpe_rising = post_rising['sharpe_ratio'].iloc[0]
-            
-            # Check if Sharpe in rising phase exceeds other phases
-            sharpe_peak = True
-            for phase_data in [pre_early, pre_late, post_decay]:
-                if len(phase_data) > 0 and phase_data['sharpe_ratio'].iloc[0] >= sharpe_rising:
-                    sharpe_peak = False
-                    break
-            
-            results['sharpe_peak_supported'] = sharpe_rising
-            results['sharpe_post_rising'] = sharpe_rising
+        if baseline_conditional_vol_series is not None:
+            if len(baseline_conditional_vol_series) != len(days_to_event):
+                raise ValueError("Length of baseline_conditional_vol_series must match days_to_event.")
+            sigma_e0_series = baseline_conditional_vol_series
         else:
-            results['sharpe_peak_supported'] = False
-            results['sharpe_post_rising'] = None
+            if not self.baseline_model.is_fitted:
+                raise RuntimeError("Baseline model must be fitted or baseline_conditional_vol_series provided")
+            
+            bm = self.baseline_model
+            if isinstance(bm, GJRGARCHModel):
+                denominator = (1 - bm.alpha - bm.beta - 0.5 * bm.gamma)
+            else: # GARCHModel
+                denominator = (1 - bm.alpha - bm.beta)
+            
+            if denominator <= 1e-7: # Non-stationary or near non-stationary
+                if bm.variance_history is not None and len(bm.variance_history) > 0:
+                    uncond_var = bm.variance_history[-1]
+                    warnings.warn(f"Baseline model params non-stationary. Denom: {denominator:.2e}. Using last conditional var: {uncond_var:.2e}")
+                else: # Should not happen if fitted
+                    uncond_var = 1e-6 
+                    warnings.warn(f"Baseline model params non-stationary. Denom: {denominator:.2e}. Using default var: {uncond_var:.2e}")
+            else:
+                 uncond_var = bm.omega / denominator
+            
+            sigma_e0_val = np.sqrt(max(uncond_var, 1e-7)) 
+            sigma_e0_series = np.full_like(days_to_event, sigma_e0_val, dtype=float)
+
+        volatility_series = np.zeros_like(days_to_event, dtype=float)
+        t_event = 0
         
-        return results
+        for i, t_rel in enumerate(days_to_event): # t_rel is relative day
+            volatility_series[i] = self.calculate_volatility(t_rel, t_event, sigma_e0_series[i])
+        
+        return volatility_series
