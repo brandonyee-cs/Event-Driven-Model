@@ -1,48 +1,53 @@
-# testhyp1.py
-# Script to test Hypothesis 1:
-# Risk-adjusted returns (RVR and Sharpe ratio) peak during the post-event rising phase.
+"""
+Test Hypothesis 1: Risk-Adjusted Returns Peak During Post-Event Rising Phase
+
+Tests the hypothesis that Return-to-Variance Ratio (RVR) and Sharpe ratios 
+peak during the post-event rising phase (t_event < t ≤ t_event + δ) due to 
+high volatility and biased expectations.
+
+Based on Proposition 3 from "Modeling Equilibrium Asset Pricing Around Events 
+with Heterogeneous Beliefs, Dynamic Volatility, and a Two-Risk Uncertainty Framework"
+"""
 
 import pandas as pd
 import numpy as np
 import os
 import sys
-import traceback
 import polars as pl
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy import stats
 from typing import List, Tuple, Dict, Optional, Any
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-# --- Configuration ---
+# Add src directory to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# Ensure 'src' and the directory containing 'config.py' are in the Python path
-# Assuming 'testhyp1.py' is in the main project directory,
-# and 'src' and 'config.py' are also in the main project directory or a 'src' subdirectory.
-# If config.py is in the same dir as testhyp1.py:
 if current_dir not in sys.path:
     sys.path.append(current_dir)
-# If src is a subdir:
 src_dir = os.path.join(current_dir, 'src')
 if src_dir not in sys.path:
     sys.path.append(src_dir)
 
-
 try:
     from src.event_processor import EventProcessor, VolatilityParameters
-    from src.models import RiskMetrics # UnifiedVolatilityModel is used internally by EventProcessor
-    from src.config import Config # Import the Config class
-    print("Successfully imported EventProcessor, models, and Config.")
+    from src.models import RiskMetrics, UnifiedVolatilityModel
+    from src.config import Config
+    print("Successfully imported required modules.")
 except ImportError as e:
     print(f"Error importing modules: {e}")
     print(f"Python Path: {sys.path}")
-    print("Ensure 'event_processor.py', 'models.py', and 'config.py' are accessible.")
     sys.exit(1)
 
-pl.Config.set_tbl_rows(10)
-pl.Config.set_tbl_cols(12)
-pl.Config.set_fmt_str_lengths(70)
+# Configure plotting style
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
 
-# --- Hardcoded Analysis Parameters (could also be moved to Config) ---
+# Configure Polars display
+pl.Config.set_tbl_rows(20)
+pl.Config.set_tbl_cols(12)
+pl.Config.set_fmt_str_lengths(100)
+
+# Data file paths
 STOCK_FILES = [
     "/home/d87016661/crsp_dsf-2000-2001.parquet",
     "/home/d87016661/crsp_dsf-2002-2003.parquet",
@@ -57,443 +62,828 @@ STOCK_FILES = [
     "/home/d87016661/crsp_dsf-2024-2025.parquet"
 ]
 
-# FDA event specific parameters
+# FDA event parameters
 FDA_EVENT_FILE = "/home/d87016661/fda_ticker_list_2000_to_2024.csv"
-FDA_RESULTS_DIR = "results/hypothesis1/results_fda/"
-FDA_FILE_PREFIX = "fda"
+FDA_RESULTS_DIR = "results/hypothesis1/fda/"
 FDA_EVENT_DATE_COL = "Approval Date"
 FDA_TICKER_COL = "ticker"
 
-# Earnings event specific parameters
+# Earnings event parameters
 EARNINGS_EVENT_FILE = "/home/d87016661/detail_history_actuals.csv"
-EARNINGS_RESULTS_DIR = "results/hypothesis1/results_earnings/"
-EARNINGS_FILE_PREFIX = "earnings"
+EARNINGS_RESULTS_DIR = "results/hypothesis1/earnings/"
 EARNINGS_EVENT_DATE_COL = "ANNDATS"
 EARNINGS_TICKER_COL = "ticker"
 
-# Get relevant parameters from Config
-app_config = Config()
-ANALYSIS_WINDOW_DAYS = app_config.event_window_post # Using post window for symmetric analysis range
-EVENT_DAY_ZERO = 0
-POST_EVENT_RISING_DURATION_DELTA = app_config.event_delta
-RISK_FREE_RATE_DAILY = app_config.risk_free_rate_daily
-
-def load_stock_data(stock_file_paths: List[str]) -> Optional[pl.DataFrame]:
-    """Loads and combines stock data from multiple parquet files."""
-    stock_df_list = []
-    print(f"Loading stock data from {len(stock_file_paths)} files...")
-    for f_path in stock_file_paths:
-        try:
-            df = pl.read_parquet(f_path)
-            # Standardize column names (case-insensitive check then rename)
-            # CRSP specific: PERMNO, date, PRC, RET. Assume 'ticker' is desired.
-            cols = {col.upper(): col for col in df.columns}
-            rename_map = {}
-            if 'PERMNO' in cols and 'TICKER' not in cols: rename_map[cols['PERMNO']] = 'ticker'
-            elif 'TICKER' in cols: rename_map[cols['TICKER']] = 'ticker'
-
-            if 'DATE' in cols: rename_map[cols['DATE']] = 'date'
-            if 'PRC' in cols: rename_map[cols['PRC']] = 'price' # 'price' is used by EventProcessor
-            if 'RET' in cols: rename_map[cols['RET']] = 'returns'# 'returns' is used by EventProcessor
-
-            df = df.rename(rename_map)
-            required_cols = ['date', 'ticker', 'price', 'returns']
-            if not all(col in df.columns for col in required_cols):
-                # print(f"Skipping {f_path}, missing one of {required_cols}. Found: {df.columns}")
-                continue
-
-            df = df.select(required_cols).with_columns([
-                pl.col("date").cast(pl.Date),
-                pl.col("ticker").cast(pl.Utf8),
-                pl.col("price").cast(pl.Float64),
-                pl.col("returns").cast(pl.Float64)
-            ])
-            stock_df_list.append(df)
-        except Exception as e:
-            print(f"Error loading stock file {f_path}: {e}")
-            # traceback.print_exc()
-    if not stock_df_list:
-        print("No stock data loaded.")
-        return None
-    stock_df = pl.concat(stock_df_list).drop_nulls(subset=['date', 'ticker', 'price', 'returns'])
-    stock_df = stock_df.unique(subset=["ticker", "date"], keep="first")
-    print(f"Loaded and combined {stock_df.height} unique stock records.")
-    return stock_df
-
-def load_event_data(event_file_path: str, event_date_col: str, ticker_col: str) -> Optional[pl.DataFrame]:
-    """Loads event data from a CSV file."""
-    try:
-        print(f"Loading event data from: {event_file_path}")
-        event_df = pl.read_csv(event_file_path, try_parse_dates=True, infer_schema_length=10000)
-        
-        # Robust column renaming
-        actual_event_date_col = event_date_col
-        if event_date_col not in event_df.columns:
-            potential_cols = [c for c in event_df.columns if event_date_col.lower() in c.lower()]
-            if potential_cols: actual_event_date_col = potential_cols[0]
-            else: raise ValueError(f"Event date column '{event_date_col}' not found.")
-        
-        actual_ticker_col = ticker_col
-        if ticker_col not in event_df.columns:
-            potential_cols = [c for c in event_df.columns if ticker_col.lower() in c.lower()]
-            if potential_cols: actual_ticker_col = potential_cols[0]
-            else: raise ValueError(f"Ticker column '{ticker_col}' not found.")
-
-        event_df = event_df.rename({actual_event_date_col: "event_date", actual_ticker_col: "symbol"}) # EventProcessor expects 'symbol'
-        
-        event_df = event_df.with_columns([
-            pl.col("event_date").cast(pl.Date),
-            pl.col("symbol").cast(pl.Utf8).str.strip_chars() # Clean ticker
-        ])
-        event_df = event_df.drop_nulls(subset=["event_date", "symbol"])
-        event_df = event_df.unique(subset=["symbol", "event_date"], keep="first")
-        if event_df.is_empty():
-            print("No valid events found.")
-            return None
-        print(f"Loaded {event_df.height} unique events.")
-        return event_df
-    except Exception as e:
-        print(f"Error loading event data from {event_file_path}: {e}")
-        traceback.print_exc()
-        return None
-
-
 class Hypothesis1Tester:
-    def __init__(self, config: Config, results_dir: str, file_prefix: str):
+    """
+    Class to test Hypothesis 1 from the paper:
+    Risk-adjusted returns (RVR and Sharpe) peak during post-event rising phase.
+    """
+    
+    def __init__(self, config: Config, event_type: str, results_dir: str):
+        """
+        Initialize tester with configuration and event type.
+        
+        Args:
+            config: Configuration object
+            event_type: 'fda' or 'earnings'
+            results_dir: Directory to save results
+        """
         self.config = config
-        self.event_processor = EventProcessor(config)
-        self.risk_metrics = RiskMetrics() # From models.py
+        self.event_type = event_type
         self.results_dir = results_dir
-        self.file_prefix = file_prefix
+        self.event_processor = EventProcessor(config)
+        
+        # Create results directory
         os.makedirs(self.results_dir, exist_ok=True)
-
+        
+        # Define event phases based on paper
         self.phases = {
-            'pre_event': (-self.config.event_window_pre, -1), # Use config
-            'event_day': (0, 0),
-            'post_event_rising': (1, self.config.event_delta),
-            'post_event_decay': (self.config.event_delta + 1, self.config.event_window_post)
+            'pre_event_early': (-config.event_window_pre, -6),
+            'pre_event_late': (-5, 0),
+            'post_event_rising': (1, config.event_delta),
+            'post_event_decay': (config.event_delta + 1, config.event_window_post)
         }
-        self.h1_results_summary = None
-
-    def run_analysis(self, stock_data_df: pl.DataFrame, event_data_df: pl.DataFrame):
-        print(f"\n--- Running H1 Analysis for {self.file_prefix.upper()} ---")
-        if stock_data_df is None or stock_data_df.is_empty() or \
-           event_data_df is None or event_data_df.is_empty():
-            print("Stock or event data is missing. Aborting.")
-            return False
-
-        # EventProcessor.process_events returns a pandas DataFrame
-        print("Processing events with EventProcessor...")
-        processed_events_pd = self.event_processor.process_events(
-            price_data=stock_data_df.to_pandas(), # EventProcessor expects pandas
-            event_data=event_data_df.to_pandas()
-        )
-
-        if processed_events_pd is None or processed_events_pd.empty:
-            print("No events processed by EventProcessor. Aborting.")
-            return False
         
-        processed_events_pl = pl.from_pandas(processed_events_pd)
-        print(f"EventProcessor returned {processed_events_pl.shape[0]} records.")
+        # Storage for results
+        self.processed_data = None
+        self.phase_metrics = None
+        self.hypothesis_results = None
+    
+    def load_stock_data(self, file_paths: List[str]) -> Optional[pl.DataFrame]:
+        """Load and combine stock price data from multiple files."""
+        print(f"Loading stock data from {len(file_paths)} files...")
         
-        # Ensure necessary columns from EventProcessor are present
-        # Expected columns from EventProcessor: 'symbol', 'date', 'price', 'returns',
-        # 'event_date', 'event_type', 'days_to_event', 'baseline_volatility',
-        # 'unified_volatility', 'bias_parameter', 'expected_return',
-        # 'rvr', 'sharpe_ratio', 'phase', 'impact_uncertainty', 'volatility_innovation'
-        
-        required_metric_cols = ['days_to_event', 'rvr', 'sharpe_ratio', 'phase']
-        if not all(col in processed_events_pl.columns for col in required_metric_cols):
-            print(f"Missing one or more required columns from EventProcessor output: {required_metric_cols}")
-            print(f"Available columns: {processed_events_pl.columns}")
-            return False
+        dfs = []
+        for i, path in enumerate(file_paths):
+            if i % 2 == 0:
+                print(f"  Loading file {i+1}/{len(file_paths)}...")
             
-        self.analyze_hypothesis1_from_processed(processed_events_pl)
+            try:
+                df = pl.read_parquet(path)
+                
+                # Standardize column names
+                rename_map = {}
+                for col in df.columns:
+                    col_upper = col.upper()
+                    if col_upper == 'PERMNO':
+                        rename_map[col] = 'ticker'
+                    elif col_upper == 'DATE':
+                        rename_map[col] = 'date'
+                    elif col_upper == 'PRC':
+                        rename_map[col] = 'price'
+                    elif col_upper == 'RET':
+                        rename_map[col] = 'returns'
+                
+                df = df.rename(rename_map)
+                
+                # Select and cast required columns
+                required_cols = ['ticker', 'date', 'price', 'returns']
+                if all(col in df.columns for col in required_cols):
+                    df = df.select(required_cols).with_columns([
+                        pl.col('ticker').cast(pl.Utf8),
+                        pl.col('date').cast(pl.Date),
+                        pl.col('price').cast(pl.Float64).abs(),  # Handle negative prices
+                        pl.col('returns').cast(pl.Float64)
+                    ])
+                    dfs.append(df)
+                    
+            except Exception as e:
+                print(f"  Warning: Could not load {path}: {e}")
+                continue
         
-        processed_events_pl.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_h1_processed_event_data.csv"))
-        print(f"Saved processed event data for H1 to {self.results_dir}")
+        if not dfs:
+            print("Error: No stock data loaded!")
+            return None
+        
+        # Combine all dataframes
+        combined_df = pl.concat(dfs)
+        
+        # Remove duplicates and invalid data
+        combined_df = combined_df.filter(
+            pl.col('price').is_not_null() & 
+            pl.col('returns').is_not_null() &
+            (pl.col('price') > 0)
+        ).unique(subset=['ticker', 'date'])
+        
+        print(f"Loaded {combined_df.height:,} stock observations")
+        return combined_df
+    
+    def load_event_data(self, file_path: str, date_col: str, 
+                       ticker_col: str) -> Optional[pl.DataFrame]:
+        """Load event data from CSV file."""
+        print(f"Loading {self.event_type} event data...")
+        
+        try:
+            # Read CSV with proper date parsing
+            df = pl.read_csv(file_path, try_parse_dates=True, infer_schema_length=10000)
+            
+            # Find columns (case-insensitive)
+            actual_date_col = None
+            actual_ticker_col = None
+            
+            for col in df.columns:
+                if date_col.lower() in col.lower() and actual_date_col is None:
+                    actual_date_col = col
+                if ticker_col.lower() in col.lower() and actual_ticker_col is None:
+                    actual_ticker_col = col
+            
+            if not actual_date_col or not actual_ticker_col:
+                print(f"Error: Could not find required columns {date_col}, {ticker_col}")
+                print(f"Available columns: {df.columns}")
+                return None
+            
+            # Rename and process
+            df = df.rename({
+                actual_date_col: 'event_date',
+                actual_ticker_col: 'symbol'
+            })
+            
+            # Add event type
+            df = df.with_columns([
+                pl.col('event_date').cast(pl.Date),
+                pl.col('symbol').cast(pl.Utf8).str.strip_chars(),
+                pl.lit(self.event_type).alias('event_type')
+            ])
+            
+            # Remove invalid events
+            df = df.filter(
+                pl.col('event_date').is_not_null() &
+                pl.col('symbol').is_not_null() &
+                (pl.col('symbol').str.len_chars() > 0)
+            ).unique(subset=['symbol', 'event_date'])
+            
+            print(f"Loaded {df.height:,} {self.event_type} events")
+            return df
+            
+        except Exception as e:
+            print(f"Error loading event data: {e}")
+            return None
+    
+    def run_analysis(self, stock_df: pl.DataFrame, event_df: pl.DataFrame) -> bool:
+        """
+        Run the complete Hypothesis 1 analysis.
+        
+        Returns:
+            True if analysis completed successfully
+        """
+        print(f"\n{'='*60}")
+        print(f"Running Hypothesis 1 Analysis for {self.event_type.upper()} Events")
+        print(f"{'='*60}")
+        
+        # Process events using EventProcessor
+        print("\nProcessing events with unified volatility model...")
+        self.processed_data = self.event_processor.process_events(
+            price_data=stock_df.to_pandas(),
+            event_data=event_df.to_pandas()
+        )
+        
+        if self.processed_data is None or self.processed_data.empty:
+            print("Error: No events successfully processed")
+            return False
+        
+        print(f"Processed {len(self.processed_data):,} event-day observations")
+        
+        # Calculate phase-level metrics
+        self._calculate_phase_metrics()
+        
+        # Test hypothesis
+        self._test_hypothesis()
+        
+        # Generate visualizations
+        self._create_visualizations()
+        
+        # Save results
+        self._save_results()
+        
         return True
-
-    def analyze_hypothesis1_from_processed(self, processed_data_pl: pl.DataFrame):
-        """
-        Test Hypothesis 1 using data already processed by EventProcessor.
-        """
-        phase_metrics_list = []
-        for phase_name, (start_day, end_day) in self.phases.items():
-            phase_data = processed_data_pl.filter(
-                (pl.col('days_to_event') >= start_day) & (pl.col('days_to_event') <= end_day)
-            )
-            if not phase_data.is_empty():
-                phase_metrics_list.append({
+    
+    def _calculate_phase_metrics(self):
+        """Calculate average metrics by event phase."""
+        print("\nCalculating phase-level metrics...")
+        
+        # Add phase labels to data
+        def get_phase(days_to_event):
+            for phase_name, (start, end) in self.phases.items():
+                if start <= days_to_event <= end:
+                    return phase_name
+            return 'other'
+        
+        self.processed_data['phase'] = self.processed_data['days_to_event'].apply(get_phase)
+        
+        # Calculate metrics by phase
+        phase_results = []
+        
+        for phase_name, (start, end) in self.phases.items():
+            phase_data = self.processed_data[
+                (self.processed_data['days_to_event'] >= start) &
+                (self.processed_data['days_to_event'] <= end)
+            ]
+            
+            if len(phase_data) > 0:
+                # Calculate average metrics
+                metrics = {
                     'phase': phase_name,
+                    'n_obs': len(phase_data),
+                    'avg_return': phase_data['expected_return'].mean(),
+                    'median_return': phase_data['expected_return'].median(),
+                    'avg_volatility': phase_data['unified_volatility'].mean(),
                     'avg_rvr': phase_data['rvr'].mean(),
                     'median_rvr': phase_data['rvr'].median(),
                     'avg_sharpe': phase_data['sharpe_ratio'].mean(),
                     'median_sharpe': phase_data['sharpe_ratio'].median(),
-                    'rvr_values': phase_data['rvr'].drop_nulls().to_list(),
-                    'sharpe_values': phase_data['sharpe_ratio'].drop_nulls().to_list()
-                })
+                    'avg_bias': phase_data['bias_parameter'].mean(),
+                    'avg_phi': phase_data['phi_adjustment'].mean()
+                }
+                
+                # Add confidence intervals using bootstrap
+                n_bootstrap = 1000
+                rvr_samples = []
+                sharpe_samples = []
+                
+                for _ in range(n_bootstrap):
+                    sample = phase_data.sample(n=len(phase_data), replace=True)
+                    rvr_samples.append(sample['rvr'].mean())
+                    sharpe_samples.append(sample['sharpe_ratio'].mean())
+                
+                metrics['rvr_ci_lower'] = np.percentile(rvr_samples, 2.5)
+                metrics['rvr_ci_upper'] = np.percentile(rvr_samples, 97.5)
+                metrics['sharpe_ci_lower'] = np.percentile(sharpe_samples, 2.5)
+                metrics['sharpe_ci_upper'] = np.percentile(sharpe_samples, 97.5)
+                
+                phase_results.append(metrics)
         
-        phase_summary_df = pl.DataFrame(phase_metrics_list)
-        print("\n--- Risk-Adjusted Metrics by Phase (from EventProcessor) ---")
-        print(phase_summary_df.select(['phase', 'avg_rvr', 'avg_sharpe']))
-
-        phase_summary_df.drop(['rvr_values', 'sharpe_values']).write_csv(
-            os.path.join(self.results_dir, f"{self.file_prefix}_h1_phase_summary.csv")
-        )
-
-        results = []
-        for metric_name, values_col, avg_col in [
-            ("RVR", "rvr_values", "avg_rvr"),
-            ("Sharpe", "sharpe_values", "avg_sharpe")
-        ]:
-            try:
-                pre_event_data = phase_summary_df.filter(pl.col('phase') == 'pre_event')
-                post_rising_data = phase_summary_df.filter(pl.col('phase') == 'post_event_rising')
-                post_decay_data = phase_summary_df.filter(pl.col('phase') == 'post_event_decay')
-
-                if pre_event_data.is_empty() or post_rising_data.is_empty() or post_decay_data.is_empty():
-                    print(f"Warning: Missing data for H1 test of {metric_name}.")
-                    results.append({
-                        "metric": f"{metric_name}_peak", "supported": False,
-                        "pre_event_mean": None, "post_rising_mean": None, "post_decay_mean": None,
-                        "p_value_rising_vs_pre": None, "p_value_rising_vs_decay": None
-                    })
-                    continue
+        self.phase_metrics = pd.DataFrame(phase_results)
+        
+        # Display results
+        print("\nPhase Metrics Summary:")
+        print(self.phase_metrics[['phase', 'n_obs', 'avg_rvr', 'avg_sharpe']].to_string(index=False))
+    
+    def _test_hypothesis(self):
+        """
+        Test Hypothesis 1: RVR and Sharpe peak during post-event rising phase.
+        """
+        print("\nTesting Hypothesis 1...")
+        
+        results = {}
+        
+        # Get metrics for each phase
+        metrics_dict = {
+            row['phase']: row for _, row in self.phase_metrics.iterrows()
+        }
+        
+        # Test for RVR peak
+        if 'post_event_rising' in metrics_dict:
+            rising_rvr = metrics_dict['post_event_rising']['avg_rvr']
+            
+            # Check if rising phase has highest RVR
+            rvr_peak = True
+            rvr_comparisons = {}
+            
+            for phase in ['pre_event_early', 'pre_event_late', 'post_event_decay']:
+                if phase in metrics_dict:
+                    other_rvr = metrics_dict[phase]['avg_rvr']
+                    rvr_comparisons[phase] = other_rvr < rising_rvr
+                    if other_rvr >= rising_rvr:
+                        rvr_peak = False
+            
+            # Statistical tests
+            rvr_stats = self._perform_statistical_tests('rvr', 'post_event_rising')
+            
+            results['rvr'] = {
+                'peak_in_rising_phase': rvr_peak,
+                'rising_phase_value': rising_rvr,
+                'comparisons': rvr_comparisons,
+                'statistical_tests': rvr_stats
+            }
+        
+        # Test for Sharpe ratio peak
+        if 'post_event_rising' in metrics_dict:
+            rising_sharpe = metrics_dict['post_event_rising']['avg_sharpe']
+            
+            # Check if rising phase has highest Sharpe
+            sharpe_peak = True
+            sharpe_comparisons = {}
+            
+            for phase in ['pre_event_early', 'pre_event_late', 'post_event_decay']:
+                if phase in metrics_dict:
+                    other_sharpe = metrics_dict[phase]['avg_sharpe']
+                    sharpe_comparisons[phase] = other_sharpe < rising_sharpe
+                    if other_sharpe >= rising_sharpe:
+                        sharpe_peak = False
+            
+            # Statistical tests
+            sharpe_stats = self._perform_statistical_tests('sharpe_ratio', 'post_event_rising')
+            
+            results['sharpe'] = {
+                'peak_in_rising_phase': sharpe_peak,
+                'rising_phase_value': rising_sharpe,
+                'comparisons': sharpe_comparisons,
+                'statistical_tests': sharpe_stats
+            }
+        
+        self.hypothesis_results = results
+        
+        # Print summary
+        print("\nHypothesis 1 Test Results:")
+        print(f"  RVR peaks in post-event rising phase: {results.get('rvr', {}).get('peak_in_rising_phase', 'N/A')}")
+        print(f"  Sharpe peaks in post-event rising phase: {results.get('sharpe', {}).get('peak_in_rising_phase', 'N/A')}")
+    
+    def _perform_statistical_tests(self, metric: str, test_phase: str) -> Dict[str, Any]:
+        """Perform statistical tests comparing phases."""
+        test_data = self.processed_data[self.processed_data['phase'] == test_phase][metric].values
+        results = {}
+        
+        for compare_phase in ['pre_event_early', 'pre_event_late', 'post_event_decay']:
+            compare_data = self.processed_data[self.processed_data['phase'] == compare_phase][metric].values
+            
+            if len(test_data) > 1 and len(compare_data) > 1:
+                # T-test (one-sided, testing if rising > other)
+                t_stat, p_value = stats.ttest_ind(test_data, compare_data, 
+                                                 equal_var=False, alternative='greater')
                 
-                pre_event_mean = pre_event_data[avg_col][0]
-                post_rising_mean = post_rising_data[avg_col][0]
-                post_decay_mean = post_decay_data[avg_col][0]
-
-                # Check if means are not None before comparison
-                if pre_event_mean is None or post_rising_mean is None or post_decay_mean is None:
-                     hypothesis_supported_mean = False
-                else:
-                    hypothesis_supported_mean = (post_rising_mean > pre_event_mean) and \
-                                                (post_rising_mean > post_decay_mean)
+                # Mann-Whitney U test (non-parametric alternative)
+                u_stat, u_pvalue = stats.mannwhitneyu(test_data, compare_data, 
+                                                      alternative='greater')
                 
-                pre_values = pre_event_data[values_col][0]
-                rising_values = post_rising_data[values_col][0]
-                decay_values = post_decay_data[values_col][0]
-
-                p_val_vs_pre, p_val_vs_decay = None, None
-                if len(rising_values) > 1 and len(pre_values) > 1:
-                    t_stat_pre, p_val_pre = stats.ttest_ind(rising_values, pre_values, equal_var=False, alternative='greater', nan_policy='omit')
-                    p_val_vs_pre = p_val_pre
-                if len(rising_values) > 1 and len(decay_values) > 1:
-                    t_stat_decay, p_val_decay = stats.ttest_ind(rising_values, decay_values, equal_var=False, alternative='greater', nan_policy='omit')
-                    p_val_vs_decay = p_val_decay
-                
-                statistically_supported = hypothesis_supported_mean
-                if p_val_vs_pre is not None and p_val_vs_pre >= self.config.alpha_significance:
-                    statistically_supported = False
-                if p_val_vs_decay is not None and p_val_vs_decay >= self.config.alpha_significance:
-                    statistically_supported = False
-
-                print(f"\nHypothesis 1 for {metric_name}:")
-                print(f"  Pre-event Mean: {pre_event_mean if pre_event_mean is not None else 'N/A':.4f}")
-                print(f"  Post-event Rising Mean: {post_rising_mean if post_rising_mean is not None else 'N/A':.4f} (p-vs-pre: {p_val_vs_pre:.4f if p_val_vs_pre is not None else 'N/A'})")
-                print(f"  Post-event Decay Mean: {post_decay_mean if post_decay_mean is not None else 'N/A':.4f} (p-vs-decay: {p_val_vs_decay:.4f if p_val_vs_decay is not None else 'N/A'})")
-                print(f"  Peak during post-event rising (mean comparison)? {'YES' if hypothesis_supported_mean else 'NO'}")
-                print(f"  Peak statistically supported (p < {self.config.alpha_significance})? {'YES' if statistically_supported else 'NO'}")
-
-                results.append({
-                    "metric": f"{metric_name}_peak", "supported": statistically_supported,
-                    "pre_event_mean": pre_event_mean, "post_rising_mean": post_rising_mean,
-                    "post_decay_mean": post_decay_mean,
-                    "p_value_rising_vs_pre": p_val_vs_pre, "p_value_rising_vs_decay": p_val_vs_decay
-                })
-            except Exception as e:
-                print(f"Error testing H1 for {metric_name}: {e}")
-                # traceback.print_exc()
-                results.append({
-                    "metric": f"{metric_name}_peak", "supported": False,
-                    "pre_event_mean": None, "post_rising_mean": None, "post_decay_mean": None,
-                    "p_value_rising_vs_pre": None, "p_value_rising_vs_decay": None})
-
-        self.h1_results_summary = pl.DataFrame(results)
-        print("\n--- Hypothesis 1 Summary ---")
-        print(self.h1_results_summary)
-        self.h1_results_summary.write_csv(
-            os.path.join(self.results_dir, f"{self.file_prefix}_h1_results.csv")
-        )
-        self._generate_visualizations(processed_data_pl.to_pandas(), phase_summary_df.to_pandas())
-
-
-    def _generate_visualizations(self, data_pd: pd.DataFrame, phase_summary_pd: pd.DataFrame):
-        """Generate plots for RVR and Sharpe Ratio dynamics."""
-        if data_pd.empty:
-            print("No data to visualize.")
-            return
-
-        fig, axs = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
-        daily_avg = data_pd.groupby('days_to_event')[['rvr', 'sharpe_ratio']].mean().reset_index()
-
-        axs[0].plot(daily_avg['days_to_event'], daily_avg['rvr'], label='Average RVR', color='blue')
-        axs[0].set_ylabel('RVR')
-        axs[0].set_title(f'{self.file_prefix.upper()}: Average RVR Around Event')
-        axs[0].grid(True, linestyle=':')
-
-        axs[1].plot(daily_avg['days_to_event'], daily_avg['sharpe_ratio'], label='Average Sharpe Ratio', color='red')
-        axs[1].set_ylabel('Sharpe Ratio')
-        axs[1].set_title(f'{self.file_prefix.upper()}: Average Sharpe Ratio Around Event')
-        axs[1].set_xlabel('Days Relative to Event')
-        axs[1].grid(True, linestyle=':')
-
-        for ax in axs:
-            ax.axvline(EVENT_DAY_ZERO, color='black', linestyle='--', label='Event Day')
-            ax.axvline(EVENT_DAY_ZERO + self.config.event_delta, color='grey', linestyle=':', label='End of Rising Phase')
-            ax.legend()
-
+                results[compare_phase] = {
+                    't_statistic': t_stat,
+                    't_pvalue': p_value,
+                    'u_statistic': u_stat,
+                    'u_pvalue': u_pvalue,
+                    'significant_at_5pct': p_value < 0.05
+                }
+        
+        return results
+    
+    def _create_visualizations(self):
+        """Create plots for Hypothesis 1 analysis."""
+        print("\nGenerating visualizations...")
+        
+        # 1. Time series plot of RVR and Sharpe around events
+        self._plot_time_series()
+        
+        # 2. Phase comparison bar plots
+        self._plot_phase_comparison()
+        
+        # 3. Distribution plots by phase
+        self._plot_distributions()
+        
+        # 4. Volatility decomposition plot
+        self._plot_volatility_decomposition()
+    
+    def _plot_time_series(self):
+        """Plot average RVR and Sharpe ratio around events."""
+        # Calculate daily averages
+        daily_avg = self.processed_data.groupby('days_to_event').agg({
+            'rvr': ['mean', 'std', 'count'],
+            'sharpe_ratio': ['mean', 'std', 'count'],
+            'unified_volatility': 'mean',
+            'phi_adjustment': 'mean'
+        }).reset_index()
+        
+        # Flatten column names
+        daily_avg.columns = ['_'.join(col).strip('_') for col in daily_avg.columns]
+        
+        # Create figure
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+        
+        # Plot RVR
+        ax = axes[0]
+        ax.plot(daily_avg['days_to_event'], daily_avg['rvr_mean'], 
+                color='blue', linewidth=2, label='RVR')
+        
+        # Add confidence bands
+        sem = daily_avg['rvr_std'] / np.sqrt(daily_avg['rvr_count'])
+        ax.fill_between(daily_avg['days_to_event'],
+                       daily_avg['rvr_mean'] - 1.96 * sem,
+                       daily_avg['rvr_mean'] + 1.96 * sem,
+                       alpha=0.3, color='blue')
+        
+        # Mark phases
+        for phase, (start, end) in self.phases.items():
+            if 'rising' in phase:
+                ax.axvspan(start, end, alpha=0.2, color='red', label='Post-event rising')
+        
+        ax.axvline(0, color='black', linestyle='--', label='Event day')
+        ax.set_ylabel('Return-to-Variance Ratio')
+        ax.set_title(f'{self.event_type.upper()}: Average RVR Around Events')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot Sharpe ratio
+        ax = axes[1]
+        ax.plot(daily_avg['days_to_event'], daily_avg['sharpe_ratio_mean'],
+                color='green', linewidth=2, label='Sharpe Ratio')
+        
+        sem = daily_avg['sharpe_ratio_std'] / np.sqrt(daily_avg['sharpe_ratio_count'])
+        ax.fill_between(daily_avg['days_to_event'],
+                       daily_avg['sharpe_ratio_mean'] - 1.96 * sem,
+                       daily_avg['sharpe_ratio_mean'] + 1.96 * sem,
+                       alpha=0.3, color='green')
+        
+        for phase, (start, end) in self.phases.items():
+            if 'rising' in phase:
+                ax.axvspan(start, end, alpha=0.2, color='red')
+        
+        ax.axvline(0, color='black', linestyle='--')
+        ax.set_ylabel('Sharpe Ratio')
+        ax.set_title(f'{self.event_type.upper()}: Average Sharpe Ratio Around Events')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot volatility adjustment (phi)
+        ax = axes[2]
+        ax.plot(daily_avg['days_to_event'], daily_avg['phi_adjustment_mean'],
+                color='purple', linewidth=2, label='Phi adjustment')
+        
+        for phase, (start, end) in self.phases.items():
+            if 'rising' in phase:
+                ax.axvspan(start, end, alpha=0.2, color='red')
+        
+        ax.axvline(0, color='black', linestyle='--')
+        ax.set_xlabel('Days to Event')
+        ax.set_ylabel('Volatility Adjustment (φ)')
+        ax.set_title('Event-Specific Volatility Adjustment')
+        ax.grid(True, alpha=0.3)
+        
         plt.tight_layout()
-        plt.savefig(os.path.join(self.results_dir, f"{self.file_prefix}_h1_timeseries_plot.png"), dpi=200)
-        plt.close(fig)
-
-        fig, axs = plt.subplots(1, 2, figsize=(16, 6))
-        relevant_phases = phase_summary_pd[phase_summary_pd['phase'].isin(self.phases.keys())]
+        plt.savefig(os.path.join(self.results_dir, f'{self.event_type}_h1_timeseries.png'), 
+                    dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_phase_comparison(self):
+        """Create bar plots comparing metrics across phases."""
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         
-        axs[0].bar(relevant_phases['phase'], relevant_phases['avg_rvr'], color=['skyblue', 'lightcoral', 'salmon', 'lightgreen'])
-        axs[0].set_ylabel('Average RVR')
-        axs[0].set_title(f'{self.file_prefix.upper()}: Average RVR by Phase')
-        axs[0].tick_params(axis='x', rotation=45)
-
-
-        axs[1].bar(relevant_phases['phase'], relevant_phases['avg_sharpe'], color=['skyblue', 'lightcoral', 'salmon', 'lightgreen'])
-        axs[1].set_ylabel('Average Sharpe Ratio')
-        axs[1].set_title(f'{self.file_prefix.upper()}: Average Sharpe by Phase')
-        axs[1].tick_params(axis='x', rotation=45)
+        # Prepare data
+        phases = self.phase_metrics['phase'].values
+        x_pos = np.arange(len(phases))
         
-        if self.h1_results_summary is not None:
-            rvr_supported_row = self.h1_results_summary.filter(pl.col("metric")=="RVR_peak")
-            sharpe_supported_row = self.h1_results_summary.filter(pl.col("metric")=="Sharpe_peak")
-            rvr_supported = rvr_supported_row["supported"][0] if not rvr_supported_row.is_empty() else False
-            sharpe_supported = sharpe_supported_row["supported"][0] if not sharpe_supported_row.is_empty() else False
-            fig.suptitle(f"H1 Support - RVR: {'YES' if rvr_supported else 'NO'}, Sharpe: {'YES' if sharpe_supported else 'NO'}",
-                         fontsize=14, fontweight='bold')
+        # RVR comparison
+        ax = axes[0]
+        rvr_means = self.phase_metrics['avg_rvr'].values
+        rvr_errors = [
+            self.phase_metrics['avg_rvr'].values - self.phase_metrics['rvr_ci_lower'].values,
+            self.phase_metrics['rvr_ci_upper'].values - self.phase_metrics['avg_rvr'].values
+        ]
+        
+        bars = ax.bar(x_pos, rvr_means, yerr=rvr_errors, capsize=5,
+                      color=['lightblue' if 'rising' not in p else 'salmon' for p in phases])
+        
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([p.replace('_', ' ').title() for p in phases], rotation=45, ha='right')
+        ax.set_ylabel('Average RVR')
+        ax.set_title('Return-to-Variance Ratio by Phase')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Add significance markers
+        if self.hypothesis_results and 'rvr' in self.hypothesis_results:
+            stats_results = self.hypothesis_results['rvr'].get('statistical_tests', {})
+            rising_idx = list(phases).index('post_event_rising')
+            
+            for i, phase in enumerate(phases):
+                if phase in stats_results and stats_results[phase].get('significant_at_5pct'):
+                    ax.annotate('*', xy=(i, rvr_means[i]), xytext=(i, rvr_means[i] + 0.001),
+                               ha='center', fontsize=16, color='red')
+        
+        # Sharpe comparison
+        ax = axes[1]
+        sharpe_means = self.phase_metrics['avg_sharpe'].values
+        sharpe_errors = [
+            self.phase_metrics['avg_sharpe'].values - self.phase_metrics['sharpe_ci_lower'].values,
+            self.phase_metrics['sharpe_ci_upper'].values - self.phase_metrics['avg_sharpe'].values
+        ]
+        
+        bars = ax.bar(x_pos, sharpe_means, yerr=sharpe_errors, capsize=5,
+                      color=['lightgreen' if 'rising' not in p else 'salmon' for p in phases])
+        
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([p.replace('_', ' ').title() for p in phases], rotation=45, ha='right')
+        ax.set_ylabel('Average Sharpe Ratio')
+        ax.set_title('Sharpe Ratio by Phase')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Add significance markers
+        if self.hypothesis_results and 'sharpe' in self.hypothesis_results:
+            stats_results = self.hypothesis_results['sharpe'].get('statistical_tests', {})
+            
+            for i, phase in enumerate(phases):
+                if phase in stats_results and stats_results[phase].get('significant_at_5pct'):
+                    ax.annotate('*', xy=(i, sharpe_means[i]), xytext=(i, sharpe_means[i] + 0.01),
+                               ha='center', fontsize=16, color='red')
+        
+        # Add overall result as title
+        if self.hypothesis_results:
+            rvr_supported = self.hypothesis_results.get('rvr', {}).get('peak_in_rising_phase', False)
+            sharpe_supported = self.hypothesis_results.get('sharpe', {}).get('peak_in_rising_phase', False)
+            
+            support_text = f"Hypothesis 1 Support - RVR: {'YES' if rvr_supported else 'NO'}, " \
+                          f"Sharpe: {'YES' if sharpe_supported else 'NO'}"
+            fig.suptitle(f'{self.event_type.upper()}: {support_text}', fontsize=14, fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.results_dir, f'{self.event_type}_h1_phase_comparison.png'),
+                    dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_distributions(self):
+        """Plot distributions of RVR and Sharpe by phase."""
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # RVR distributions
+        ax = axes[0, 0]
+        for phase in self.phases.keys():
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['rvr']
+            if len(phase_data) > 0:
+                # Remove extreme outliers for better visualization
+                q1, q99 = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
+                
+                ax.hist(phase_data_clean, bins=50, alpha=0.5, 
+                       label=phase.replace('_', ' ').title(), density=True)
+        
+        ax.set_xlabel('RVR')
+        ax.set_ylabel('Density')
+        ax.set_title('Distribution of Return-to-Variance Ratio by Phase')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # RVR box plot
+        ax = axes[0, 1]
+        rvr_data = []
+        labels = []
+        
+        for phase in self.phases.keys():
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['rvr']
+            if len(phase_data) > 0:
+                # Remove extreme outliers
+                q1, q99 = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
+                rvr_data.append(phase_data_clean)
+                labels.append(phase.replace('_', ' ').title())
+        
+        bp = ax.boxplot(rvr_data, labels=labels, patch_artist=True)
+        
+        # Color the post-event rising box differently
+        for i, patch in enumerate(bp['boxes']):
+            if 'Rising' in labels[i]:
+                patch.set_facecolor('salmon')
+            else:
+                patch.set_facecolor('lightblue')
+        
+        ax.set_ylabel('RVR')
+        ax.set_title('RVR Distribution by Phase (1st-99th percentile)')
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Sharpe distributions
+        ax = axes[1, 0]
+        for phase in self.phases.keys():
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['sharpe_ratio']
+            if len(phase_data) > 0:
+                # Remove extreme outliers
+                q1, q99 = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
+                
+                ax.hist(phase_data_clean, bins=50, alpha=0.5,
+                       label=phase.replace('_', ' ').title(), density=True)
+        
+        ax.set_xlabel('Sharpe Ratio')
+        ax.set_ylabel('Density')
+        ax.set_title('Distribution of Sharpe Ratio by Phase')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Sharpe box plot
+        ax = axes[1, 1]
+        sharpe_data = []
+        
+        for phase in self.phases.keys():
+            phase_data = self.processed_data[self.processed_data['phase'] == phase]['sharpe_ratio']
+            if len(phase_data) > 0:
+                # Remove extreme outliers
+                q1, q99 = phase_data.quantile([0.01, 0.99])
+                phase_data_clean = phase_data[(phase_data >= q1) & (phase_data <= q99)]
+                sharpe_data.append(phase_data_clean)
+        
+        bp = ax.boxplot(sharpe_data, labels=labels, patch_artist=True)
+        
+        # Color the post-event rising box differently
+        for i, patch in enumerate(bp['boxes']):
+            if 'Rising' in labels[i]:
+                patch.set_facecolor('salmon')
+            else:
+                patch.set_facecolor('lightgreen')
+        
+        ax.set_ylabel('Sharpe Ratio')
+        ax.set_title('Sharpe Ratio Distribution by Phase (1st-99th percentile)')
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.results_dir, f'{self.event_type}_h1_distributions.png'),
+                    dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_volatility_decomposition(self):
+        """Plot the decomposition of unified volatility."""
+        # Calculate daily averages
+        daily_avg = self.processed_data.groupby('days_to_event').agg({
+            'baseline_volatility': 'mean',
+            'unified_volatility': 'mean',
+            'phi_adjustment': 'mean'
+        }).reset_index()
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Plot baseline and unified volatility
+        ax.plot(daily_avg['days_to_event'], daily_avg['baseline_volatility'],
+                color='blue', linewidth=2, label='Baseline (GJR-GARCH)', linestyle='--')
+        ax.plot(daily_avg['days_to_event'], daily_avg['unified_volatility'],
+                color='red', linewidth=2, label='Unified Volatility')
+        
+        # Fill between to show the impact of phi adjustment
+        ax.fill_between(daily_avg['days_to_event'],
+                       daily_avg['baseline_volatility'],
+                       daily_avg['unified_volatility'],
+                       alpha=0.3, color='orange', label='Event adjustment (φ)')
+        
+        # Mark phases
+        for phase, (start, end) in self.phases.items():
+            if 'rising' in phase:
+                ax.axvspan(start, end, alpha=0.2, color='red')
+        
+        ax.axvline(0, color='black', linestyle='--', label='Event day')
+        ax.set_xlabel('Days to Event')
+        ax.set_ylabel('Volatility')
+        ax.set_title(f'{self.event_type.upper()}: Unified Volatility Decomposition')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.results_dir, f'{self.event_type}_h1_volatility_decomposition.png'),
+                    dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _save_results(self):
+        """Save analysis results to files."""
+        print("\nSaving results...")
+        
+        # Save processed data
+        self.processed_data.to_csv(
+            os.path.join(self.results_dir, f'{self.event_type}_h1_processed_data.csv'),
+            index=False
+        )
+        
+        # Save phase metrics
+        self.phase_metrics.to_csv(
+            os.path.join(self.results_dir, f'{self.event_type}_h1_phase_metrics.csv'),
+            index=False
+        )
+        
+        # Save hypothesis test results
+        results_summary = pd.DataFrame([{
+            'event_type': self.event_type,
+            'rvr_peak_supported': self.hypothesis_results.get('rvr', {}).get('peak_in_rising_phase', None),
+            'rvr_rising_value': self.hypothesis_results.get('rvr', {}).get('rising_phase_value', None),
+            'sharpe_peak_supported': self.hypothesis_results.get('sharpe', {}).get('peak_in_rising_phase', None),
+            'sharpe_rising_value': self.hypothesis_results.get('sharpe', {}).get('rising_phase_value', None),
+            'n_total_obs': len(self.processed_data),
+            'n_events': self.processed_data['event_date'].nunique(),
+            'n_symbols': self.processed_data['symbol'].nunique()
+        }])
+        
+        results_summary.to_csv(
+            os.path.join(self.results_dir, f'{self.event_type}_h1_test_results.csv'),
+            index=False
+        )
+        
+        print(f"Results saved to {self.results_dir}")
 
-        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-        plt.savefig(os.path.join(self.results_dir, f"{self.file_prefix}_h1_phase_barplot.png"), dpi=200)
-        plt.close(fig)
-        print(f"Saved H1 plots to {self.results_dir}")
 
-
-def run_event_type_analysis(event_type_name: str, event_file: str, event_date_col: str, ticker_col: str, results_dir: str, file_prefix: str, global_stock_df: pl.DataFrame, app_config: Config):
-    print(f"\n>>>> Starting H1 analysis for {event_type_name.upper()} EVENTS <<<<")
-    event_data_df = load_event_data(event_file, event_date_col, ticker_col)
-    if event_data_df is None or event_data_df.is_empty():
-        print(f"Could not load event data for {event_type_name}. Skipping.")
+def run_hypothesis1_analysis(event_type: str, event_file: str, date_col: str, 
+                           ticker_col: str, stock_files: List[str]) -> bool:
+    """
+    Run Hypothesis 1 analysis for a specific event type.
+    
+    Returns:
+        True if analysis completed successfully
+    """
+    # Set up configuration
+    config = Config()
+    
+    # Set up results directory
+    if event_type == 'fda':
+        results_dir = FDA_RESULTS_DIR
+    else:
+        results_dir = EARNINGS_RESULTS_DIR
+    
+    # Initialize tester
+    tester = Hypothesis1Tester(config, event_type, results_dir)
+    
+    # Load data
+    stock_df = tester.load_stock_data(stock_files)
+    if stock_df is None:
         return False
-
-    tester = Hypothesis1Tester(config=app_config, results_dir=results_dir, file_prefix=file_prefix)
-    success = tester.run_analysis(global_stock_df, event_data_df)
-    print(f">>>> H1 analysis for {event_type_name.upper()} EVENTS {'SUCCESSFUL' if success else 'FAILED'} <<<<")
-    return success
-
-def compare_h1_results():
-    print("\n=== Comparing FDA and Earnings Results for Hypothesis 1 ===")
-    comparison_dir = "results/hypothesis1/comparison/"
-    os.makedirs(comparison_dir, exist_ok=True)
-
-    fda_h1_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_h1_results.csv")
-    earnings_h1_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_h1_results.csv")
-
-    if not os.path.exists(fda_h1_file) or not os.path.exists(earnings_h1_file):
-        print("One or both H1 result files are missing. Cannot compare.")
-        return
-
-    fda_results = pl.read_csv(fda_h1_file)
-    earnings_results = pl.read_csv(earnings_h1_file)
     
-    # Ensure 'metric' column exists before proceeding
-    if 'metric' not in fda_results.columns or 'metric' not in earnings_results.columns:
-        print("Column 'metric' missing in one of the results files. Cannot compare.")
-        return
-
-    comparison_data = []
-    metrics_to_compare = ["RVR_peak", "Sharpe_peak"]
-    for metric_val in metrics_to_compare:
-        fda_metric_row = fda_results.filter(pl.col("metric") == metric_val)
-        earnings_metric_row = earnings_results.filter(pl.col("metric") == metric_val)
-
-        comparison_data.append({
-            "metric": metric_val,
-            "fda_supported": fda_metric_row["supported"][0] if not fda_metric_row.is_empty() and "supported" in fda_metric_row.columns else None,
-            "fda_post_rising_mean": fda_metric_row["post_rising_mean"][0] if not fda_metric_row.is_empty() and "post_rising_mean" in fda_metric_row.columns else None,
-            "earnings_supported": earnings_metric_row["supported"][0] if not earnings_metric_row.is_empty() and "supported" in earnings_metric_row.columns else None,
-            "earnings_post_rising_mean": earnings_metric_row["post_rising_mean"][0] if not earnings_metric_row.is_empty() and "post_rising_mean" in earnings_metric_row.columns else None,
-        })
+    event_df = tester.load_event_data(event_file, date_col, ticker_col)
+    if event_df is None:
+        return False
     
-    comparison_df = pl.DataFrame(comparison_data)
-    print("\n--- H1 Comparison Summary ---")
-    print(comparison_df)
-    comparison_df.write_csv(os.path.join(comparison_dir, "h1_comparison_summary.csv"))
+    # Run analysis
+    return tester.run_analysis(stock_df, event_df)
 
-    fig, axs = plt.subplots(1, 2, figsize=(15, 6))
-    bar_width = 0.35
-    index = np.arange(len(metrics_to_compare))
 
-    fda_means = [row["fda_post_rising_mean"] for row in comparison_df.to_dicts() if row["fda_post_rising_mean"] is not None]
-    earnings_means = [row["earnings_post_rising_mean"] for row in comparison_df.to_dicts() if row["earnings_post_rising_mean"] is not None]
+def compare_results():
+    """Compare results between FDA and earnings events."""
+    print("\n" + "="*60)
+    print("Comparing FDA and Earnings Results")
+    print("="*60)
     
-    if len(fda_means) != len(metrics_to_compare) or len(earnings_means) != len(metrics_to_compare):
-         print("Warning: Mismatch in mean data length for plotting, likely due to None values. Plot may be incomplete.")
-         # Pad with zeros or handle appropriately if you want to plot partial data
-         fda_means = [x if x is not None else 0 for x in [row["fda_post_rising_mean"] for row in comparison_df.to_dicts()]]
-         earnings_means = [x if x is not None else 0 for x in [row["earnings_post_rising_mean"] for row in comparison_df.to_dicts()]]
-
-
-    axs[0].bar(index - bar_width/2, fda_means, bar_width, label='FDA', color='blue')
-    axs[0].bar(index + bar_width/2, earnings_means, bar_width, label='Earnings', color='orange')
-    axs[0].set_ylabel('Mean Value in Post-Event Rising Phase')
-    axs[0].set_xticks(index)
-    axs[0].set_xticklabels([m.split('_')[0] for m in metrics_to_compare])
-    axs[0].set_title('Comparison of Post-Event Rising Means')
-    axs[0].legend()
-
-    fda_supported = [1 if row["fda_supported"] else 0 for row in comparison_df.to_dicts()]
-    earnings_supported = [1 if row["earnings_supported"] else 0 for row in comparison_df.to_dicts()]
-
-    axs[1].bar(index - bar_width/2, fda_supported, bar_width, label='FDA Supported', color='lightblue')
-    axs[1].bar(index + bar_width/2, earnings_supported, bar_width, label='Earnings Supported', color='peachpuff')
-    axs[1].set_ylabel('Hypothesis Supported (1=Yes, 0=No)')
-    axs[1].set_xticks(index)
-    axs[1].set_xticklabels([m.split('_')[0] for m in metrics_to_compare])
-    axs[1].set_yticks([0, 1])
-    axs[1].set_yticklabels(['No', 'Yes'])
-    axs[1].set_title('H1 Support Comparison')
-    axs[1].legend()
-
+    # Load results
+    fda_results = pd.read_csv(os.path.join(FDA_RESULTS_DIR, 'fda_h1_test_results.csv'))
+    earnings_results = pd.read_csv(os.path.join(EARNINGS_RESULTS_DIR, 'earnings_h1_test_results.csv'))
+    
+    # Create comparison figure
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Support comparison
+    ax = axes[0]
+    support_data = pd.DataFrame({
+        'FDA': [fda_results['rvr_peak_supported'].iloc[0],
+                fda_results['sharpe_peak_supported'].iloc[0]],
+        'Earnings': [earnings_results['rvr_peak_supported'].iloc[0],
+                     earnings_results['sharpe_peak_supported'].iloc[0]]
+    }, index=['RVR Peak', 'Sharpe Peak'])
+    
+    support_data.plot(kind='bar', ax=ax, color=['lightblue', 'lightgreen'])
+    ax.set_ylabel('Hypothesis Supported')
+    ax.set_title('Hypothesis 1 Support Comparison')
+    ax.set_ylim(0, 1.2)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Value comparison
+    ax = axes[1]
+    value_data = pd.DataFrame({
+        'FDA': [fda_results['rvr_rising_value'].iloc[0],
+                fda_results['sharpe_rising_value'].iloc[0]],
+        'Earnings': [earnings_results['rvr_rising_value'].iloc[0],
+                     earnings_results['sharpe_rising_value'].iloc[0]]
+    }, index=['RVR (Rising)', 'Sharpe (Rising)'])
+    
+    value_data.plot(kind='bar', ax=ax, color=['salmon', 'peachpuff'])
+    ax.set_ylabel('Average Value in Rising Phase')
+    ax.set_title('Risk-Adjusted Returns in Post-Event Rising Phase')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(comparison_dir, "h1_comparison_plot.png"), dpi=200)
-    plt.close(fig)
-    print(f"Saved H1 comparison plot to {comparison_dir}")
+    
+    # Save comparison
+    comparison_dir = 'results/hypothesis1/comparison/'
+    os.makedirs(comparison_dir, exist_ok=True)
+    plt.savefig(os.path.join(comparison_dir, 'h1_comparison.png'), 
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Print summary
+    print("\nHypothesis 1 Results Summary:")
+    print(f"  FDA - RVR Peak Supported: {fda_results['rvr_peak_supported'].iloc[0]}")
+    print(f"  FDA - Sharpe Peak Supported: {fda_results['sharpe_peak_supported'].iloc[0]}")
+    print(f"  Earnings - RVR Peak Supported: {earnings_results['rvr_peak_supported'].iloc[0]}")
+    print(f"  Earnings - Sharpe Peak Supported: {earnings_results['sharpe_peak_supported'].iloc[0]}")
 
 
 def main():
-    app_config = Config() # Initialize configuration
-
-    # Load stock data once
-    global_stock_df = load_stock_data(STOCK_FILES)
-    if global_stock_df is None or global_stock_df.is_empty():
-        print("Failed to load global stock data. Exiting.")
-        return
-
+    """Main function to run all analyses."""
+    print("Starting Hypothesis 1 Analysis")
+    print("="*60)
+    
     # Run FDA analysis
-    fda_success = run_event_type_analysis(
-        "FDA", FDA_EVENT_FILE, FDA_EVENT_DATE_COL, FDA_TICKER_COL,
-        FDA_RESULTS_DIR, FDA_FILE_PREFIX, global_stock_df, app_config
+    fda_success = run_hypothesis1_analysis(
+        event_type='fda',
+        event_file=FDA_EVENT_FILE,
+        date_col=FDA_EVENT_DATE_COL,
+        ticker_col=FDA_TICKER_COL,
+        stock_files=STOCK_FILES
     )
-
+    
     # Run Earnings analysis
-    earnings_success = run_event_type_analysis(
-        "Earnings", EARNINGS_EVENT_FILE, EARNINGS_EVENT_DATE_COL, EARNINGS_TICKER_COL,
-        EARNINGS_RESULTS_DIR, EARNINGS_FILE_PREFIX, global_stock_df, app_config
+    earnings_success = run_hypothesis1_analysis(
+        event_type='earnings',
+        event_file=EARNINGS_EVENT_FILE,
+        date_col=EARNINGS_EVENT_DATE_COL,
+        ticker_col=EARNINGS_TICKER_COL,
+        stock_files=STOCK_FILES
     )
-
+    
+    # Compare results if both succeeded
     if fda_success and earnings_success:
-        compare_h1_results()
-    else:
-        print("One or both H1 analyses failed, skipping comparison.")
+        compare_results()
+    
+    print("\nAnalysis complete!")
+
 
 if __name__ == "__main__":
     main()
