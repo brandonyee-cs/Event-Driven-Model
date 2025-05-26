@@ -6,7 +6,7 @@ import os
 import sys
 import traceback
 import polars as pl
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional 
 from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
@@ -16,7 +16,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path: sys.path.append(current_dir)
 try: 
     from src.event_processor import EventDataLoader, EventFeatureEngineer, EventAnalysis
-    from src.models import GARCHModel, GJRGARCHModel, ThreePhaseVolatilityModel # ThreePhase not used by H2 directly
+    from src.models import GARCHModel, GJRGARCHModel, ThreePhaseVolatilityModel 
     print("Successfully imported Event processor classes and models.")
 except ImportError as e: 
     print(f"Error importing modules: {e}")
@@ -26,7 +26,6 @@ except ImportError as e:
 pl.Config.set_engine_affinity(engine="streaming")
 
 # --- Hardcoded Analysis Parameters ---
-# Shared stock files for both analyses
 STOCK_FILES = [
     "/home/d87016661/crsp_dsf-2000-2001.parquet",
     "/home/d87016661/crsp_dsf-2002-2003.parquet",
@@ -40,71 +39,57 @@ STOCK_FILES = [
     "/home/d87016661/crsp_dsf-2022-2023.parquet",
     "/home/d87016661/crsp_dsf-2024-2025.parquet"
 ]
-
-# FDA event specific parameters
 FDA_EVENT_FILE = "/home/d87016661/fda_ticker_list_2000_to_2024.csv"
 FDA_RESULTS_DIR = "results/hypothesis2/results_fda/"
 FDA_FILE_PREFIX = "fda"
 FDA_EVENT_DATE_COL = "Approval Date"
 FDA_TICKER_COL = "ticker"
-
-# Earnings event specific parameters
 EARNINGS_EVENT_FILE = "/home/d87016661/detail_history_actuals.csv"
 EARNINGS_RESULTS_DIR = "results/hypothesis2/results_earnings/"
 EARNINGS_FILE_PREFIX = "earnings"
 EARNINGS_EVENT_DATE_COL = "ANNDATS"
 EARNINGS_TICKER_COL = "ticker"
-
-# Shared analysis parameters
-WINDOW_DAYS = 60 # For EventDataLoader
-ANALYSIS_WINDOW = (-30, 30) # General analysis window for H2 (days_to_event)
-PRE_EVENT_WINDOW = (-15, -1)  # Window for pre-event volatility innovations (H2.1)
-POST_EVENT_WINDOW = (1, 15)   # Window for post-event volatility persistence & returns (H2.2)
-
-# GARCH model parameters for H2
-MODEL_TYPES = ['garch', 'gjr']  # Test both types for asymmetric response (H2.3)
-GARCH_PARAMS = { # Initial parameters for GARCH fitting
+WINDOW_DAYS = 60 
+ANALYSIS_WINDOW = (-30, 30) 
+PRE_EVENT_WINDOW = (-15, -1)  
+POST_EVENT_WINDOW = (1, 15)   
+MODEL_TYPES = ['garch', 'gjr']  
+GARCH_PARAMS = { 
     'garch': {'omega': 1e-6, 'alpha': 0.1, 'beta': 0.85},
     'gjr': {'omega': 1e-6, 'alpha': 0.08, 'beta': 0.85, 'gamma': 0.05}
 }
-
-# Define prediction windows for return forecasting (H2.1)
-PREDICTION_WINDOWS = [1, 3, 5]  # Days ahead to predict returns
+PREDICTION_WINDOWS = [1, 3, 5]
 
 class Hypothesis2Analyzer:
     def __init__(self, analyzer: EventAnalysis, results_dir: str, file_prefix: str):
         self.analyzer = analyzer
         self.results_dir = results_dir
         self.file_prefix = file_prefix
-        self.return_col = 'ret' # Column name for returns in EventAnalysis.data
+        self.return_col = 'ret' 
         self.analysis_window = ANALYSIS_WINDOW
         self.pre_event_window = PRE_EVENT_WINDOW
         self.post_event_window = POST_EVENT_WINDOW
         self.prediction_windows = PREDICTION_WINDOWS
         self.model_types = MODEL_TYPES
         self.garch_params = GARCH_PARAMS
-        
-        self.innovations_data = {} # Stores results from _fit_garch_models by event_id
-        self.prediction_results = {} # Stores H2.1 regression results
-        self.asymmetry_results = {} # Stores H2.3 t-test results
-        self.persistence_results = {} # Stores H2.2 regression results
-        
+        self.innovations_data = {} 
+        self.prediction_results = {} 
+        self.asymmetry_results = {} 
+        self.persistence_results = {} 
         os.makedirs(results_dir, exist_ok=True)
     
     def _fit_garch_models(self, event_id: str, event_data: pl.DataFrame) -> Optional[Dict[str, Any]]:
-        # event_data is for a single event_id, sorted by days_to_event
         event_days_series = event_data.get_column('days_to_event')
         event_returns_series = event_data.get_column(self.return_col)
         
-        if len(event_returns_series) < 30: # Min data for GARCH
-            # print(f"Skipping event {event_id}: Insufficient data ({len(event_returns_series)} points).")
+        if len(event_returns_series) < 30: 
             return None
         
         result = {
             'event_id': event_id,
             'ticker': event_data.get_column('ticker').head(1).item(),
-            'days_to_event': event_days_series.to_list(), # Full window days for this event
-            'returns': event_returns_series.to_numpy(), # Full window returns
+            'days_to_event': event_days_series.to_list(), 
+            'returns': event_returns_series.to_numpy(), 
             'models': {}, 'innovations': {}, 'volatility': {}, 'persistence': {}
         }
         
@@ -122,11 +107,17 @@ class Hypothesis2Analyzer:
                 result['models'][model_type] = model
                 result['volatility'][model_type] = volatility_sqrt_h_t 
                 
-                # Align innovations: innovations_raw is length T-1, for days_to_event[1:]
-                # We want innovations_aligned to be length T, with NaN for the first day.
                 innovations_aligned = np.full(len(event_days_series), np.nan)
                 if len(innovations_raw) > 0 and len(event_days_series) > 1:
-                    innovations_aligned[1:len(innovations_raw)+1] = innovations_raw[:len(innovations_aligned)-1]
+                    # innovations_raw has length T-1, corresponding to event_days_series[1:] up to event_days_series[T-1]
+                    # So innovations_aligned[1] gets innovations_raw[0], etc.
+                    # Max length of innovations_raw is len(event_days_series) - 1
+                    # Max index for innovations_aligned to fill is len(innovations_raw)
+                    # Max index for innovations_raw to use is len(innovations_raw) - 1
+                    end_idx_aligned = min(len(innovations_aligned), 1 + len(innovations_raw))
+                    end_idx_raw = min(len(innovations_raw), len(event_days_series) - 1)
+                    innovations_aligned[1:end_idx_aligned] = innovations_raw[:end_idx_raw]
+
                 result['innovations'][model_type] = innovations_aligned
 
                 days_map = {day: i for i, day in enumerate(event_days_series.to_list())}
@@ -135,34 +126,31 @@ class Hypothesis2Analyzer:
                 post_event_indices = [days_map[d] for d in range(self.post_event_window[0], self.post_event_window[1] + 1) if d in days_map and days_map[d] < len(volatility_sqrt_h_t)]
 
                 if pre_event_indices and post_event_indices and len(volatility_sqrt_h_t) > 0:
-                    pre_vol_mean = np.nanmean(volatility_sqrt_h_t[pre_event_indices]) if pre_event_indices else np.nan
-                    post_vol_mean = np.nanmean(volatility_sqrt_h_t[post_event_indices]) if post_event_indices else np.nan
+                    pre_vols_to_avg = volatility_sqrt_h_t[pre_event_indices]
+                    post_vols_to_avg = volatility_sqrt_h_t[post_event_indices]
+
+                    pre_vol_mean = np.nanmean(pre_vols_to_avg) if len(pre_vols_to_avg) > 0 else np.nan
+                    post_vol_mean = np.nanmean(post_vols_to_avg) if len(post_vols_to_avg) > 0 else np.nan
+                    
                     result['persistence'][model_type] = post_vol_mean / pre_vol_mean if pd.notna(pre_vol_mean) and pd.notna(post_vol_mean) and pre_vol_mean > 1e-9 else np.nan
                 else:
                     result['persistence'][model_type] = np.nan
                 
             except Exception as e:
-                # print(f"Error fitting {model_type} model for event {event_id}: {e}")
-                # traceback.print_exc() 
                 result['models'][model_type] = None
                 result['volatility'][model_type] = np.array([])
-                result['innovations'][model_type] = np.array([]) # Ensure it's an array
+                result['innovations'][model_type] = np.array([]) 
                 result['persistence'][model_type] = np.nan
         return result
     
     def _calculate_future_returns(self, event_data: pl.DataFrame) -> Dict[int, np.ndarray]:
         future_returns_dict = {}
         if 'prc' not in event_data.columns:
-            # print(f"Warning: 'prc' column not in event_data. Cannot calculate future returns accurately.")
             for window in self.prediction_windows:
                 future_returns_dict[window] = np.full(event_data.height, np.nan)
             return future_returns_dict
 
-        # Ensure sorted by date for correct shift calculations
-        # The input event_data should already be sorted by 'days_to_event' which implies date order within an event
         for window in self.prediction_windows:
-            # Calculate P_{t+k} / P_t - 1
-            # The shift(-window) gets P_{t+k} if data is sorted ascending by date.
             future_ret_series = (
                 event_data.get_column('prc').shift(-window) / event_data.get_column('prc')
             ) - 1
@@ -173,8 +161,6 @@ class Hypothesis2Analyzer:
         print("\n--- Analyzing Volatility Innovations (Hypothesis 2) ---")
         if self.analyzer.data is None: print("Error: No data available for analysis."); return False
         
-        # Use the data loaded by EventDataLoader, which respects WINDOW_DAYS (e.g. -60 to +60)
-        # This ensures GARCH has enough history.
         analysis_data = self.analyzer.data.sort(['event_id', 'days_to_event']) 
         
         if analysis_data.is_empty(): print(f"Error: No data found for H2 analysis."); return False
@@ -182,17 +168,16 @@ class Hypothesis2Analyzer:
         event_ids = analysis_data.get_column('event_id').unique().to_list()
         print(f"Total events available: {len(event_ids)}")
         
-        # Sample for computational efficiency as per original logic
         if len(event_ids) > 100:
-            np.random.seed(42) # For reproducibility
+            np.random.seed(42) 
             sample_event_ids = np.random.choice(event_ids, size=100, replace=False).tolist()
-            print(f"Sampling {len(sample_event_ids)} events for detailed H2 analysis.")
+            # print(f"Sampling {len(sample_event_ids)} events for detailed H2 analysis.") # Less verbose
         else:
             sample_event_ids = event_ids
         
         all_events_processed_data = []
         for i, event_id in enumerate(sample_event_ids):
-            # if (i+1) % 10 == 0 : print(f"  Processing event {i+1}/{len(sample_event_ids)}: {event_id}")
+            # if (i+1) % 20 == 0 : print(f"  H2 GARCH Processing event {i+1}/{len(sample_event_ids)}") # Less verbose
             event_specific_data = analysis_data.filter(pl.col('event_id') == event_id)
             if event_specific_data.is_empty(): continue
 
@@ -208,12 +193,12 @@ class Hypothesis2Analyzer:
         
         if not self.innovations_data: print("No GARCH innovations data to analyze H2 sub-hypotheses."); return False
 
-        self._test_prediction_power() # H2.1
-        self._test_volatility_persistence() # H2.2
-        self._test_asymmetric_response() # H2.3
+        self._test_prediction_power() 
+        self._test_volatility_persistence() 
+        self._test_asymmetric_response() 
         return True
     
-    def _test_prediction_power(self): # H2.1
+    def _test_prediction_power(self): 
         print("\n--- H2.1: Pre-event volatility innovations predict subsequent returns ---")
         if not self.innovations_data: print("Error: No innovations data for H2.1."); return
         
@@ -221,7 +206,6 @@ class Hypothesis2Analyzer:
         for model_type in self.model_types:
             regression_results_h21[model_type] = {}
             for pred_window in self.prediction_windows:
-                # print(f"  Testing {model_type} innovations for {pred_window}-day future returns...")
                 X_innov_data, y_fut_ret_data = [], []
                 
                 for event_res in self.innovations_data:
@@ -229,26 +213,30 @@ class Hypothesis2Analyzer:
                     if 'future_returns' not in event_res or pred_window not in event_res['future_returns']: continue
 
                     days_list = event_res['days_to_event']
-                    innovations_arr = event_res['innovations'][model_type] # Aligned with days_list (NaN for day 0)
-                    future_ret_arr = event_res['future_returns'][pred_window] # Aligned with days_list
+                    innovations_arr = event_res['innovations'][model_type] 
+                    future_ret_arr = event_res['future_returns'][pred_window] 
 
-                    # Find indices for PRE_EVENT_WINDOW in days_list
                     pre_event_day_indices = [i for i, day_val in enumerate(days_list) 
                                              if self.pre_event_window[0] <= day_val <= self.pre_event_window[1]]
                     
                     if not pre_event_day_indices: continue
+                    
+                    valid_pre_event_innov_indices = [idx for idx in pre_event_day_indices if idx < len(innovations_arr)]
+                    if not valid_pre_event_innov_indices: continue
+                    
+                    # Use only non-NaN innovations for the mean
+                    pre_event_innovs_for_mean = innovations_arr[valid_pre_event_innov_indices]
+                    pre_event_innovs_for_mean = pre_event_innovs_for_mean[~np.isnan(pre_event_innovs_for_mean)]
+                    if len(pre_event_innovs_for_mean) == 0: continue
+                    avg_pre_event_innovation = np.mean(pre_event_innovs_for_mean)
 
-                    # Average pre-event innovations (using aligned innovations_arr)
-                    avg_pre_event_innovation = np.nanmean(innovations_arr[pre_event_day_indices])
                     if np.isnan(avg_pre_event_innovation): continue
 
-                    # Find index for event day (day 0) to get subsequent return
                     try:
                         event_day_0_index = days_list.index(0)
                     except ValueError:
-                        continue # Event day 0 not in this event's data range
+                        continue 
                     
-                    # Subsequent return is future_ret_arr at event_day_0_index
                     if event_day_0_index < len(future_ret_arr):
                         subsequent_return = future_ret_arr[event_day_0_index]
                         if np.isnan(subsequent_return): continue
@@ -260,38 +248,33 @@ class Hypothesis2Analyzer:
                     X_np = np.array(X_innov_data)
                     y_np = np.array(y_fut_ret_data)
                     
-                    # Check for variance in X
                     if np.var(X_np) < 1e-10:
-                        # print(f"    Warning: Insufficient variance in X data for {model_type}, {pred_window}-day returns.")
-                        slope, intercept, r_value, p_value, std_err = 0, np.mean(y_np), 0, 1.0, 0
+                        slope, intercept, r_value, p_value, std_err = 0, np.mean(y_np) if len(y_np) > 0 else 0, 0, 1.0, 0
                     else:
                         slope, intercept, r_value, p_value, std_err = stats.linregress(X_np, y_np)
                     
                     regression_results_h21[model_type][pred_window] = {
                         'slope': slope, 'intercept': intercept, 'r_squared': r_value**2,
                         'p_value': p_value, 'std_err': std_err, 'n_samples': len(X_np),
-                        'X_data': X_np, 'y_data': y_np # For plotting
+                        'X_data': X_np, 'y_data': y_np 
                     }
-                    # print(f"    {model_type}, {pred_window}-day: slope={slope:.4f}, R²={r_value**2:.4f}, p={p_value:.4f}, n={len(X_np)}")
                 else:
-                    # print(f"    Insufficient data for {model_type}, {pred_window}-day regression (n={len(X_innov_data)}).")
                     regression_results_h21[model_type][pred_window] = None
         
         self.prediction_results = regression_results_h21
         self._save_and_summarize_h2_sub_results(
             results_dict=self.prediction_results,
-            csv_filename_suffix="_h2_1_prediction_summary.csv",
+            csv_filename_suffix="_h2.1_pre_event_volatility_innovations_predict_returns_summary.csv", # More descriptive
             plot_function=self._plot_prediction_relationships,
             hypothesis_name="H2.1: Pre-event volatility innovations predict returns"
         )
 
-    def _test_volatility_persistence(self): # H2.2
+    def _test_volatility_persistence(self): 
         print("\n--- H2.2: Post-event volatility persistence extends elevated expected returns ---")
         if not self.innovations_data: print("Error: No innovations data for H2.2."); return
 
         persistence_analysis_results = {}
         for model_type in self.model_types:
-            # print(f"  Testing {model_type} volatility persistence effect...")
             X_persistence_data, y_post_ret_data = [], []
 
             for event_res in self.innovations_data:
@@ -299,12 +282,11 @@ class Hypothesis2Analyzer:
                 
                 persistence_ratio = event_res['persistence'][model_type]
                 days_list = event_res['days_to_event']
-                returns_arr = event_res['returns'] # Original returns for the event
+                returns_arr = event_res['returns'] 
 
-                # Average return in POST_EVENT_WINDOW
                 post_event_day_indices = [i for i, day_val in enumerate(days_list)
                                           if self.post_event_window[0] <= day_val <= self.post_event_window[1]
-                                          and i < len(returns_arr)] # Ensure index is valid
+                                          and i < len(returns_arr)] 
                 
                 if not post_event_day_indices: continue
                 
@@ -318,47 +300,32 @@ class Hypothesis2Analyzer:
                 X_np = np.array(X_persistence_data)
                 y_np = np.array(y_post_ret_data)
                 if np.var(X_np) < 1e-10:
-                    # print(f"    Warning: Insufficient variance in X persistence data for {model_type}.")
-                    slope, intercept, r_value, p_value, std_err = 0, np.mean(y_np), 0, 1.0, 0
+                    slope, intercept, r_value, p_value, std_err = 0, np.mean(y_np) if len(y_np) > 0 else 0, 0, 1.0, 0
                 else:
                     slope, intercept, r_value, p_value, std_err = stats.linregress(X_np, y_np)
                 
                 persistence_analysis_results[model_type] = {
                     'slope': slope, 'intercept': intercept, 'r_squared': r_value**2,
                     'p_value': p_value, 'std_err': std_err, 'n_samples': len(X_np),
-                    'X_data': X_np, 'y_data': y_np # For plotting
+                    'X_data': X_np, 'y_data': y_np 
                 }
-                # print(f"    {model_type}: slope={slope:.4f}, R²={r_value**2:.4f}, p={p_value:.4f}, n={len(X_np)}")
             else:
-                # print(f"    Insufficient data for {model_type} persistence regression (n={len(X_persistence_data)}).")
                 persistence_analysis_results[model_type] = None
         
         self.persistence_results = persistence_analysis_results
         self._save_and_summarize_h2_sub_results(
-            results_dict=self.persistence_results, # This will be dict by model_type, not model_type & window
-            csv_filename_suffix="_h2_2_persistence_summary.csv",
+            results_dict=self.persistence_results, 
+            csv_filename_suffix="_h2.2_post_event_volatility_persistence_extends_elevated_returns_summary.csv", # More descriptive
             plot_function=self._plot_persistence_relationships,
             hypothesis_name="H2.2: Post-event volatility persistence extends elevated returns",
-            is_single_key_per_model=True # Special handling for summary
+            is_single_key_per_model=True 
         )
 
-    def _test_asymmetric_response(self): # H2.3
+    def _test_asymmetric_response(self): 
         print("\n--- H2.3: Asymmetric volatility response correlates with asymmetric price adjustment ---")
         if not self.innovations_data: print("Error: No innovations data for H2.3."); return
         if 'garch' not in self.model_types or 'gjr' not in self.model_types:
             print("Error: Both GARCH and GJR-GARCH models required for H2.3."); return
-
-        # H2.3: Test if GJR model's gamma (asymmetry param) is significant OR
-        # Test if GJR-GARCH provides better fit for negative vs positive shock days,
-        # or if vol innovations differ. Paper: "Asymmetric volatility response ... correlates with asymmetric price adjustment"
-        # This implies looking at the GJR model's gamma or comparing GJR vs GARCH on neg/pos return days.
-        
-        # Let's test if the GJR model's gamma parameter is significantly different from zero, averaged across events.
-        # This requires access to fitted GJR model parameters.
-        # Alternatively, compare vol levels on event day for GJR vs GARCH based on prior day's return sign.
-
-        # Approach: Compare GJR vol vs GARCH vol on event day (d=0), conditional on event day return (proxy for news sign).
-        # If event day return is negative, does GJR predict higher vol than GARCH, compared to positive return days?
         
         diff_gjr_garch_vol_neg_ret = []
         diff_gjr_garch_vol_pos_ret = []
@@ -372,12 +339,12 @@ class Hypothesis2Analyzer:
             vol_gjr = event_res['volatility']['gjr']
 
             try: event_day_0_index = days_list.index(0)
-            except ValueError: continue # Event day 0 not found
+            except ValueError: continue 
 
             if event_day_0_index >= len(returns_arr) or \
                event_day_0_index >= len(vol_garch) or \
                event_day_0_index >= len(vol_gjr):
-                continue # Data alignment issue
+                continue 
 
             event_day_return = returns_arr[event_day_0_index]
             vol_diff_on_event_day = vol_gjr[event_day_0_index] - vol_garch[event_day_0_index]
@@ -386,14 +353,13 @@ class Hypothesis2Analyzer:
 
             if event_day_return < 0:
                 diff_gjr_garch_vol_neg_ret.append(vol_diff_on_event_day)
-            elif event_day_return > 0: # Exclude zero return events
+            elif event_day_return > 0: 
                 diff_gjr_garch_vol_pos_ret.append(vol_diff_on_event_day)
         
         if len(diff_gjr_garch_vol_neg_ret) > 5 and len(diff_gjr_garch_vol_pos_ret) > 5:
             mean_diff_neg = np.mean(diff_gjr_garch_vol_neg_ret)
             mean_diff_pos = np.mean(diff_gjr_garch_vol_pos_ret)
             
-            # T-test for difference in means of vol_diff
             t_stat, p_value = stats.ttest_ind(diff_gjr_garch_vol_neg_ret, diff_gjr_garch_vol_pos_ret, 
                                               equal_var=False, nan_policy='omit')
             
@@ -404,22 +370,18 @@ class Hypothesis2Analyzer:
                 't_statistic': t_stat, 'p_value': p_value,
                 'n_neg_returns': len(diff_gjr_garch_vol_neg_ret),
                 'n_pos_returns': len(diff_gjr_garch_vol_pos_ret),
-                'data_neg': diff_gjr_garch_vol_neg_ret, # For plotting
-                'data_pos': diff_gjr_garch_vol_pos_ret  # For plotting
+                'data_neg': diff_gjr_garch_vol_neg_ret, 
+                'data_pos': diff_gjr_garch_vol_pos_ret  
             }
-            # print(f"  Asymmetry test: Mean GJR-GARCH vol diff (Neg Ret): {mean_diff_neg:.6f} (n={len(diff_gjr_garch_vol_neg_ret)})")
-            # print(f"  Mean GJR-GARCH vol diff (Pos Ret): {mean_diff_pos:.6f} (n={len(diff_gjr_garch_vol_pos_ret)})")
-            # print(f"  Diff of means: {mean_diff_neg - mean_diff_pos:.6f}, t-stat={t_stat:.4f}, p-value={p_value:.4f}")
         else:
-            # print("  Insufficient data for asymmetry t-test.")
             self.asymmetry_results = None
 
         self._save_and_summarize_h2_sub_results(
-            results_dict=self.asymmetry_results, # This is a single dict, not by model_type
-            csv_filename_suffix="_h2_3_asymmetry_summary.csv",
+            results_dict=self.asymmetry_results, 
+            csv_filename_suffix="_h2.3_asymmetric_volatility_response_correlates_with_price_adjustment_summary.csv", # More descriptive
             plot_function=self._plot_asymmetry_results,
             hypothesis_name="H2.3: Asymmetric volatility response correlates with price adjustment",
-            is_single_result_dict=True # Special handling for summary
+            is_single_result_dict=True 
         )
 
     def _save_and_summarize_h2_sub_results(self, results_dict, csv_filename_suffix, plot_function, hypothesis_name, is_single_key_per_model=False, is_single_result_dict=False):
@@ -427,14 +389,11 @@ class Hypothesis2Analyzer:
         significant_results_count = 0
         total_tests_count = 0
 
-        if is_single_result_dict: # For H2.3 asymmetry test
+        if is_single_result_dict: 
             if results_dict and pd.notna(results_dict.get('p_value')):
                 total_tests_count = 1
                 p_val = results_dict['p_value']
-                # H2.3 support: p < 0.1 AND GJR vol diff is greater for neg returns than pos returns
-                # (i.e., results_dict['diff_of_means'] > 0, assuming vol_diff = vol_gjr - vol_garch)
                 is_significant = p_val < 0.1
-                # Directional check: diff_of_means > 0 implies GJR shows more vol for neg returns than for pos returns, relative to GARCH
                 direction_correct = results_dict.get('diff_of_means', 0) > 0 
                 h_supported_specific = is_significant and direction_correct
 
@@ -447,14 +406,14 @@ class Hypothesis2Analyzer:
                     'significant': is_significant, 'direction_correct': direction_correct, 'hypothesis_supported': h_supported_specific
                 })
             else:
-                summary_rows.append({'test_case': 'Asymmetric Response (GJR vs GARCH)', 'p_value': np.nan, 'hypothesis_supported': False})
+                summary_rows.append({'test_case': 'Asymmetric Response (GJR vs GARCH)', 'p_value': np.nan, 'hypothesis_supported': False, 'significant': False, 'direction_correct': False, 'n_samples_neg':0, 'n_samples_pos':0})
         
-        elif is_single_key_per_model: # For H2.2 persistence test
-            for model_type, res_data in results_dict.items():
+        elif is_single_key_per_model: 
+            for model_type in self.model_types: # Iterate through expected model types
+                res_data = results_dict.get(model_type) # Get data for this model_type
                 if res_data and pd.notna(res_data.get('p_value')):
                     total_tests_count += 1
                     p_val = res_data['p_value']
-                    # H2.2 support: p < 0.1 AND slope > 0 (higher persistence -> higher post-event returns)
                     is_significant = p_val < 0.1
                     direction_correct = res_data.get('slope', 0) > 0
                     h_supported_specific = is_significant and direction_correct
@@ -467,19 +426,18 @@ class Hypothesis2Analyzer:
                         'significant': is_significant, 'direction_correct': direction_correct, 'hypothesis_supported': h_supported_specific
                     })
                 else:
-                    summary_rows.append({'model_type': model_type, 'p_value': np.nan, 'hypothesis_supported': False})
-        else: # For H2.1 prediction test
-            for model_type, window_results in results_dict.items():
-                for window, res_data in window_results.items():
+                    summary_rows.append({'model_type': model_type, 'p_value': np.nan, 'hypothesis_supported': False, 'significant': False, 'direction_correct': False, 'n_samples':0})
+        else: 
+            for model_type in self.model_types:
+                window_results = results_dict.get(model_type, {})
+                for window in self.prediction_windows:
+                    res_data = window_results.get(window)
                     if res_data and pd.notna(res_data.get('p_value')):
                         total_tests_count +=1
                         p_val = res_data['p_value']
-                        # H2.1 support: p < 0.1 (direction of slope can vary)
                         is_significant = p_val < 0.1 
-                        # For H2.1, the paper doesn't strictly define direction, just "predict". So significance is key.
-                        # However, typically expect positive relationship: higher uncertainty -> higher expected future return.
-                        direction_correct = res_data.get('slope', 0) > 0 # Let's assume positive prediction for "support"
-                        h_supported_specific = is_significant # and direction_correct (optional based on interpretation)
+                        direction_correct = res_data.get('slope', 0) > 0 
+                        h_supported_specific = is_significant and direction_correct 
 
                         if h_supported_specific: significant_results_count +=1
                         summary_rows.append({
@@ -489,37 +447,49 @@ class Hypothesis2Analyzer:
                             'significant': is_significant, 'direction_correct': direction_correct, 'hypothesis_supported': h_supported_specific
                         })
                     else:
-                        summary_rows.append({'model_type': model_type, 'prediction_window': window, 'p_value': np.nan, 'hypothesis_supported': False})
+                        summary_rows.append({'model_type': model_type, 'prediction_window': window, 'p_value': np.nan, 'hypothesis_supported': False, 'significant': False, 'direction_correct': False, 'n_samples':0 })
 
         if summary_rows:
             summary_df = pl.DataFrame(summary_rows)
             summary_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}{csv_filename_suffix}"))
             
-            # Check overall hypothesis support for this sub-part
             h_overall_supported = significant_results_count > 0
-            print(f"  {hypothesis_name}: {'SUPPORTED' if h_overall_supported else 'NOT SUPPORTED'} ({significant_results_count}/{total_tests_count} significant tests meeting criteria).")
+            print(f"  {hypothesis_name}: {'SUPPORTED' if h_overall_supported else 'NOT SUPPORTED'} ({significant_results_count}/{total_tests_count if total_tests_count > 0 else len(summary_rows)} tests meeting criteria).")
             
-            # Save specific hypothesis test result
+            # Create a more descriptive and consistent filename part from the hypothesis name
+            fname_part = hypothesis_name.lower().replace(": ", "_").replace(" ", "_").replace("-", "_").replace("?","")
             h_test_df = pl.DataFrame({
                 'hypothesis': [hypothesis_name], 'result': [h_overall_supported],
-                'significant_tests': [significant_results_count], 'total_tests': [total_tests_count]
+                'significant_tests': [significant_results_count], 'total_tests': [total_tests_count if total_tests_count > 0 else len(summary_rows)]
             })
-            h_test_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_{hypothesis_name.split(':')[0].lower().replace(' ', '_')}_test.csv"))
+            h_test_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_{fname_part}_test.csv"))
 
-            if plot_function: plot_function() # Call plotting function
+            if plot_function: plot_function() 
         else:
             print(f"No valid results to save or summarize for {hypothesis_name}.")
+            # Still create the _test.csv file to indicate it was run but had no results for summary
+            fname_part = hypothesis_name.lower().replace(": ", "_").replace(" ", "_").replace("-", "_").replace("?","")
+            h_test_df = pl.DataFrame({
+                'hypothesis': [hypothesis_name], 'result': [False],
+                'significant_tests': [0], 'total_tests': [0]
+            })
+            h_test_df.write_csv(os.path.join(self.results_dir, f"{self.file_prefix}_{fname_part}_test.csv"))
 
 
-    def _plot_prediction_relationships(self): # For H2.1
-        # print("  Generating H2.1 plots for significant relationships...")
+    def _plot_prediction_relationships(self): 
         try:
             for model_type, window_results in self.prediction_results.items():
                 for window, result in window_results.items():
-                    if result and result.get('significant') and result.get('direction_correct', True): # Plot if significant (and optionally direction_correct)
+                    if result and result.get('hypothesis_supported'): 
                         fig, ax = plt.subplots(figsize=(10, 6))
                         ax.scatter(result['X_data'], result['y_data'], alpha=0.5, label=f"n={result['n_samples']}")
-                        x_line = np.linspace(np.min(result['X_data']), np.max(result['X_data']), 100)
+                        x_line_min = np.min(result['X_data']) if len(result['X_data']) > 0 else 0
+                        x_line_max = np.max(result['X_data']) if len(result['X_data']) > 0 else 0
+                        if x_line_min == x_line_max: 
+                            x_line = np.array([x_line_min - 0.1, x_line_max + 0.1]) # Add small range if single point
+                        else:
+                            x_line = np.linspace(x_line_min, x_line_max, 100)
+
                         y_line = result['slope'] * x_line + result['intercept']
                         ax.plot(x_line, y_line, color='red', label=f"y = {result['slope']:.3f}x + {result['intercept']:.3f}\nR²={result['r_squared']:.3f}, p={result['p_value']:.3f}")
                         ax.set_title(f'{model_type.upper()} Pre-event Innovations vs. {window}-Day Future Returns')
@@ -529,14 +499,19 @@ class Hypothesis2Analyzer:
                         plt.close(fig)
         except Exception as e: print(f"Error in _plot_prediction_relationships: {e}"); traceback.print_exc()
 
-    def _plot_persistence_relationships(self): # For H2.2
-        # print("  Generating H2.2 plots for significant relationships...")
+    def _plot_persistence_relationships(self): 
         try:
             for model_type, result in self.persistence_results.items():
-                if result and result.get('significant') and result.get('direction_correct', True):
+                if result and result.get('hypothesis_supported'):
                     fig, ax = plt.subplots(figsize=(10, 6))
                     ax.scatter(result['X_data'], result['y_data'], alpha=0.5, label=f"n={result['n_samples']}")
-                    x_line = np.linspace(np.min(result['X_data']), np.max(result['X_data']), 100)
+                    x_line_min = np.min(result['X_data']) if len(result['X_data']) > 0 else 0
+                    x_line_max = np.max(result['X_data']) if len(result['X_data']) > 0 else 0
+                    if x_line_min == x_line_max:
+                        x_line = np.array([x_line_min -0.1, x_line_max + 0.1])
+                    else:
+                        x_line = np.linspace(x_line_min, x_line_max, 100)
+                        
                     y_line = result['slope'] * x_line + result['intercept']
                     ax.plot(x_line, y_line, color='red', label=f"y = {result['slope']:.3f}x + {result['intercept']:.3f}\nR²={result['r_squared']:.3f}, p={result['p_value']:.3f}")
                     ax.set_title(f'{model_type.upper()} Volatility Persistence vs. Post-Event Avg Return')
@@ -546,11 +521,10 @@ class Hypothesis2Analyzer:
                     plt.close(fig)
         except Exception as e: print(f"Error in _plot_persistence_relationships: {e}"); traceback.print_exc()
 
-    def _plot_asymmetry_results(self): # For H2.3
-        # print("  Generating H2.3 plots...")
+    def _plot_asymmetry_results(self): 
         try:
             result = self.asymmetry_results
-            if result and result.get('significant') and result.get('direction_correct', True) :
+            if result and result.get('hypothesis_supported') :
                 fig, ax = plt.subplots(figsize=(10, 6))
                 labels = ['Events with Negative Returns', 'Events with Positive Returns']
                 mean_diffs = [result['mean_vol_diff_neg_returns'], result['mean_vol_diff_pos_returns']]
@@ -567,7 +541,6 @@ class Hypothesis2Analyzer:
                 plt.savefig(os.path.join(self.results_dir, f"{self.file_prefix}_h2_3_asymmetry_bar.png"), dpi=150, bbox_inches='tight')
                 plt.close(fig)
 
-                # Boxplot
                 fig_box, ax_box = plt.subplots(figsize=(10,6))
                 ax_box.boxplot([result['data_neg'], result['data_pos']], labels=labels, notch=True, patch_artist=True,
                                boxprops=dict(facecolor='lightgray', color='black'),
@@ -584,32 +557,60 @@ class Hypothesis2Analyzer:
     def generate_summary_report(self):
         print("\n--- Generating Hypothesis 2 Overall Summary Report ---")
         h2_sub_files_info = {
-            "H2.1": "_h2.1_pre-event_volatility_innovations_predict_returns_test.csv",
-            "H2.2": "_h2.2_post-event_volatility_persistence_extends_elevated_returns_test.csv",
-            "H2.3": "_h2.3_asymmetric_volatility_response_correlates_with_price_adjustment_test.csv"
+            "H2.1: Pre-event volatility innovations predict returns": "_h2.1_pre_event_volatility_innovations_predict_returns_test.csv",
+            "H2.2: Post-event volatility persistence extends elevated returns": "_h2.2_post_event_volatility_persistence_extends_elevated_returns_test.csv",
+            "H2.3: Asymmetric volatility response correlates with price adjustment": "_h2.3_asymmetric_volatility_response_correlates_with_price_adjustment_test.csv"
         }
         sub_hyp_results = []
         all_files_exist = True
-        for sub_h_name, file_suffix in h2_sub_files_info.items():
-            file_path = os.path.join(self.results_dir, f"{self.file_prefix}{file_suffix}")
+        for full_hyp_name, file_suffix_part in h2_sub_files_info.items():
+            # Construct the filename based on the new convention in _save_and_summarize_h2_sub_results
+            fname_part = full_hyp_name.lower().replace(": ", "_").replace(" ", "_").replace("-", "_").replace("?","")
+            file_path = os.path.join(self.results_dir, f"{self.file_prefix}_{fname_part}_test.csv")
+            
+            sub_h_short_name = full_hyp_name.split(':')[0] # e.g. "H2.1"
+
             if os.path.exists(file_path):
-                df = pl.read_csv(file_path)
-                sub_hyp_results.append({
-                    'sub_hypothesis_short': sub_h_name,
-                    'sub_hypothesis_full': df['hypothesis'][0],
-                    'result': df['result'][0],
-                    'details': f"{df['significant_tests'][0]}/{df['total_tests'][0]} significant tests" if 'significant_tests' in df.columns else f"p={df.get('p_value', [np.nan])[0]:.3f}"
-                })
+                try:
+                    df = pl.read_csv(file_path)
+                    if df.is_empty():
+                        print(f"  Warning: Result file for {sub_h_short_name} is empty: {file_path}")
+                        # Add a default "not supported" entry if file is empty
+                        sub_hyp_results.append({
+                            'sub_hypothesis_short': sub_h_short_name,
+                            'sub_hypothesis_full': full_hyp_name,
+                            'result': False,
+                            'details': "0/0 significant tests"
+                        })
+                        continue # Don't mark all_files_exist as False, just note the empty result
+                    
+                    details_str = f"{df.get_column('significant_tests')[0]}/{df.get_column('total_tests')[0]} significant tests" \
+                                  if 'significant_tests' in df.columns and 'total_tests' in df.columns and df.get_column('total_tests')[0] is not None \
+                                  else (f"p={df.get_column('p_value')[0]:.3f}" if 'p_value' in df.columns and df.get_column('p_value')[0] is not None else "Details N/A")
+
+                    sub_hyp_results.append({
+                        'sub_hypothesis_short': sub_h_short_name,
+                        'sub_hypothesis_full': df.get_column('hypothesis')[0],
+                        'result': df.get_column('result')[0],
+                        'details': details_str
+                    })
+                except Exception as e:
+                    print(f"  Error reading or processing file for {sub_h_short_name}: {file_path}. Error: {e}")
+                    all_files_exist = False; break
             else:
-                print(f"  Warning: Missing result file for {sub_h_name}: {file_path}")
+                print(f"  Warning: Missing result file for {sub_h_short_name}: {file_path}")
                 all_files_exist = False; break
         
-        if not all_files_exist or not sub_hyp_results:
-            print("Cannot generate H2 summary report due to missing sub-hypothesis results.")
+        if not all_files_exist: # If any critical file was actually missing (not just empty)
+            print("Cannot generate H2 summary report due to missing sub-hypothesis results files.")
+            return None
+        if not sub_hyp_results: # If loop was skipped entirely or all files were empty and led to no appends
+            print("No sub-hypothesis results were processed to generate a summary.")
             return None
 
+
         summary_df = pl.DataFrame(sub_hyp_results)
-        overall_h2_supported = all(item['result'] for item in sub_hyp_results) # True if all sub-hypotheses are true
+        overall_h2_supported = all(item['result'] for item in sub_hyp_results) 
         num_supported_subs = sum(item['result'] for item in sub_hyp_results)
         
         overall_summary_df = pl.DataFrame({
@@ -628,10 +629,9 @@ class Hypothesis2Analyzer:
         return overall_summary_df
 
     def _plot_hypothesis_summary(self, summary_df: pl.DataFrame, overall_result: bool, num_supported_subs: int):
-        # print("  Generating H2 overall summary plot...")
         try:
             summary_pd = summary_df.to_pandas()
-            fig, ax = plt.subplots(figsize=(12, max(6, len(summary_pd) * 1.5))) # Adjust height
+            fig, ax = plt.subplots(figsize=(12, max(6, len(summary_pd) * 1.5))) 
             
             y_pos = np.arange(len(summary_pd))
             colors = ['mediumseagreen' if r else 'lightcoral' for r in summary_pd['result']]
@@ -655,7 +655,7 @@ class Hypothesis2Analyzer:
                          f"Overall: {overall_text_status} ({num_supported_subs}/{len(summary_pd)} sub-hypotheses supported)")
             ax.set_title(fig_title, fontsize=12, fontweight='bold')
             
-            plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust for title
+            plt.tight_layout(rect=[0, 0, 1, 0.96]) 
             plt.savefig(os.path.join(self.results_dir, f"{self.file_prefix}_h2_overall_summary_plot.png"), dpi=150, bbox_inches='tight')
             plt.close(fig)
         except Exception as e: print(f"Error in _plot_hypothesis_summary: {e}"); traceback.print_exc()
@@ -667,15 +667,13 @@ def run_fda_analysis():
     if any(not os.path.exists(f) for f in STOCK_FILES):
         print(f"Error: One or more stock files not found."); return False
     os.makedirs(FDA_RESULTS_DIR, exist_ok=True)
-    print(f"FDA results will be saved to: {os.path.abspath(FDA_RESULTS_DIR)}")
 
     try:
         data_loader = EventDataLoader(
             event_path=FDA_EVENT_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS,
             event_date_col=FDA_EVENT_DATE_COL, ticker_col=FDA_TICKER_COL
         )
-        analyzer = EventAnalysis(data_loader, EventFeatureEngineer()) # FE not critical for H2
-        print("Loading FDA data for H2...")
+        analyzer = EventAnalysis(data_loader, EventFeatureEngineer()) 
         analyzer.data = analyzer.load_and_prepare_data(run_feature_engineering=False)
         if analyzer.data is None or analyzer.data.is_empty(): 
             print("Error: FDA data loading failed for H2."); return False
@@ -698,15 +696,13 @@ def run_earnings_analysis():
     if any(not os.path.exists(f) for f in STOCK_FILES):
         print(f"Error: One or more stock files not found."); return False
     os.makedirs(EARNINGS_RESULTS_DIR, exist_ok=True)
-    print(f"Earnings results will be saved to: {os.path.abspath(EARNINGS_RESULTS_DIR)}")
 
     try:
         data_loader = EventDataLoader(
             event_path=EARNINGS_EVENT_FILE, stock_paths=STOCK_FILES, window_days=WINDOW_DAYS,
             event_date_col=EARNINGS_EVENT_DATE_COL, ticker_col=EARNINGS_TICKER_COL
         )
-        analyzer = EventAnalysis(data_loader, EventFeatureEngineer()) # FE not critical for H2
-        print("Loading Earnings data for H2...")
+        analyzer = EventAnalysis(data_loader, EventFeatureEngineer()) 
         analyzer.data = analyzer.load_and_prepare_data(run_feature_engineering=False)
         if analyzer.data is None or analyzer.data.is_empty(): 
             print("Error: Earnings data loading failed for H2."); return False
@@ -750,14 +746,12 @@ def compare_results():
         overall_comp_df.write_csv(os.path.join(comparison_dir, "h2_overall_comparison.csv"))
         print("\nH2 Overall Comparison:\n", overall_comp_df)
 
-        # Merge sub-hypothesis results for easier comparison
         fda_subs = fda_subs.rename({'result': 'fda_result', 'details': 'fda_details'})
         earn_subs = earn_subs.rename({'result': 'earn_result', 'details': 'earn_details'})
         subs_comp_df = fda_subs.join(earn_subs, on=['sub_hypothesis_short', 'sub_hypothesis_full'], how='outer')
         subs_comp_df.write_csv(os.path.join(comparison_dir, "h2_sub_hypotheses_comparison.csv"))
         print("\nH2 Sub-Hypotheses Comparison:\n", subs_comp_df.select(['sub_hypothesis_short', 'fda_result', 'earn_result', 'fda_details', 'earn_details']))
 
-        # Plotting
         plot_df_pd = subs_comp_df.to_pandas()
         fig, ax = plt.subplots(figsize=(12, 7))
         num_subs = len(plot_df_pd)
