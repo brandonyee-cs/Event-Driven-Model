@@ -1,5 +1,5 @@
 import numpy as np
-import polars as pl 
+import polars as pl
 from sklearn.linear_model import Ridge
 import xgboost as xgb
 from scipy.optimize import minimize
@@ -18,8 +18,8 @@ class TimeSeriesRidge(Ridge):
     def __init__(self, alpha=1.0, lambda2=0.1, feature_order=None, **kwargs):
         super().__init__(alpha=alpha, **kwargs)
         self.lambda2 = lambda2
-        self.feature_order = feature_order 
-        self.feature_names_in_ = None 
+        self.feature_order = feature_order
+        self.feature_names_in_ = None
 
     def _get_differencing_matrix(self, n_features):
         if n_features <= 1:
@@ -40,7 +40,7 @@ class TimeSeriesRidge(Ridge):
         else:
             raise TypeError("y must be a Polars Series or NumPy array.")
 
-        original_X_columns = X.columns 
+        original_X_columns = X.columns
 
         if self.feature_order is not None:
              missing_features = set(self.feature_order) - set(X.columns)
@@ -49,12 +49,12 @@ class TimeSeriesRidge(Ridge):
              extra_features = set(X.columns) - set(self.feature_order)
              if extra_features:
                  ordered_cols = self.feature_order + list(extra_features)
-                 X_ordered = X.select(ordered_cols) 
+                 X_ordered = X.select(ordered_cols)
              else:
                  X_ordered = X.select(self.feature_order)
-             self.feature_names_in_ = X_ordered.columns 
+             self.feature_names_in_ = X_ordered.columns
         else:
-             X_ordered = X 
+             X_ordered = X
              self.feature_names_in_ = X_ordered.columns
 
         try:
@@ -132,9 +132,9 @@ class XGBoostDecileModel:
         self.weight = weight
         self.momentum_feature = momentum_feature
         self.n_deciles = n_deciles
-        self.alpha = alpha 
-        self.lambda_smooth = lambda_smooth 
-        self.ts_ridge_feature_order = ts_ridge_feature_order 
+        self.alpha = alpha
+        self.lambda_smooth = lambda_smooth
+        self.ts_ridge_feature_order = ts_ridge_feature_order
 
         if xgb_params is None:
             self.xgb_params = {
@@ -147,19 +147,19 @@ class XGBoostDecileModel:
 
         self.xgb_model = xgb.XGBRegressor(**self.xgb_params)
         self.decile_models = [None] * n_deciles
-        self.decile_boundaries = None 
-        self.feature_names_in_ = None 
+        self.decile_boundaries = None
+        self.feature_names_in_ = None
 
     def _calculate_decile_boundaries(self, X: pl.DataFrame):
         if self.momentum_feature not in X.columns:
              raise ValueError(f"Momentum feature '{self.momentum_feature}' not found in input data.")
         quantiles_pl = X.select(
             pl.col(self.momentum_feature).drop_nulls().quantile(q).alias(f"q_{q}")
-            for q in np.linspace(0, 1, self.n_deciles + 1)[1:-1] 
+            for q in np.linspace(0, 1, self.n_deciles + 1)[1:-1]
         )
-        if quantiles_pl.is_empty() or quantiles_pl.height == 0: 
+        if quantiles_pl.is_empty() or quantiles_pl.height == 0:
              raise ValueError("Could not calculate decile boundaries, possibly due to all-null momentum feature.")
-        quantiles_values = quantiles_pl.row(0) 
+        quantiles_values = quantiles_pl.row(0)
         self.decile_boundaries = np.array(quantiles_values, dtype=np.float64)
 
     def _assign_deciles(self, X: pl.DataFrame) -> pl.DataFrame:
@@ -167,11 +167,11 @@ class XGBoostDecileModel:
              raise RuntimeError("Decile boundaries have not been calculated. Call fit first.")
         if self.momentum_feature not in X.columns:
              raise ValueError(f"Momentum feature '{self.momentum_feature}' not found in input data.")
-        if len(self.decile_boundaries) == 0: 
+        if len(self.decile_boundaries) == 0:
             return X.with_columns(pl.lit(0, dtype=pl.Int32).alias("decile_assignment"))
 
         mom_col = pl.col(self.momentum_feature)
-        boundaries = self.decile_boundaries 
+        boundaries = self.decile_boundaries
         decile_expr = pl.when(mom_col.is_nan()).then(pl.lit(0, dtype=pl.Int32))
         decile_expr = decile_expr.when(mom_col < boundaries[0]).then(pl.lit(0, dtype=pl.Int32))
         for i in range(len(boundaries) - 1):
@@ -179,16 +179,16 @@ class XGBoostDecileModel:
                 (mom_col >= boundaries[i]) & (mom_col < boundaries[i+1])
             ).then(pl.lit(i + 1, dtype=pl.Int32))
         decile_expr = decile_expr.when(mom_col >= boundaries[-1]).then(pl.lit(self.n_deciles - 1, dtype=pl.Int32))
-        decile_expr = decile_expr.otherwise(pl.lit(0, dtype=pl.Int32)) 
+        decile_expr = decile_expr.otherwise(pl.lit(0, dtype=pl.Int32))
         return X.with_columns(decile_expr.alias("decile_assignment"))
 
     def fit(self, X: pl.DataFrame, y: pl.Series):
         if not isinstance(X, pl.DataFrame): raise TypeError("X must be a Polars DataFrame.")
         if not isinstance(y, pl.Series): raise TypeError("y must be a Polars Series.")
         if X.height != y.height: raise ValueError("X and y must have the same height.")
-        self.feature_names_in_ = X.columns 
+        self.feature_names_in_ = X.columns
         try:
-            X_np = X.select( 
+            X_np = X.select(
                 [pl.col(c).cast(pl.Float64, strict=False) for c in self.feature_names_in_]
             ).to_numpy()
             y_np = y.cast(pl.Float64).to_numpy()
@@ -201,19 +201,19 @@ class XGBoostDecileModel:
              raise ValueError("NaN or Inf values detected in target vector y before fitting.")
         try:
             fit_params = {}
-            if 'early_stopping_rounds' in self.xgb_params and 'eval_set' in self.xgb_params : 
+            if 'early_stopping_rounds' in self.xgb_params and 'eval_set' in self.xgb_params :
                  fit_params['eval_set'] = self.xgb_params['eval_set']
                  fit_params['early_stopping_rounds'] = self.xgb_params['early_stopping_rounds']
-                 fit_params['verbose'] = self.xgb_params.get('verbose', False) 
+                 fit_params['verbose'] = self.xgb_params.get('verbose', False)
             self.xgb_model.fit(X_np, y_np, **fit_params)
         except TypeError as e:
              if "unexpected keyword argument 'early_stopping_rounds'" in str(e) or \
                 "got multiple values for keyword argument 'verbose'" in str(e) or \
-                "missing 1 required positional argument: 'eval_set'" in str(e): 
+                "missing 1 required positional argument: 'eval_set'" in str(e):
                  warnings.warn(f"XGBoost parameter issue. Retrying without it. Original error: {e}")
                  xgb_params_fallback = self.xgb_params.copy()
                  xgb_params_fallback.pop('early_stopping_rounds', None)
-                 xgb_params_fallback.pop('eval_set', None) 
+                 xgb_params_fallback.pop('eval_set', None)
                  self.xgb_model = xgb.XGBRegressor(**xgb_params_fallback)
                  self.xgb_model.fit(X_np, y_np)
              else: raise e
@@ -225,20 +225,20 @@ class XGBoostDecileModel:
              for d in range(self.n_deciles):
                  decile_mask = pl.col("decile_assignment") == d
                  X_decile_pl = X_with_deciles.filter(decile_mask)
-                 y_decile_pl = y.filter(X_with_deciles.select(decile_mask).to_series()) 
+                 y_decile_pl = y.filter(X_with_deciles.select(decile_mask).to_series())
                  min_samples_required = max(5, len(self.feature_names_in_) + 1 if self.feature_names_in_ else 5)
                  if X_decile_pl.height >= min_samples_required:
                      try:
                          decile_model = TimeSeriesRidge(
                              alpha=self.alpha,
                              lambda2=self.lambda_smooth,
-                             feature_order=self.ts_ridge_feature_order 
+                             feature_order=self.ts_ridge_feature_order
                          )
                          decile_model.fit(X_decile_pl.drop("decile_assignment"), y_decile_pl)
                          self.decile_models[d] = decile_model
                      except Exception as e:
                          warnings.warn(f"Warning: Failed to fit model for Decile {d+1}. Reason: {e}")
-                         self.decile_models[d] = None 
+                         self.decile_models[d] = None
                  else:
                      self.decile_models[d] = None
         return self
@@ -253,30 +253,30 @@ class XGBoostDecileModel:
              raise ValueError(f"Missing columns in prediction data: {missing_cols}")
         X_pred = X.select(self.feature_names_in_)
         try:
-             X_np = X_pred.select( 
+             X_np = X_pred.select(
                  [pl.col(c).cast(pl.Float64, strict=False) for c in self.feature_names_in_]
              ).to_numpy()
         except Exception as e:
              raise ValueError(f"Failed to convert prediction Polars DataFrame to NumPy: {e}")
-        xgb_preds = self.xgb_model.predict(X_np) 
+        xgb_preds = self.xgb_model.predict(X_np)
         if self.weight < 1.0:
              if self.decile_boundaries is None:
                  raise RuntimeError("Decile boundaries not set. Model needs fitting.")
              decile_preds_np = np.zeros_like(xgb_preds)
-             X_with_deciles = self._assign_deciles(X_pred) 
+             X_with_deciles = self._assign_deciles(X_pred)
              for d in range(self.n_deciles):
                  bool_mask_np = X_with_deciles.get_column("decile_assignment").eq(d).to_numpy()
-                 if np.any(bool_mask_np): 
+                 if np.any(bool_mask_np):
                      X_decile_test_pl = X_pred.filter(bool_mask_np)
                      if self.decile_models[d] is not None:
                          try:
-                             preds_d = self.decile_models[d].predict(X_decile_test_pl) 
+                             preds_d = self.decile_models[d].predict(X_decile_test_pl)
                              decile_preds_np[bool_mask_np] = preds_d
                          except Exception as e:
                              warnings.warn(f"Warning: Error predicting with model for Decile {d+1}. Error: {e}")
-                             decile_preds_np[bool_mask_np] = xgb_preds[bool_mask_np] 
+                             decile_preds_np[bool_mask_np] = xgb_preds[bool_mask_np]
                      else:
-                         decile_preds_np[bool_mask_np] = xgb_preds[bool_mask_np] 
+                         decile_preds_np[bool_mask_np] = xgb_preds[bool_mask_np]
              ensemble_preds = self.weight * xgb_preds + (1 - self.weight) * decile_preds_np
         else:
              ensemble_preds = xgb_preds
@@ -284,7 +284,7 @@ class XGBoostDecileModel:
 
 class GARCHModel:
     def __init__(self, omega: float = 1e-6, alpha: float = 0.1, beta: float = 0.85):
-        self.omega_init = omega # Store initial for potential fallback
+        self.omega_init = omega
         self.alpha_init = alpha
         self.beta_init = beta
         self.omega = omega
@@ -293,57 +293,67 @@ class GARCHModel:
         self.is_fitted = False
         self.variance_history = None
         self.residuals_history = None
-        self.sigma2_t = None # Last estimated variance
+        self.sigma2_t = None
         self.mean = 0.0
-        self.fit_success = False # Track fit success
+        self.fit_success = False # ADDED: To track fit success
+        self.fit_message = "Not Attempted" # ADDED: To store fit message
 
     def _check_parameters(self, omega, alpha, beta, context="final"):
         valid = True
-        if omega <= 1e-8: # Slightly more tolerant than 0 for optimizer
-            if context=="final": warnings.warn(f"GARCH omega is non-positive ({omega:.2e}). Resetting to small positive.")
+        # Check for NaN or non-numeric before positivity/sum checks
+        if not (isinstance(omega, (int,float)) and pd.notna(omega) and omega > 1e-9): # Allow very small omega for optimizer
+            if context=="final": warnings.warn(f"GARCH omega invalid or too small ({omega}). Resetting to 1e-7.")
             omega = 1e-7
             valid = False
-        if alpha < 0:
-            if context=="final": warnings.warn(f"GARCH alpha is negative ({alpha:.2e}). Resetting to 0.")
-            alpha = 0.0
+        if not (isinstance(alpha, (int,float)) and pd.notna(alpha) and alpha >= 0): # Alpha can be 0
+            if context=="final": warnings.warn(f"GARCH alpha invalid or negative ({alpha}). Resetting to 0.01.")
+            alpha = 0.01
             valid = False
-        if beta < 0:
-            if context=="final": warnings.warn(f"GARCH beta is negative ({beta:.2e}). Resetting to 0.")
-            beta = 0.0
+        if not (isinstance(beta, (int,float)) and pd.notna(beta) and beta >= 0): # Beta can be 0
+            if context=="final": warnings.warn(f"GARCH beta invalid or negative ({beta}). Resetting to 0.01.")
+            beta = 0.01
             valid = False
-        if alpha + beta >= 0.99999: # Check for near non-stationarity
-            if context=="final": warnings.warn(f"GARCH alpha+beta ({alpha+beta:.3f}) >= 1. May be non-stationary. Clamping sum.")
-            # Heuristic to clamp: reduce beta first if alpha is substantial, else scale both
-            if alpha > 0.01: # if alpha has some value
-                beta = 0.9999 - alpha - 0.0001 # ensure alpha + beta < 1
-                if beta < 0: beta = 0 # if alpha was too large
-            else: # if alpha is tiny, scale both down proportionally
-                total = alpha + beta
-                alpha = alpha / (total + 1e-4) * 0.9998
-                beta = beta / (total + 1e-4) * 0.9998
+        
+        # Stationarity: alpha + beta < 1
+        if alpha + beta >= 0.99999: # Use a slightly less than 1 for numerical stability
+            if context=="final": warnings.warn(f"GARCH alpha+beta ({alpha+beta:.4f}) violates stationarity. Adjusting.")
+            # Heuristic: scale down to meet stationarity, preserving ratio if possible
+            current_sum = alpha + beta
+            target_sum = 0.9998 # Target slightly less than 1
+            if current_sum > 1e-7: # Avoid division by zero if both were tiny
+                alpha = (alpha / current_sum) * target_sum
+                beta = (beta / current_sum) * target_sum
+            else: # If both were effectively zero or negative and got reset
+                alpha = 0.05 # Sensible defaults that are stationary
+                beta = 0.9
             valid = False
         return omega, alpha, beta, valid
 
+
     def _neg_log_likelihood(self, params, returns_centered):
         omega, alpha, beta = params
-        omega, alpha, beta, _ = self._check_parameters(omega, alpha, beta, context="likelihood")
-        if alpha + beta >= 0.99999: # Strict check within likelihood
+        # Stricter check for optimizer exploration, ensures parameters are valid for GARCH
+        if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and alpha + beta < 0.99999):
             return np.inf
 
         T = len(returns_centered)
         sigma2 = np.zeros(T)
         
-        # Initial variance: try unconditional, then empirical, then small constant
-        if (1 - alpha - beta) > 1e-7:
+        # Initial variance: robust calculation
+        var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7 # Empirical variance, fallback if T=1
+        
+        if (1 - alpha - beta) > 1e-7: # Check for valid denominator for unconditional variance
             sigma2_0_uncond = omega / (1 - alpha - beta)
-            sigma2[0] = max(1e-8, sigma2_0_uncond)
-        else:
-            sigma2[0] = max(1e-8, np.var(returns_centered))
-        if sigma2[0] == 0: sigma2[0] = 1e-8 # Final fallback for zero variance series
+            # Use the max of unconditional, empirical, and a floor
+            sigma2[0] = max(1e-8, sigma2_0_uncond, var_ret_centered)
+        else: # If close to non-stationarity or non-stationary, use empirical
+            sigma2[0] = max(1e-8, var_ret_centered)
+        
+        if sigma2[0] <= 1e-9 : sigma2[0] = 1e-8 # Final safety net if var_ret_centered is also zero/negative
 
         for t in range(1, T):
             sigma2[t] = omega + alpha * returns_centered[t-1]**2 + beta * sigma2[t-1]
-            sigma2[t] = max(1e-8, sigma2[t]) # Floor variance
+            sigma2[t] = max(1e-8, sigma2[t]) # Floor variance to prevent log(0) or division by zero
 
         if np.any(sigma2 <= 1e-9): return np.inf # Ensure positive variance for log
         log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns_centered**2 / sigma2)
@@ -351,44 +361,49 @@ class GARCHModel:
         return -log_likelihood if np.isfinite(log_likelihood) else np.inf
     
     def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
-            method: str = 'L-BFGS-B', # Changed default
-            max_iter: int = 200) -> 'GARCHModel': # Reduced max_iter for speed
+            method: str = 'L-BFGS-B', 
+            max_iter: int = 200) -> 'GARCHModel': 
+        self.fit_success = False # Reset for current fit attempt
+        self.fit_message = "Fit not successful"
+
         if isinstance(returns, pl.Series): returns_np = returns.to_numpy()
         elif isinstance(returns, pl.DataFrame): returns_np = returns.to_numpy().flatten()
         else: returns_np = np.asarray(returns)
 
         returns_np = returns_np[~np.isnan(returns_np)]
-        if len(returns_np) < 20: # Increased min length
-            warnings.warn(f"GARCH: Not enough data points ({len(returns_np)}). Using initial parameters.")
-            self._use_initial_params_for_history(returns_np)
+        
+        if len(returns_np) < 20:
+            self.fit_message = f"GARCH: Not enough data points ({len(returns_np)})."
+            warnings.warn(self.fit_message + " Using initial parameters.")
+            self._use_initial_params_for_history(returns_np) # Fallback for insufficient data
             return self
 
         std_dev = np.std(returns_np)
-        if std_dev < 1e-7: # More tolerant for very low vol series
-            warnings.warn("GARCH: Return series has very low variance. Using simplified variance.")
-            self.mean = np.mean(returns_np)
-            self.variance_history = np.full(len(returns_np), max(1e-8, std_dev**2))
-            self.residuals_history = returns_np - self.mean
-            self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-7
-            self.is_fitted = True; self.fit_success = True # Technically not fitted by MLE but has values
-            self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
-            if (1-self.alpha-self.beta) > 1e-7 : self.omega = max(1e-8, std_dev**2) * (1 - self.alpha - self.beta)
-            else: self.omega = 1e-7 # Fallback omega if params non-stationary
+        if std_dev < 1e-7: 
+            self.fit_message = "GARCH: Return series has very low variance."
+            warnings.warn(self.fit_message + " Using simplified variance.")
+            self._handle_low_variance_series(returns_np, std_dev) # Fallback for low variance
             return self
 
-        clip_threshold = 7 * std_dev if std_dev > 1e-7 else 0.07 # Tighter clipping
+        clip_threshold = 7 * std_dev 
         returns_np = np.clip(returns_np, -clip_threshold, clip_threshold)
         self.mean = np.mean(returns_np)
         returns_centered = returns_np - self.mean
+        if np.std(returns_centered) < 1e-7: 
+            self.fit_message = "GARCH: Demeaned returns have very low variance."
+            warnings.warn(self.fit_message + " Using simplified variance.")
+            self._handle_low_variance_series(returns_np, np.std(returns_centered))
+            return self
+
 
         initial_params = [self.omega_init, self.alpha_init, self.beta_init]
-        bounds = [(1e-8, 0.1), (1e-8, 0.99), (1e-8, 0.99)] # omega, alpha, beta bounds
+        # Bounds: omega > 0, 0 <= alpha < 1, 0 <= beta < 1. Sum constraint is handled in likelihood.
+        bounds = [(1e-8, 0.1), (1e-8, 0.998), (1e-8, 0.998)] # omega, alpha, beta bounds
 
-        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9}
+        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9} # ftol for stricter convergence
         
-        # Try L-BFGS-B first as it's often good for GARCH
-        methods_to_try = [method, 'SLSQP'] 
-        final_result = None
+        methods_to_try = [method, 'SLSQP'] # L-BFGS-B often good for GARCH, SLSQP as robust fallback
+        final_result_obj = None # To store the result object for message
 
         for opt_method in methods_to_try:
             try:
@@ -396,51 +411,81 @@ class GARCHModel:
                 result = minimize(self._neg_log_likelihood, initial_params, args=(returns_centered,),
                                   method=opt_method, bounds=current_bounds, options=optimizer_options)
                 
+                final_result_obj = result # Store the result of the last attempted method
+
                 if result.success:
                     omega_fit, alpha_fit, beta_fit = result.x
+                    # Check parameters again after fit, especially stationarity
                     _, _, _, params_valid = self._check_parameters(omega_fit, alpha_fit, beta_fit, context="fit_check")
-                    if params_valid and (alpha_fit + beta_fit < 0.9999): # Final check on stationarity
+                    if params_valid and (alpha_fit + beta_fit < 0.9999): # Ensure stationarity
                         self.omega, self.alpha, self.beta = omega_fit, alpha_fit, beta_fit
                         self.fit_success = True
-                        break 
-                final_result = result # Store last result even if not successful for warning
-            except Exception: # Catches errors within minimize too
-                final_result = None # Mark that this method failed
+                        self.fit_message = f"Optimization successful with {opt_method}."
+                        break # Exit loop on successful fit
+                # If not successful, message will be from the last attempt below
+            except Exception as e: # Catches errors within minimize too
+                self.fit_message = f"Exception during {opt_method}: {str(e)}"
+                final_result_obj = None # No result object if exception
                 continue # Try next method
         
         if not self.fit_success:
-            msg = final_result.message if final_result else "Optimization error"
-            warnings.warn(f"GARCH optimization failed ({msg}). Using robust initial parameters.")
+            # Use message from the last result object if available
+            msg_detail = final_result_obj.message if final_result_obj and hasattr(final_result_obj, 'message') else self.fit_message
+            warnings.warn(f"GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
+            # Fallback to robust initial parameters
             self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
 
-        self._finalize_fit(returns_centered)
+        self._finalize_fit(returns_centered) # Calculate variance history with final/fallback params
         return self
 
+    def _handle_low_variance_series(self, returns_np_original, actual_std_dev):
+        """Helper to set history for low/zero variance series."""
+        self.mean = np.mean(returns_np_original)
+        var_to_use = max(1e-8, actual_std_dev**2 if pd.notna(actual_std_dev) else 1e-8)
+        self.variance_history = np.full(len(returns_np_original), var_to_use)
+        self.residuals_history = returns_np_original - self.mean
+        self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-7
+        self.is_fitted = True; self.fit_success = True # Mark as "fitted" with this simplified approach
+        
+        # Ensure omega, alpha, beta are consistent with this simplified variance
+        self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
+        if (1-self.alpha-self.beta) > 1e-7 : 
+            self.omega = max(1e-8, var_to_use * (1 - self.alpha - self.beta))
+        else: # If alpha+beta too high from init, omega must be small
+            self.omega = 1e-7 
+
+
     def _use_initial_params_for_history(self, returns_np):
+        """Helper to set history when using initial parameters (e.g. insufficient data)."""
         self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
         self.mean = np.mean(returns_np) if len(returns_np) > 0 else 0.0
         returns_centered = returns_np - self.mean
-        self._finalize_fit(returns_centered, use_empirical_var_for_sigma2_0=True)
+        self._finalize_fit(returns_centered, use_empirical_var_for_sigma2_0=True) # Force empirical for this fallback
 
     def _finalize_fit(self, returns_centered, use_empirical_var_for_sigma2_0=False):
+        """Calculates variance history based on current parameters."""
         T = len(returns_centered)
-        if T == 0:
+        if T == 0: # Should be caught by len(returns_np) < 20 earlier
             self.variance_history = np.array([])
             self.residuals_history = np.array([])
-            self.sigma2_t = self.omega / (1-self.alpha-self.beta) if (1-self.alpha-self.beta) > 1e-7 else 1e-7
+            uncond_denom = (1-self.alpha-self.beta)
+            self.sigma2_t = self.omega / uncond_denom if uncond_denom > 1e-7 else 1e-7
             self.is_fitted = True
             return
 
         sigma2 = np.zeros(T)
-        if use_empirical_var_for_sigma2_0 or (1 - self.alpha - self.beta) <= 1e-7:
-             sigma2[0] = max(1e-8, np.var(returns_centered)) if T > 1 else 1e-7
-        else:
+        var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7
+
+        # Determine initial sigma2[0]
+        if use_empirical_var_for_sigma2_0 or (1 - self.alpha - self.beta) <= 1e-7: # If fallback or non-stationary
+             sigma2[0] = max(1e-8, var_ret_centered)
+        else: # Use unconditional variance if stationary and not forced empirical
              sigma2[0] = max(1e-8, self.omega / (1 - self.alpha - self.beta))
-        if sigma2[0] == 0: sigma2[0] = 1e-8
+        if sigma2[0] <= 1e-9 : sigma2[0] = 1e-8 # Final safety floor
 
         for t in range(1, T):
             sigma2[t] = self.omega + self.alpha * returns_centered[t-1]**2 + self.beta * sigma2[t-1]
-            sigma2[t] = max(1e-8, sigma2[t])
+            sigma2[t] = max(1e-8, sigma2[t]) # Floor variance
         
         self.variance_history = sigma2
         self.residuals_history = returns_centered
@@ -448,88 +493,115 @@ class GARCHModel:
         self.is_fitted = True
     
     def predict(self, n_steps: int = 1) -> np.ndarray:
-        if not self.is_fitted: raise RuntimeError("Model must be fitted")
+        if not self.is_fitted: raise RuntimeError("Model must be fitted before prediction")
         if self.residuals_history is None or len(self.residuals_history) == 0 or self.sigma2_t is None:
+            # This case should ideally be handled by _finalize_fit ensuring sigma2_t is set
+            warnings.warn("GARCH model has insufficient history for prediction. Returning unconditional variance.")
             uncond_var_denom = (1 - self.alpha - self.beta)
-            uncond_var = self.omega / uncond_var_denom if uncond_var_denom > 1e-7 else 1e-7
+            uncond_var = self.omega / uncond_var_denom if uncond_var_denom > 1e-7 else 1e-7 # Default if non-stationary
             return np.full(n_steps, max(1e-8, uncond_var))
 
         forecasts = np.zeros(n_steps)
         last_resid_sq = self.residuals_history[-1]**2
         current_sigma2 = self.sigma2_t
+        
         for h in range(n_steps):
-            forecasts[h] = self.omega + self.alpha * last_resid_sq + self.beta * current_sigma2 if h == 0 else \
-                           self.omega + (self.alpha + self.beta) * forecasts[h-1]
-            forecasts[h] = max(1e-8, forecasts[h])
+            if h == 0:
+                forecasts[h] = self.omega + self.alpha * last_resid_sq + self.beta * current_sigma2
+            else:
+                # For multi-step, E[resid^2_t+h-1] = forecasts[h-1] as E[z^2]=1 and z is unpredictable
+                forecasts[h] = self.omega + (self.alpha + self.beta) * forecasts[h-1]
+            forecasts[h] = max(1e-8, forecasts[h]) # Ensure positivity
+        
         return forecasts
     
     def conditional_volatility(self) -> np.ndarray:
-        if not self.is_fitted or self.variance_history is None: raise RuntimeError("Model not fitted")
+        if not self.is_fitted or self.variance_history is None: raise RuntimeError("Model must be fitted before accessing volatility")
         return np.sqrt(self.variance_history)
     
     def volatility_innovations(self) -> np.ndarray:
-        if not self.is_fitted or self.variance_history is None or len(self.variance_history) <= 1: return np.array([])
+        if not self.is_fitted or self.variance_history is None or len(self.variance_history) <= 1: 
+            return np.array([]) # Not enough data
+        
         T = len(self.variance_history)
-        innovations = np.zeros(T-1)
-        for t in range(1, T):
+        innovations = np.zeros(T-1) # Innovations are for t=1 to T-1
+        
+        for t in range(1, T): # Start from the second observation
+            # Expected variance for period t, using info from t-1
             expected_var_t = self.omega + self.alpha * self.residuals_history[t-1]**2 + self.beta * self.variance_history[t-1]
-            realized_var_t = self.variance_history[t]
+            realized_var_t = self.variance_history[t] # Realized (fitted) variance for period t
             innovations[t-1] = realized_var_t - expected_var_t
-        if len(innovations) > 0 and (np.allclose(innovations,0) or np.var(innovations) < 1e-12):
-            innovations = innovations + np.random.normal(0, 1e-7, size=len(innovations))
+        
+        # Add small noise if innovations are all zero or have tiny variance (for numerical stability in regressions)
+        if len(innovations) > 0 and (np.allclose(innovations,0, atol=1e-9) or np.var(innovations) < 1e-12):
+            # warnings.warn("GARCH Volatility innovations had near-zero variance. Adding small random noise.")
+            innovations = innovations + np.random.normal(0, 1e-7, size=len(innovations)) # Even smaller noise
+        
         return innovations
+
 
 class GJRGARCHModel(GARCHModel):
     def __init__(self, omega: float = 1e-6, alpha: float = 0.08, beta: float = 0.85, gamma: float = 0.05):
-        super().__init__(omega, alpha, beta)
-        self.gamma_init = gamma # Store initial for fallback
+        super().__init__(omega, alpha, beta) # Calls GARCHModel's init
+        self.gamma_init = gamma 
         self.gamma = gamma
-        self.fit_success = False # Reset for GJR
+        # self.fit_success and self.fit_message will be inherited and reset in GJR's fit
 
     def _check_gjr_parameters(self, omega, alpha, beta, gamma, context="final"):
-        omega, alpha, beta, garch_valid = self._check_parameters(omega, alpha, beta, context) # Validate GARCH part
-        valid = garch_valid
-        if gamma < 0:
-            if context=="final": warnings.warn(f"GJR gamma is negative ({gamma:.2e}). Resetting to 0.")
-            gamma = 0.0
+        omega, alpha, beta, garch_valid = self._check_parameters(omega, alpha, beta, context) # Validate GARCH part first
+        valid = garch_valid # Start with GARCH validity
+
+        if not (isinstance(gamma, (int,float)) and pd.notna(gamma) and gamma >= 0): # Gamma can be 0
+            if context=="final": warnings.warn(f"GJR gamma invalid or negative ({gamma}). Resetting to 0.01.")
+            gamma = 0.01 # Small positive default if invalid
             valid = False
+        
         # Stationarity for GJR: alpha + beta + 0.5*gamma < 1
-        if alpha + beta + 0.5 * gamma >= 0.99999:
-            if context=="final": warnings.warn(f"GJR sum condition violated ({alpha+beta+0.5*gamma:.3f}). Clamping.")
-            # Complex to clamp perfectly, heuristic: if gamma pushes it over, reduce gamma
-            # If still over, then reduce beta/alpha as in GARCHModel
-            required_sum_alpha_beta = 0.9999 - 0.5 * gamma - 0.0001
-            if alpha + beta > required_sum_alpha_beta:
-                if gamma > 0.01: # if gamma is somewhat substantial, try reducing it
-                    gamma = max(0, (0.9999 - (alpha+beta) - 0.0001) * 2)
-                else: # if gamma is small, likely alpha/beta are too large
-                    current_sum_alpha_beta = alpha + beta
-                    alpha = alpha / (current_sum_alpha_beta + 1e-4) * required_sum_alpha_beta
-                    beta = beta / (current_sum_alpha_beta + 1e-4) * required_sum_alpha_beta
+        stationarity_val = alpha + beta + 0.5 * gamma
+        if stationarity_val >= 0.99999:
+            if context=="final": warnings.warn(f"GJR sum condition ({stationarity_val:.4f}) violates stationarity. Adjusting.")
+            # Heuristic to adjust:
+            # If alpha + beta itself is already too high, gamma must be near zero
+            target_sum_overall = 0.9998
+            if alpha + beta >= target_sum_overall:
+                gamma = max(0, gamma * 0.1) # Drastically reduce gamma if alpha+beta is the issue
+                # Re-check GARCH part for alpha, beta with new (possibly zero) gamma contribution
+                current_sum_alpha_beta = alpha + beta
+                required_sum_alpha_beta_for_gjr = target_sum_overall - 0.5 * gamma
+                if current_sum_alpha_beta > required_sum_alpha_beta_for_gjr and current_sum_alpha_beta > 1e-7:
+                    alpha = (alpha / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
+                    beta = (beta / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
+                elif current_sum_alpha_beta <= 1e-7 : # if alpha, beta were effectively zero
+                     alpha = 0.05; beta = 0.85 # reset alpha, beta too
+            else: # alpha+beta is fine, gamma is pushing it over
+                # Ensure gamma is non-negative after adjustment
+                gamma = max(0, (target_sum_overall - (alpha + beta)) * 2 * 0.99 ) 
             valid = False
         return omega, alpha, beta, gamma, valid
 
     def _neg_log_likelihood(self, params, returns_centered): # Override for GJR
         omega, alpha, beta, gamma = params
-        omega, alpha, beta, gamma, _ = self._check_gjr_parameters(omega, alpha, beta, gamma, context="likelihood")
-        if alpha + beta + 0.5 * gamma >= 0.99999: # Strict check
+        # Stricter check for optimizer exploration
+        if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and gamma >= 0 and \
+                alpha + beta + 0.5 * gamma < 0.99999):
             return np.inf
 
         T = len(returns_centered)
         sigma2 = np.zeros(T)
+        var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7
         
         uncond_denom = (1 - alpha - beta - 0.5 * gamma)
         if uncond_denom > 1e-7:
             sigma2_0_uncond = omega / uncond_denom
-            sigma2[0] = max(1e-8, sigma2_0_uncond)
+            sigma2[0] = max(1e-8, sigma2_0_uncond, var_ret_centered)
         else:
-            sigma2[0] = max(1e-8, np.var(returns_centered))
-        if sigma2[0] == 0: sigma2[0] = 1e-8
+            sigma2[0] = max(1e-8, var_ret_centered)
+        if sigma2[0] <= 1e-9: sigma2[0] = 1e-8
 
         for t in range(1, T):
             I_tm1 = 1.0 if returns_centered[t-1] < 0 else 0.0
-            sigma2[t] = omega + alpha * returns_centered[t-1]**2 + \
-                        beta * sigma2[t-1] + gamma * I_tm1 * returns_centered[t-1]**2
+            sigma2[t] = (omega + alpha * returns_centered[t-1]**2 + 
+                         beta * sigma2[t-1] + gamma * I_tm1 * returns_centered[t-1]**2)
             sigma2[t] = max(1e-8, sigma2[t])
 
         if np.any(sigma2 <= 1e-9): return np.inf
@@ -538,73 +610,95 @@ class GJRGARCHModel(GARCHModel):
 
     def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
             method: str = 'L-BFGS-B', max_iter: int = 200) -> 'GJRGARCHModel':
+        self.fit_success = False 
+        self.fit_message = "Fit not successful"
+
         if isinstance(returns, pl.Series): returns_np = returns.to_numpy()
         elif isinstance(returns, pl.DataFrame): returns_np = returns.to_numpy().flatten()
         else: returns_np = np.asarray(returns)
 
         returns_np = returns_np[~np.isnan(returns_np)]
+        
         if len(returns_np) < 20:
-            warnings.warn(f"GJR: Not enough data points ({len(returns_np)}). Using initial parameters.")
+            self.fit_message = f"GJR: Not enough data points ({len(returns_np)})."
+            warnings.warn(self.fit_message + " Using initial parameters.")
             self._use_initial_params_for_history_gjr(returns_np)
             return self
 
         std_dev = np.std(returns_np)
         if std_dev < 1e-7:
-            warnings.warn("GJR: Return series has very low variance. Using simplified variance.")
-            self.mean = np.mean(returns_np)
-            self.variance_history = np.full(len(returns_np), max(1e-8, std_dev**2))
-            self.residuals_history = returns_np - self.mean
-            self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-7
-            self.is_fitted = True; self.fit_success = True
-            self.omega,self.alpha,self.beta,self.gamma,_ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
-            denom = (1 - self.alpha - self.beta - 0.5 * self.gamma)
-            if denom > 1e-7: self.omega = max(1e-8, std_dev**2) * denom
-            else: self.omega = 1e-7
+            self.fit_message = "GJR: Return series has very low variance."
+            warnings.warn(self.fit_message + " Using simplified variance.")
+            self._handle_low_variance_series_gjr(returns_np, std_dev)
             return self
             
-        clip_threshold = 7 * std_dev if std_dev > 1e-7 else 0.07
+        clip_threshold = 7 * std_dev 
         returns_np = np.clip(returns_np, -clip_threshold, clip_threshold)
         self.mean = np.mean(returns_np)
         returns_centered = returns_np - self.mean
+        if np.std(returns_centered) < 1e-7:
+            self.fit_message = "GJR: Demeaned returns have very low variance."
+            warnings.warn(self.fit_message + " Using simplified variance.")
+            self._handle_low_variance_series_gjr(returns_np, np.std(returns_centered))
+            return self
 
         initial_params = [self.omega_init, self.alpha_init, self.beta_init, self.gamma_init]
-        bounds = [(1e-8, 0.1), (1e-8, 0.99), (1e-8, 0.99), (0, 0.99)] # omega, alpha, beta, gamma
+        bounds = [(1e-8, 0.1), (1e-8, 0.998), (1e-8, 0.998), (0, 0.998)] # omega, alpha, beta, gamma
 
         optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9}
         methods_to_try = [method, 'SLSQP'] 
-        final_result = None
-
+        final_result_obj = None
+        
         for opt_method in methods_to_try:
             try:
                 current_bounds = bounds if opt_method != 'Nelder-Mead' else None
                 result = minimize(self._neg_log_likelihood, initial_params, args=(returns_centered,),
                                   method=opt_method, bounds=current_bounds, options=optimizer_options)
+                final_result_obj = result
                 if result.success:
                     o, a, b, g = result.x
                     _, _, _, _, params_valid = self._check_gjr_parameters(o, a, b, g, context="fit_check")
                     if params_valid and (a + b + 0.5 * g < 0.9999):
                         self.omega, self.alpha, self.beta, self.gamma = o,a,b,g
                         self.fit_success = True
+                        self.fit_message = f"Optimization successful with {opt_method}."
                         break
-                final_result = result
-            except Exception:
-                final_result = None; continue
+                self.fit_message = result.message
+            except Exception as e:
+                self.fit_message = f"Exception during {opt_method}: {str(e)}"
+                final_result_obj = None; continue
         
         if not self.fit_success:
-            msg = final_result.message if final_result else "Optimization error"
-            warnings.warn(f"GJR-GARCH optimization failed ({msg}). Using robust initial parameters.")
+            msg_detail = final_result_obj.message if final_result_obj and hasattr(final_result_obj, 'message') else self.fit_message
+            warnings.warn(f"GJR-GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
             self.omega,self.alpha,self.beta,self.gamma,_ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
 
-        self._finalize_fit_gjr(returns_centered) # Use GJR specific finalization
+        self._finalize_fit_gjr(returns_centered) 
         return self
 
+    def _handle_low_variance_series_gjr(self, returns_np_original, actual_std_dev):
+        """Helper for GJR low variance series."""
+        self.mean = np.mean(returns_np_original)
+        var_to_use = max(1e-8, actual_std_dev**2 if pd.notna(actual_std_dev) else 1e-8)
+        self.variance_history = np.full(len(returns_np_original), var_to_use)
+        self.residuals_history = returns_np_original - self.mean
+        self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-7
+        self.is_fitted = True; self.fit_success = True
+        
+        self.omega, self.alpha, self.beta, self.gamma, _ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
+        denom = (1 - self.alpha - self.beta - 0.5 * self.gamma)
+        if denom > 1e-7: self.omega = max(1e-8, var_to_use * denom)
+        else: self.omega = 1e-7
+
     def _use_initial_params_for_history_gjr(self, returns_np):
+        """Helper for GJR when using initial params (e.g. insufficient data)."""
         self.omega,self.alpha,self.beta,self.gamma,_ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
         self.mean = np.mean(returns_np) if len(returns_np) > 0 else 0.0
         returns_centered = returns_np - self.mean
         self._finalize_fit_gjr(returns_centered, use_empirical_var_for_sigma2_0=True)
 
     def _finalize_fit_gjr(self, returns_centered, use_empirical_var_for_sigma2_0=False):
+        """Calculates GJR variance history based on current parameters."""
         T = len(returns_centered)
         if T == 0:
             self.variance_history = np.array([])
@@ -615,12 +709,14 @@ class GJRGARCHModel(GARCHModel):
             return
 
         sigma2 = np.zeros(T)
+        var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7
         uncond_denom = (1 - self.alpha - self.beta - 0.5 * self.gamma)
+
         if use_empirical_var_for_sigma2_0 or uncond_denom <= 1e-7:
-            sigma2[0] = max(1e-8, np.var(returns_centered)) if T > 1 else 1e-7
+            sigma2[0] = max(1e-8, var_ret_centered)
         else:
             sigma2[0] = max(1e-8, self.omega / uncond_denom)
-        if sigma2[0] == 0: sigma2[0] = 1e-8
+        if sigma2[0] <= 1e-9: sigma2[0] = 1e-8
         
         for t in range(1, T):
             I_tm1 = 1.0 if returns_centered[t-1] < 0 else 0.0
@@ -636,6 +732,7 @@ class GJRGARCHModel(GARCHModel):
     def predict(self, n_steps: int = 1) -> np.ndarray:
         if not self.is_fitted: raise RuntimeError("Model must be fitted")
         if self.residuals_history is None or len(self.residuals_history) == 0 or self.sigma2_t is None:
+            warnings.warn("GJR-GARCH model has insufficient history for prediction. Returning unconditional variance.")
             uncond_var_denom = (1 - self.alpha - self.beta - 0.5 * self.gamma)
             uncond_var = self.omega / uncond_var_denom if uncond_var_denom > 1e-7 else 1e-7
             return np.full(n_steps, max(1e-8, uncond_var))
@@ -644,11 +741,13 @@ class GJRGARCHModel(GARCHModel):
         last_resid_sq = self.residuals_history[-1]**2
         I_last = 1.0 if self.residuals_history[-1] < 0 else 0.0
         current_sigma2 = self.sigma2_t
+        
         for h in range(n_steps):
             if h == 0:
                 forecasts[h] = self.omega + self.alpha * last_resid_sq + \
                                self.beta * current_sigma2 + self.gamma * I_last * last_resid_sq
-            else: # E[I*resid^2] = 0.5 * E[resid^2] = 0.5 * forecast[h-1]
+            else: 
+                # E[I*resid^2] approx 0.5 * E[resid^2] = 0.5 * forecast[h-1] for multi-step
                 forecasts[h] = self.omega + (self.alpha + self.beta + 0.5 * self.gamma) * forecasts[h-1]
             forecasts[h] = max(1e-8, forecasts[h])
         return forecasts
@@ -664,7 +763,8 @@ class GJRGARCHModel(GARCHModel):
                              self.gamma * I_tm1 * self.residuals_history[t-1]**2
             realized_var_t = self.variance_history[t]
             innovations[t-1] = realized_var_t - expected_var_t
-        if len(innovations) > 0 and (np.allclose(innovations,0) or np.var(innovations) < 1e-12):
+        if len(innovations) > 0 and (np.allclose(innovations,0, atol=1e-9) or np.var(innovations) < 1e-12):
+            # warnings.warn("GJR Volatility innovations had near-zero variance. Adding small random noise.")
             innovations = innovations + np.random.normal(0, 1e-7, size=len(innovations))
         return innovations
 
@@ -683,25 +783,22 @@ class ThreePhaseVolatilityModel:
         
         if k1 <= 1: raise ValueError("k1 must be greater than 1")
         if k2 <= 1: raise ValueError("k2 must be greater than 1")
-        # if k2 <= k1: warnings.warn("Typically k2 > k1") # Keep less verbose
     
     def phi1(self, t: int, t_event: int) -> float:
         return (self.k1 - 1) * np.exp(-((t - t_event)**2) / (2 * self.delta_t1**2))
     
     def phi2(self, t: int, t_event: int) -> float:
-        # Ensure t - t_event is non-negative for exp argument to avoid overflow with large positive delta_t2
-        # delta_t2 should be positive.
         time_diff = t - t_event
-        if self.delta_t2 <= 1e-6 : return (self.k2 - 1) if time_diff > 0 else 0.0 # Avoid division by zero, assume instant rise
+        if self.delta_t2 <= 1e-6 : return (self.k2 - 1) if time_diff > 0 else 0.0 
         return (self.k2 - 1) * (1 - np.exp(-time_diff / self.delta_t2))
     
     def phi3(self, t: int, t_event: int) -> float:
         time_diff = t - (t_event + self.delta)
-        if self.delta_t3 <= 1e-6: return 0.0 # Avoid division by zero, assume instant decay
+        if self.delta_t3 <= 1e-6: return 0.0 
         return (self.k2 - 1) * np.exp(-time_diff / self.delta_t3)
     
     def calculate_volatility(self, t: int, t_event: int, sigma_e0: float) -> float:
-        if sigma_e0 < 1e-8: sigma_e0 = 1e-8 # Floor baseline vol
+        if sigma_e0 < 1e-8: sigma_e0 = 1e-8 
         if t <= t_event:
             phi = self.phi1(t, t_event)
         elif t <= t_event + self.delta:
@@ -714,7 +811,7 @@ class ThreePhaseVolatilityModel:
                                    days_to_event: Union[List[int], np.ndarray], 
                                    baseline_conditional_vol_series: Optional[np.ndarray] = None) -> np.ndarray:
         if not isinstance(days_to_event, np.ndarray):
-            days_to_event = np.array(days_to_event, dtype=float) # Ensure float for calculations
+            days_to_event = np.array(days_to_event, dtype=float) 
         
         if baseline_conditional_vol_series is not None:
             if len(baseline_conditional_vol_series) != len(days_to_event):
@@ -723,7 +820,7 @@ class ThreePhaseVolatilityModel:
                      f"must match days_to_event ({len(days_to_event)}). "
                      "Alignment error in calling function."
                  )
-            sigma_e0_series = np.maximum(baseline_conditional_vol_series, 1e-8) # Ensure positive baseline
+            sigma_e0_series = np.maximum(baseline_conditional_vol_series, 1e-8)
         else: 
             if not self.baseline_model.is_fitted:
                 raise RuntimeError("Baseline model must be fitted or baseline_conditional_vol_series provided")
@@ -735,10 +832,10 @@ class ThreePhaseVolatilityModel:
                 denominator = (1 - bm.alpha - bm.beta)
             
             if denominator <= 1e-7: 
-                if bm.variance_history is not None and len(bm.variance_history) > 0 and bm.variance_history[-1] > 1e-8 : # Check if last variance is usable
+                if bm.variance_history is not None and len(bm.variance_history) > 0 and bm.variance_history[-1] > 1e-8 : 
                     uncond_var = bm.variance_history[-1] 
                 else: 
-                    uncond_var = 1e-7 # Absolute fallback if history is also problematic
+                    uncond_var = 1e-7 
             else:
                  uncond_var = bm.omega / denominator
             
@@ -746,7 +843,7 @@ class ThreePhaseVolatilityModel:
             sigma_e0_series = np.full_like(days_to_event, sigma_e0_val, dtype=float)
 
         volatility_series = np.zeros_like(days_to_event, dtype=float)
-        t_event = 0.0 # Treat event day as 0.0 for continuous functions
+        t_event = 0.0 
         
         for i, t_rel in enumerate(days_to_event): 
             volatility_series[i] = self.calculate_volatility(float(t_rel), t_event, sigma_e0_series[i])
