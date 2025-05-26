@@ -23,7 +23,7 @@ class Config:
     # h_t = omega + alpha * epsilon_{t-1}^2 + beta * h_{t-1} + gamma * I_{t-1} * epsilon_{t-1}^2
     gjr_omega: float = 1e-6  # Long-run average variance component
     gjr_alpha: float = 0.08  # ARCH parameter (impact of past shocks)
-    gjr_beta: float = 0.90   # GARCH parameter (volatility persistence)
+    gjr_beta: float = 0.89   # GARCH parameter (volatility persistence)
     gjr_gamma: float = 0.04  # Asymmetry parameter (leverage effect)
     
     # --- Unified Volatility Model Event-Specific Parameters ---
