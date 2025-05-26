@@ -748,53 +748,48 @@ class EventAnalysis:
                 return
             # print(f"Training models on {X.shape[0]} samples with {X.shape[1]} features.")
 
+            train_indices_in_X = None # Initialize to handle case where time_split_column might not work
             if time_split_column in self.data.columns:
-                valid_indices_for_split = self.data.with_row_count().filter(pl.col('future_ret').is_not_null())['row_nr'].to_numpy()
-                dates_for_split = self.data.filter(pl.col('future_ret').is_not_null()).select(time_split_column).to_numpy().flatten()
+                # Ensure we only use rows that ended up in X and y (after drop_nulls on target)
+                # This requires careful index mapping.
+                data_for_split_base = self.data.filter(pl.col('future_ret').is_not_null())
+                dates_for_split = data_for_split_base.get_column(time_split_column).to_numpy().flatten()
+
+
                 if len(dates_for_split) != X.shape[0]:
                      # print(f"Warning: Mismatch in date count ({len(dates_for_split)}) and X samples ({X.shape[0]}). Falling back to random split.")
                      from sklearn.model_selection import train_test_split
                      X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+                     # For random split, getting exact Polars slices is harder, pass NumPy for now if models can take it
+                     # Or reconstruct Polars DFs:
+                     X_train_pl = pl.DataFrame(X_train, schema=feature_names)
+                     y_train_pl = pl.Series(y_train)
+
                 else:
                     sorted_indices_relative_to_X = np.argsort(dates_for_split)
                     split_idx = int(len(sorted_indices_relative_to_X) * (1 - test_size))
                     train_indices_in_X = sorted_indices_relative_to_X[:split_idx]
                     test_indices_in_X = sorted_indices_relative_to_X[split_idx:]
+
                     X_train, X_test = X[train_indices_in_X], X[test_indices_in_X]
                     y_train, y_test = y[train_indices_in_X], y[test_indices_in_X]
+                    
+                    # Get Polars slices for models that expect Polars DataFrames
+                    X_train_pl = data_for_split_base[train_indices_in_X].select(feature_names)
+                    y_train_pl = data_for_split_base[train_indices_in_X].get_column('future_ret')
                     # print(f"Time-based split: Train {X_train.shape[0]}, Test {X_test.shape[0]}")
             else:
                 from sklearn.model_selection import train_test_split
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+                X_train_pl = pl.DataFrame(X_train, schema=feature_names)
+                y_train_pl = pl.Series(y_train)
                 # print(f"Random split: Train {X_train.shape[0]}, Test {X_test.shape[0]}")
-
-            # Create Polars DataFrames for fitting, as models expect them
-            # Need to ensure indices align if using time split
-            # If X_train, X_test are NumPy arrays from a split, we need to convert them back to Polars DF
-            # with correct feature names for the model's .fit() method.
-
-            # Get the Polars DataFrame corresponding to X_train and X_test
-            # This assumes that X and y were derived from self.data.filter(pl.col('future_ret').is_not_null())
-            # and that train_indices_in_X / test_indices_in_X are indices into THAT filtered, aligned X/y.
-            
-            data_for_models = self.data.filter(pl.col('future_ret').is_not_null())
-            if time_split_column in self.data.columns and len(dates_for_split) == X.shape[0]:
-                # Use the time-split indices to slice the Polars DataFrame
-                X_train_pl = data_for_models[train_indices_in_X].select(feature_names)
-                y_train_pl = data_for_models[train_indices_in_X].get_column('future_ret')
-            else: # Random split case, less direct to get Polars slices without original indices
-                  # For simplicity in this case, we might need to pass NumPy arrays if models supported it,
-                  # or reconstruct Polars DFs. TimeSeriesRidge expects Polars DF.
-                  # If random split, X_train, y_train (NumPy) are used.
-                  # For models expecting Polars DF:
-                  X_train_pl = pl.DataFrame(X_train, schema=feature_names)
-                  y_train_pl = pl.Series(y_train)
 
 
             tsridge_model = TimeSeriesRidge(alpha=0.1, lambda2=0.5, feature_order=feature_names) 
             tsridge_model.fit(X_train_pl, y_train_pl)
             self.models['TimeSeriesRidge'] = {
-                'model': tsridge_model, 'X_train': X_train, 'y_train': y_train, # Keep NumPy for eval
+                'model': tsridge_model, 'X_train': X_train, 'y_train': y_train, 
                 'X_test': X_test, 'y_test': y_test, 'feature_names': feature_names
             }
             xgb_params_config = {
@@ -804,7 +799,7 @@ class EventAnalysis:
             xgb_model_instance = XGBoostDecileModel(weight=0.7, xgb_params=xgb_params_config, ts_ridge_feature_order=feature_names)
             xgb_model_instance.fit(X_train_pl, y_train_pl)
             self.models['XGBoostDecile'] = {
-                'model': xgb_model_instance, 'X_train': X_train, 'y_train': y_train, # Keep NumPy for eval
+                'model': xgb_model_instance, 'X_train': X_train, 'y_train': y_train, 
                 'X_test': X_test, 'y_test': y_test, 'feature_names': feature_names
             }
             # print(f"Successfully trained {len(self.models)} models.")
@@ -823,14 +818,13 @@ class EventAnalysis:
         try:
             for model_name, model_info in self.models.items():
                 model = model_info['model']
-                X_test_np = model_info['X_test'] # This is already NumPy
+                X_test_np = model_info['X_test'] 
                 y_test = model_info['y_test']
                 feature_names = model_info['feature_names']
                 
-                # Create a Polars DataFrame from X_test_np for prediction
                 X_test_pl = pl.DataFrame(X_test_np, schema=feature_names)
 
-                y_pred = model.predict(X_test_pl) # Models predict method expect Polars DF
+                y_pred = model.predict(X_test_pl) 
 
                 from sklearn.metrics import mean_squared_error, r2_score
                 mse = mean_squared_error(y_test, y_pred)
@@ -1468,16 +1462,16 @@ class EventAnalysis:
 
         for event_id in event_ids:
             event_data_current = proc_analysis_data.filter(pl.col('event_id') == event_id)
-            event_days_current = event_data_current.get_column('days_to_event').to_numpy() # numpy for indexing
-            event_returns_current = event_data_current.get_column(return_col).to_series()
+            event_days_current = event_data_current.get_column('days_to_event').to_numpy() # Corrected: get_column returns Series, then to_numpy
+            event_returns_current = event_data_current.get_column(return_col) # This is already a Series
             if len(event_returns_current) < 20: continue
             
             try:
                 garch_model_current = GJRGARCHModel() if garch_type.lower() == 'gjr' else GARCHModel()
-                garch_model_current.fit(event_returns_current)
+                garch_model_current.fit(event_returns_current) # Pass Series
                 
                 vol_model_current = ThreePhaseVolatilityModel(
-                    baseline_model=garch_model_current, k1=k1, k2=k2, 
+                    baseline_model=garch_model_current, k1=k1, k2=K2, 
                     delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3, delta=delta
                 )
 
@@ -1498,14 +1492,12 @@ class EventAnalysis:
 
                 if event_id in sample_event_ids:
                     garch_vol_actual = np.sqrt(garch_model_current.variance_history)
-                    # Align GARCH conditional vol with its actual days for the sample plot
                     aligned_garch_vol_for_sample = np.full_like(event_days_current, np.nan, dtype=float)
-                    if len(garch_vol_actual) == len(event_days_current): # Should usually be true
+                    if len(garch_vol_actual) == len(event_days_current): 
                          aligned_garch_vol_for_sample = garch_vol_actual
-                    elif len(garch_vol_actual) > 0: # If lengths mismatch but GARCH has data
+                    elif len(garch_vol_actual) > 0: 
                          common_len = min(len(garch_vol_actual), len(aligned_garch_vol_for_sample))
                          aligned_garch_vol_for_sample[:common_len] = garch_vol_actual[:common_len]
-
 
                     sample_three_phase_vol = vol_model_current.calculate_volatility_series(event_days_current, aligned_garch_vol_for_sample)
                     sample_events_data.append({
@@ -1521,11 +1513,17 @@ class EventAnalysis:
         if not all_events_results: # print("No valid 3-phase volatility results to analyze."); 
             return None
 
-        # Construct DataFrame directly from list of dicts for aggregated_data_dict items
         aggregated_rows = []
         for day_val in analysis_days_np:
-            day_vols = [res['predicted_volatility'][res['days_to_event'] == day_val][0] 
-                        for res in all_events_results if day_val in res['days_to_event'] and len(res['predicted_volatility'][res['days_to_event'] == day_val]) > 0] # Ensure index exists
+            day_vols = []
+            for res in all_events_results:
+                # Find index for day_val in this event's days_to_event array
+                day_indices_in_event = np.where(res['days_to_event'] == day_val)[0]
+                if len(day_indices_in_event) > 0:
+                    idx = day_indices_in_event[0]
+                    if idx < len(res['predicted_volatility']): # Check bounds
+                         day_vols.append(res['predicted_volatility'][idx])
+            
             if day_vols:
                 aggregated_rows.append({
                     'days_to_event': day_val,
@@ -1566,10 +1564,10 @@ class EventAnalysis:
             plt.tight_layout(); plt.savefig(os.path.join(results_dir, f"{file_prefix}_three_phase_volatility.png"), dpi=200); plt.close()
 
             for sample_data_item in sample_events_data:
-                if sample_data_item['garch_vol'] is not None and len(sample_data_item['garch_vol']) > 0: # Check if garch_vol exists
+                if sample_data_item['garch_vol'] is not None and len(sample_data_item['garch_vol']) > 0 and not np.all(np.isnan(sample_data_item['garch_vol'])): 
                     fig_s, ax_s = plt.subplots(figsize=(12, 7))
-                    ax_s.plot(sample_data_item['garch_days'], sample_data_item['garch_vol'] * np.sqrt(252), color='blue', linewidth=1, alpha=0.7, label='GARCH Volatility (annualized)') # Annualize for plot
-                    ax_s.plot(sample_data_item['three_phase_days'], sample_data_item['three_phase_vol'] * np.sqrt(252), color='red', linewidth=2, label='Three-Phase Model (annualized)') # Annualize
+                    ax_s.plot(sample_data_item['garch_days'], sample_data_item['garch_vol'] * np.sqrt(252), color='blue', linewidth=1, alpha=0.7, label='GARCH Volatility (annualized)') 
+                    ax_s.plot(sample_data_item['three_phase_days'], sample_data_item['three_phase_vol'] * np.sqrt(252), color='red', linewidth=2, label='Three-Phase Model (annualized)') 
                     ax_s.axvline(x=0, color='black', linestyle='--', label='Event Day'); ax_s.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
                     ax_s.set_title(f"Volatility for {sample_data_item['ticker']} (Event ID: {sample_data_item['event_id']})")
                     ax_s.set_xlabel('Days Relative to Event'); ax_s.set_ylabel('Annualized Volatility'); ax_s.legend(loc='best'); ax_s.grid(True, linestyle=':', alpha=0.7)
@@ -1615,9 +1613,8 @@ class EventAnalysis:
         return_col_for_calc = 'decimal_return'
         if returns_in_pct: # print("Converting percentage returns to decimal form for RVR calculation")
             proc_analysis_data = proc_analysis_data.with_columns((pl.col(return_col) / 100).alias(return_col_for_calc))
-            adj_bias = optimistic_bias / 100 # Ensure bias matches decimal returns
+            adj_bias = optimistic_bias / 100 
         else:
-            # If already decimal, make sure the column name is consistently 'decimal_return' for later use
             if return_col != return_col_for_calc:
                  proc_analysis_data = proc_analysis_data.with_columns(pl.col(return_col).alias(return_col_for_calc))
             adj_bias = optimistic_bias
@@ -1631,8 +1628,7 @@ class EventAnalysis:
 
         for event_id in event_ids:
             event_data_current = proc_analysis_data.filter(pl.col('event_id') == event_id)
-            # Ensure we only use days within the original -60 to +60 window for GARCH fitting
-            event_returns_for_garch_fit = event_data_current.get_column(return_col_for_calc).to_series()
+            event_returns_for_garch_fit = event_data_current.get_column(return_col_for_calc) # Already a Series
             
             if len(event_returns_for_garch_fit) < 20: continue 
             
@@ -1641,11 +1637,10 @@ class EventAnalysis:
                 garch_model_current.fit(event_returns_for_garch_fit) 
                 
                 vol_model_current = ThreePhaseVolatilityModel(
-                    baseline_model=garch_model_current, k1=k1, k2=k2, 
+                    baseline_model=garch_model_current, k1=k1, k2=K2, 
                     delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3, delta=delta
                 )
                 
-                # Map GARCH conditional vol to the days it was fit on
                 event_days_of_fit = event_data_current.get_column('days_to_event').to_numpy()
                 baseline_cond_vol_sqrt_h_t_series_fit = np.sqrt(garch_model_current.variance_history)
                 day_to_baseline_vol_map_fit = dict(zip(event_days_of_fit, baseline_cond_vol_sqrt_h_t_series_fit))
@@ -1657,26 +1652,21 @@ class EventAnalysis:
                 if denom_uncond > 1e-7: fallback_uncond_vol_fit = np.sqrt(max(bm.omega / denom_uncond, 1e-7))
                 else: fallback_uncond_vol_fit = np.sqrt(bm.variance_history[-1]) if bm.variance_history is not None and len(bm.variance_history) > 0 else np.sqrt(1e-6)
                 
-                # Align baseline GARCH vol to the common analysis_days_np_rvr grid
                 aligned_baseline_cond_vol_for_analysis = np.array([day_to_baseline_vol_map_fit.get(day, fallback_uncond_vol_fit) for day in analysis_days_np_rvr])
-                
-                # Calculate three-phase volatility over the common analysis_days_np_rvr grid
                 volatility_series_for_rvr_analysis_days = vol_model_current.calculate_volatility_series(analysis_days_np_rvr, aligned_baseline_cond_vol_for_analysis)
 
-                # Calculate expected returns
-                # Use historical mean of returns *within the analysis_window* for this event
-                event_returns_in_analysis_window = event_data_current.filter(
+                event_returns_in_analysis_window_series = event_data_current.filter(
                     (pl.col('days_to_event') >= analysis_window[0]) & (pl.col('days_to_event') <= analysis_window[1])
-                ).get_column(return_col_for_calc).to_numpy()
+                ).get_column(return_col_for_calc) # This is a Series
                 
-                mean_hist_return_event_analysis_win = np.nanmean(event_returns_in_analysis_window) if len(event_returns_in_analysis_window) > 0 else 0.0
-
+                mean_hist_return_event_analysis_win = event_returns_in_analysis_window_series.mean() if not event_returns_in_analysis_window_series.is_empty() else 0.0
+                if mean_hist_return_event_analysis_win is None: mean_hist_return_event_analysis_win = 0.0 # handle all null case
 
                 expected_returns_biased_analysis_days = np.array([
                     mean_hist_return_event_analysis_win + adj_bias - risk_free_rate 
                     if phases['post_event_rising'][0] <= day_val <= phases['post_event_rising'][1] 
                     else mean_hist_return_event_analysis_win - risk_free_rate
-                    for day_val in analysis_days_np_rvr # Iterate over the common analysis grid
+                    for day_val in analysis_days_np_rvr 
                 ])
                 
                 rvr_values_analysis_days = expected_returns_biased_analysis_days / (volatility_series_for_rvr_analysis_days**2 + 1e-10)
@@ -1724,7 +1714,6 @@ class EventAnalysis:
             h1_test_data[row_dict['phase']] = row_dict['avg_rvr']
         
         h1_result = False
-        # Check if all necessary keys exist and are not None before comparison
         if all(k in h1_test_data and h1_test_data[k] is not None for k in ['post_event_rising', 'pre_event', 'post_event_decay']):
             h1_result = (h1_test_data['post_event_rising'] > h1_test_data['pre_event'] and 
                          h1_test_data['post_event_rising'] > h1_test_data['post_event_decay'])
@@ -1745,7 +1734,6 @@ class EventAnalysis:
             ax.plot(rvr_pd_plot['days_to_event'], rvr_pd_plot['mean_rvr'], color='blue', linewidth=2, label='Mean RVR (Optimistic Bias)')
             ax.axvline(x=0, color='red', linestyle='--', label='Event Day'); ax.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
             ax.axvspan(phases['post_event_rising'][0], phases['post_event_rising'][1], color='yellow', alpha=0.2, label='Post-Event Rising Phase')
-            # Use adj_bias in title, which is already in decimal form
             ax.set_title(f'RVR with Optimistic Bias ({adj_bias*100:.2f}%)')
             ax.set_xlabel('Days Relative to Event'); ax.set_ylabel('Return-to-Variance Ratio'); ax.legend(loc='best'); ax.grid(True, linestyle=':', alpha=0.7)
             plt.tight_layout(); plt.savefig(os.path.join(results_dir, f"{file_prefix}_rvr_bias_timeseries.png"), dpi=200); plt.close()

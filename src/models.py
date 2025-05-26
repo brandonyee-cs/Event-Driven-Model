@@ -901,9 +901,48 @@ class ThreePhaseVolatilityModel:
         
         if baseline_conditional_vol_series is not None:
             if len(baseline_conditional_vol_series) != len(days_to_event):
-                raise ValueError("Length of baseline_conditional_vol_series must match days_to_event.")
+                # This can happen if GARCH fit fewer days than analysis_days_np.
+                # Pad baseline_conditional_vol_series or use unconditional for missing days.
+                # For now, let's use the last known conditional vol if series is shorter.
+                # Or, more robustly, use unconditional for days outside GARCH fit range.
+                
+                # Fallback to unconditional if lengths don't match and model is fitted
+                if self.baseline_model.is_fitted:
+                    bm = self.baseline_model
+                    if isinstance(bm, GJRGARCHModel): denom_uncond = (1 - bm.alpha - bm.beta - 0.5 * bm.gamma)
+                    else: denom_uncond = (1 - bm.alpha - bm.beta)
+                    
+                    if denom_uncond > 1e-7: fallback_uncond_val = np.sqrt(max(bm.omega / denom_uncond, 1e-7))
+                    else: fallback_uncond_val = np.sqrt(bm.variance_history[-1]) if bm.variance_history is not None and len(bm.variance_history) > 0 else np.sqrt(1e-6)
+                    
+                    # Create a new series of the correct length, filling with fallback
+                    temp_baseline_series = np.full_like(days_to_event, fallback_uncond_val, dtype=float)
+                    # Fill known values - this part needs careful alignment if days_to_event doesn't match days GARCH was fit on
+                    # This method assumes baseline_conditional_vol_series *is already aligned* with days_to_event if provided
+                    # The caller (analyze_three_phase_volatility/analyze_rvr_with_optimistic_bias) handles this alignment.
+                    # So if it's passed, it should be the right length.
+                    # The original error was about GARCH producing fewer points.
+                    # The fix should be in the calling function to ensure baseline_conditional_vol_series
+                    # is correctly constructed for the full `days_to_event` range.
+                    # For now, if it's passed, trust its length.
+                    # The error source is more likely when baseline_conditional_vol_series is None
+                    # and then derived from a GARCH model that might not cover all days_to_event.
+                    # The calling functions now attempt to create a properly aligned baseline.
+
+                    # This part of the logic is now primarily handled by the calling functions,
+                    # which prepare an `aligned_baseline_cond_vol_series` that matches `days_to_event`.
+                    # Therefore, the length check here should ideally pass.
+                    if len(baseline_conditional_vol_series) != len(days_to_event):
+                         raise ValueError(
+                             f"Length of baseline_conditional_vol_series ({len(baseline_conditional_vol_series)}) "
+                             f"must match days_to_event ({len(days_to_event)}). "
+                             "Alignment error in calling function."
+                         )
+
+                else: # No fitted model and length mismatch
+                    raise ValueError("Length of baseline_conditional_vol_series must match days_to_event, or baseline_model must be fitted.")
             sigma_e0_series = baseline_conditional_vol_series
-        else:
+        else: # baseline_conditional_vol_series is None
             if not self.baseline_model.is_fitted:
                 raise RuntimeError("Baseline model must be fitted or baseline_conditional_vol_series provided")
             
@@ -913,13 +952,13 @@ class ThreePhaseVolatilityModel:
             else: # GARCHModel
                 denominator = (1 - bm.alpha - bm.beta)
             
-            if denominator <= 1e-7: # Non-stationary or near non-stationary
+            if denominator <= 1e-7: 
                 if bm.variance_history is not None and len(bm.variance_history) > 0:
-                    uncond_var = bm.variance_history[-1]
-                    warnings.warn(f"Baseline model params non-stationary. Denom: {denominator:.2e}. Using last conditional var: {uncond_var:.2e}")
-                else: # Should not happen if fitted
-                    uncond_var = 1e-6 
-                    warnings.warn(f"Baseline model params non-stationary. Denom: {denominator:.2e}. Using default var: {uncond_var:.2e}")
+                    uncond_var = bm.variance_history[-1] # Use last known conditional variance
+                    # warnings.warn(f"Baseline model params non-stationary for uncond. var. Denom: {denominator:.2e}. Using last cond var: {uncond_var:.2e}")
+                else: 
+                    uncond_var = 1e-6 # Absolute fallback
+                    # warnings.warn(f"Baseline model params non-stationary and no history. Denom: {denominator:.2e}. Using default var: {uncond_var:.2e}")
             else:
                  uncond_var = bm.omega / denominator
             
