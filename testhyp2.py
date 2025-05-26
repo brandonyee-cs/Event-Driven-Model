@@ -6,7 +6,7 @@ import os
 import sys
 import traceback
 import polars as pl
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
