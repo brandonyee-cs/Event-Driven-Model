@@ -1,54 +1,8 @@
-"""
-Event Processor Module - Unified Volatility Model Implementation
+# src/event_processor.py
 
-Implements the unified volatility model from "Modeling Equilibrium Asset Pricing 
-Around Events with Heterogeneous Beliefs, Dynamic Volatility, and a Two-Risk 
-Uncertainty Framework" by Brandon Yee.
-
-Key components:
-- GJR-GARCH(1,1) baseline volatility estimation
-- Three-phase event-specific volatility adjustments (phi functions)
-- Impact uncertainty measurement
-- Bias parameter evolution
-"""
-
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Tuple, Union
-from datetime import datetime, timedelta
-import warnings
-from scipy import stats
-from arch import arch_model
-from dataclasses import dataclass, field 
-from .config import Config
-
-warnings.filterwarnings('ignore', category=RuntimeWarning)
-warnings.filterwarnings('ignore', category=UserWarning) 
-
-@dataclass
-class VolatilityParameters:
-    """
-    Parameters for the unified volatility model.
-    Stores both GJR-GARCH parameters and event-specific adjustments.
-    """
-    omega: float
-    alpha: float
-    beta: float
-    gamma: float
-    k1: float = 1.3
-    k2: float = 1.5
-    delta_t1: float = 5.0
-    delta_t2: float = 3.0
-    delta_t3: float = 10.0
-    delta: int = 5
-    conditional_volatility_series: Optional[pd.Series] = field(default=None, repr=False)
-    log_likelihood: Optional[float] = None
+# ... (imports and dataclass VolatilityParameters remain the same) ...
 
 class EventProcessor:
-    """
-    Main class for processing event-driven asset pricing data.
-    Implements the unified volatility model: sigma_e(t) = sqrt(h_t) * (1 + phi(t))
-    """
     
     def __init__(self, config: Config):
         self.config = config
@@ -56,16 +10,30 @@ class EventProcessor:
         self.volatility_params: Dict[str, VolatilityParameters] = {}
         
     def _estimate_gjr_garch(self, symbol: str, symbol_price_data_full: pd.DataFrame) -> bool:
+        # Debug: Check incoming data for this specific symbol
+        # print(f"  GARCH estimate for {symbol}: input data rows {len(symbol_price_data_full)}")
+        if 'returns' not in symbol_price_data_full.columns:
+            # print(f"    GARCH {symbol}: 'returns' column missing in input.")
+            return False
+        if symbol_price_data_full['returns'].isnull().all():
+            # print(f"    GARCH {symbol}: All 'returns' are NaN in input.")
+            return False
+            
         returns_decimal = symbol_price_data_full['returns'].dropna()
         
+        # Debug: Check length after dropna
+        # print(f"    GARCH {symbol}: Found {len(returns_decimal)} non-NaN returns. Required: {self.config.lookback_days}")
+
         if len(returns_decimal) < self.config.lookback_days:
-            return False
+            # print(f"    GARCH {symbol}: Not enough non-NaN returns. Skipping GARCH.")
+            return False 
         
         scaled_returns = returns_decimal * 100 
 
         try:
             model = arch_model(scaled_returns, vol='GARCH', p=1, q=1, o=1, dist='normal', rescale=False)
-            res = model.fit(disp='off', show_warning=False, update_freq=0)
+            # Increased iter for convergence, though default is usually fine.
+            res = model.fit(disp='off', show_warning=False, update_freq=0, options={'maxiter': 200}) 
             
             omega, alpha, beta, gamma = res.params.get('omega', self.config.gjr_omega), \
                                         res.params.get('alpha[1]', self.config.gjr_alpha), \
@@ -74,10 +42,12 @@ class EventProcessor:
             loglik = res.loglikelihood if hasattr(res, 'loglikelihood') else None
 
             if alpha + beta + gamma/2 >= 0.9999: 
+                # print(f"    GARCH {symbol}: Non-stationary. Using defaults.")
                 omega, alpha, beta, gamma = self.config.gjr_omega, self.config.gjr_alpha, \
                                             self.config.gjr_beta, self.config.gjr_gamma
                 loglik = None 
         except Exception as e:
+            # print(f"    GARCH {symbol}: Estimation failed: {e}. Using defaults.")
             omega, alpha, beta, gamma = self.config.gjr_omega, self.config.gjr_alpha, \
                                         self.config.gjr_beta, self.config.gjr_gamma
             loglik = None
@@ -89,8 +59,11 @@ class EventProcessor:
             delta_t3=self.config.event_delta_t3, log_likelihood=loglik
         )
         self.volatility_params[symbol] = params_obj
+        # print(f"    GARCH {symbol}: Successfully stored params.")
         return True
 
+    # ... (_get_baseline_volatility, _calculate_phi_function, etc. remain the same as previous version) ...
+    # Make sure they are exactly as in the previous full file I provided.
     def _get_baseline_volatility(self, symbol: str, event_window_price_data: pd.DataFrame) -> pd.Series:
         params = self.volatility_params.get(symbol)
         if params is None: 
@@ -257,26 +230,39 @@ class EventProcessor:
                 print(f"  Estimated GARCH for {i}/{len(unique_symbols)} symbols. Successful so far: {symbols_with_garch_params_count}")
             
             symbol_prices_full = price_data[price_data['symbol'] == symbol_val].copy()
-            if symbol_prices_full.empty: continue
-            if 'returns' not in symbol_prices_full.columns: continue
+            
+            if symbol_prices_full.empty:
+                # print(f"  DEBUG: No price data for symbol {symbol_val} in GARCH loop.")
+                continue
+            if 'returns' not in symbol_prices_full.columns:
+                # print(f"  DEBUG: 'returns' column missing for symbol {symbol_val} in GARCH loop.")
+                continue
                 
             symbol_prices_full = symbol_prices_full.sort_values('date').reset_index(drop=True)
-            symbol_prices_full = self._winsorize_returns(symbol_prices_full)
+            symbol_prices_full = self._winsorize_returns(symbol_prices_full) # Winsorize before GARCH
             
             if self._estimate_gjr_garch(symbol_val, symbol_prices_full):
                 symbols_with_garch_params_count +=1
         
         print(f"Finished GARCH estimations. GARCH parameters stored for {symbols_with_garch_params_count}/{len(unique_symbols)} symbols.")
+        if symbols_with_garch_params_count == 0 and len(unique_symbols) > 0:
+            print("WARNING: No symbols had successful GARCH parameter estimation. Event processing will likely fail.")
+            # You might want to return an empty DataFrame here if GARCH is critical for all subsequent steps
+            # return pd.DataFrame() 
 
         processed_event_count = 0
         for i, symbol_val in enumerate(unique_symbols):
             if i > 0 and i % 100 == 0 :
                 print(f"  Processing events for symbol {i+1}/{len(unique_symbols)}. Events processed: {processed_event_count}")
-            if symbol_val not in self.volatility_params: continue
+            if symbol_val not in self.volatility_params: 
+                # print(f"  DEBUG: Skipping events for {symbol_val}, GARCH params not found.")
+                continue
 
             symbol_event_rows = event_data[event_data['symbol'] == symbol_val]
             symbol_prices_full_hist = price_data[price_data['symbol'] == symbol_val].copy()
-            if symbol_prices_full_hist.empty: continue
+            if symbol_prices_full_hist.empty: 
+                # print(f"  DEBUG: No price data for {symbol_val} in event processing loop.")
+                continue
             
             symbol_prices_full_hist = symbol_prices_full_hist.sort_values('date').reset_index(drop=True)
             symbol_prices_full_hist = self._winsorize_returns(symbol_prices_full_hist)
@@ -295,6 +281,10 @@ class EventProcessor:
             
         final_results_df = pd.concat(results_list, ignore_index=True)
         
+        if final_results_df.empty:
+             print("Warning: Concatenated results DataFrame is empty.")
+             return pd.DataFrame()
+
         print(f"Successfully processed data for {final_results_df['event_date'].nunique()} unique event dates across symbols.")
         print(f"Total event-day observations generated: {len(final_results_df)}")
         return final_results_df
@@ -304,10 +294,12 @@ class EventProcessor:
             df['returns'] = pd.to_numeric(df['returns'], errors='coerce')
             df_clean_returns = df.dropna(subset=['returns'])
 
-            if not df_clean_returns.empty and len(df_clean_returns['returns']) > 1 : # Quantile needs at least 2 points
+            if not df_clean_returns.empty and len(df_clean_returns['returns']) > 1 : 
                 lower_b = df_clean_returns['returns'].quantile(self.config.return_winsorization_lower)
                 upper_b = df_clean_returns['returns'].quantile(self.config.return_winsorization_upper)
                 lower_b = max(lower_b, -self.config.max_daily_return)
                 upper_b = min(upper_b, self.config.max_daily_return)
-                df['returns'] = df['returns'].clip(lower=lower_b, upper=upper_b)
+                # Apply clipping to the original 'returns' column which might have NaNs
+                # This ensures NaNs introduced by coerce are still NaNs, and others are clipped.
+                df.loc[df['returns'].notna(), 'returns'] = df.loc[df['returns'].notna(), 'returns'].clip(lower=lower_b, upper=upper_b)
         return df
