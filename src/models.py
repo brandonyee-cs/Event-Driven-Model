@@ -1,16 +1,18 @@
+# --- START OF FILE models.py ---
 import numpy as np
 import polars as pl
 from sklearn.linear_model import Ridge
 import xgboost as xgb
 from scipy.optimize import minimize
 import warnings
-import pandas as pd # For pd.notna in GARCH/GJR for now
+import pandas as pd # For pd.notna
 from typing import Tuple, List, Dict, Optional, Union
 
 
 pl.Config.set_engine_affinity(engine="streaming")
 
 class TimeSeriesRidge(Ridge):
+    # ... (No changes from previous correct version) ...
     """
     Ridge regression with temporal smoothing penalty.
     The model minimizes: ||y - Xβ||² + α||β||² + λ₂||Dβ||²
@@ -125,6 +127,7 @@ class TimeSeriesRidge(Ridge):
 
 
 class XGBoostDecileModel:
+    # ... (No changes from previous correct version) ...
     def __init__(self, weight=0.5, momentum_feature='momentum_5', n_deciles=10,
                  alpha=0.1, lambda_smooth=0.1, xgb_params=None, ts_ridge_feature_order=None):
         if not 0 <= weight <= 1:
@@ -284,86 +287,94 @@ class XGBoostDecileModel:
 
 class GARCHModel:
     def __init__(self, omega: float = 1e-6, alpha: float = 0.1, beta: float = 0.85):
-        self.omega_init = omega
-        self.alpha_init = alpha
-        self.beta_init = beta
-        self.omega = omega
-        self.alpha = alpha
-        self.beta = beta
+        self.omega_init = max(1e-9, omega) # Ensure init omega is positive
+        self.alpha_init = max(0, alpha)   # Ensure init alpha is non-negative
+        self.beta_init = max(0, beta)    # Ensure init beta is non-negative
+        # Adjust if init params are non-stationary
+        if self.alpha_init + self.beta_init >= 0.9999:
+            current_sum = self.alpha_init + self.beta_init
+            self.alpha_init = (self.alpha_init / current_sum) * 0.9998 if current_sum > 1e-7 else 0.05
+            self.beta_init = (self.beta_init / current_sum) * 0.9998 if current_sum > 1e-7 else 0.90
+
+        self.omega = self.omega_init
+        self.alpha = self.alpha_init
+        self.beta = self.beta_init
+        
         self.is_fitted = False
         self.variance_history = None
         self.residuals_history = None
-        self.sigma2_t = None
+        self.sigma2_t = None 
         self.mean = 0.0
-        self.fit_success = False # ADDED: To track fit success
-        self.fit_message = "Not Attempted" # ADDED: To store fit message
+        self.fit_success = False 
+        self.fit_message = "Not Attempted"
 
     def _check_parameters(self, omega, alpha, beta, context="final"):
         valid = True
-        # Check for NaN or non-numeric before positivity/sum checks
-        if not (isinstance(omega, (int,float)) and pd.notna(omega) and omega > 1e-9): # Allow very small omega for optimizer
-            if context=="final": warnings.warn(f"GARCH omega invalid or too small ({omega}). Resetting to 1e-7.")
+        if not (isinstance(omega, (int,float)) and pd.notna(omega) and omega > 1e-9):
+            if context=="final": warnings.warn(f"GARCH omega invalid ({omega}). Correcting.")
             omega = 1e-7
             valid = False
-        if not (isinstance(alpha, (int,float)) and pd.notna(alpha) and alpha >= 0): # Alpha can be 0
-            if context=="final": warnings.warn(f"GARCH alpha invalid or negative ({alpha}). Resetting to 0.01.")
+        if not (isinstance(alpha, (int,float)) and pd.notna(alpha) and alpha >= 0):
+            if context=="final": warnings.warn(f"GARCH alpha invalid ({alpha}). Correcting.")
             alpha = 0.01
             valid = False
-        if not (isinstance(beta, (int,float)) and pd.notna(beta) and beta >= 0): # Beta can be 0
-            if context=="final": warnings.warn(f"GARCH beta invalid or negative ({beta}). Resetting to 0.01.")
+        if not (isinstance(beta, (int,float)) and pd.notna(beta) and beta >= 0):
+            if context=="final": warnings.warn(f"GARCH beta invalid ({beta}). Correcting.")
             beta = 0.01
             valid = False
         
-        # Stationarity: alpha + beta < 1
-        if alpha + beta >= 0.99999: # Use a slightly less than 1 for numerical stability
-            if context=="final": warnings.warn(f"GARCH alpha+beta ({alpha+beta:.4f}) violates stationarity. Adjusting.")
-            # Heuristic: scale down to meet stationarity, preserving ratio if possible
+        if alpha + beta >= 0.99999:
+            if context=="final": warnings.warn(f"GARCH alpha+beta ({alpha+beta:.4f}) too high. Adjusting for stationarity.")
             current_sum = alpha + beta
-            target_sum = 0.9998 # Target slightly less than 1
-            if current_sum > 1e-7: # Avoid division by zero if both were tiny
-                alpha = (alpha / current_sum) * target_sum
-                beta = (beta / current_sum) * target_sum
-            else: # If both were effectively zero or negative and got reset
-                alpha = 0.05 # Sensible defaults that are stationary
-                beta = 0.9
+            target_sum = 0.9998 
+            if current_sum > 1e-7:
+                alpha_new = (alpha / current_sum) * target_sum
+                beta_new = (beta / current_sum) * target_sum
+                # Ensure individual params remain non-negative after scaling
+                alpha = max(0, alpha_new)
+                beta = max(0, beta_new)
+                # If sum is still off due to flooring at 0, adjust one (e.g. beta)
+                if alpha + beta >= 0.99999 :
+                    beta = target_sum - alpha if target_sum > alpha else 0.0
+            else: 
+                alpha = 0.05 
+                beta = 0.90
             valid = False
         return omega, alpha, beta, valid
 
 
     def _neg_log_likelihood(self, params, returns_centered):
         omega, alpha, beta = params
-        # Stricter check for optimizer exploration, ensures parameters are valid for GARCH
         if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and alpha + beta < 0.99999):
             return np.inf
 
         T = len(returns_centered)
         sigma2 = np.zeros(T)
+        var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7
         
-        # Initial variance: robust calculation
-        var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7 # Empirical variance, fallback if T=1
-        
-        if (1 - alpha - beta) > 1e-7: # Check for valid denominator for unconditional variance
+        if (1 - alpha - beta) > 1e-7:
             sigma2_0_uncond = omega / (1 - alpha - beta)
-            # Use the max of unconditional, empirical, and a floor
             sigma2[0] = max(1e-8, sigma2_0_uncond, var_ret_centered)
-        else: # If close to non-stationarity or non-stationary, use empirical
+        else:
             sigma2[0] = max(1e-8, var_ret_centered)
-        
-        if sigma2[0] <= 1e-9 : sigma2[0] = 1e-8 # Final safety net if var_ret_centered is also zero/negative
+        if sigma2[0] <= 1e-9 : sigma2[0] = 1e-8
 
         for t in range(1, T):
             sigma2[t] = omega + alpha * returns_centered[t-1]**2 + beta * sigma2[t-1]
-            sigma2[t] = max(1e-8, sigma2[t]) # Floor variance to prevent log(0) or division by zero
+            sigma2[t] = max(1e-8, sigma2[t]) 
 
-        if np.any(sigma2 <= 1e-9): return np.inf # Ensure positive variance for log
-        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns_centered**2 / sigma2)
+        if np.any(sigma2 <= 1e-9) or np.any(np.isnan(sigma2)) or np.any(np.isinf(sigma2)): return np.inf
         
+        log_terms = np.log(sigma2) + returns_centered**2 / sigma2
+        if np.any(np.isnan(log_terms)) or np.any(np.isinf(log_terms)): return np.inf
+
+        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + log_terms)
         return -log_likelihood if np.isfinite(log_likelihood) else np.inf
     
     def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
             method: str = 'L-BFGS-B', 
             max_iter: int = 200) -> 'GARCHModel': 
-        self.fit_success = False # Reset for current fit attempt
+        self.fit_success = False 
         self.fit_message = "Fit not successful"
 
         if isinstance(returns, pl.Series): returns_np = returns.to_numpy()
@@ -374,15 +385,15 @@ class GARCHModel:
         
         if len(returns_np) < 20:
             self.fit_message = f"GARCH: Not enough data points ({len(returns_np)})."
-            warnings.warn(self.fit_message + " Using initial parameters.")
-            self._use_initial_params_for_history(returns_np) # Fallback for insufficient data
+            # warnings.warn(self.fit_message + " Using initial parameters.")
+            self._use_initial_params_for_history(returns_np)
             return self
 
         std_dev = np.std(returns_np)
         if std_dev < 1e-7: 
             self.fit_message = "GARCH: Return series has very low variance."
-            warnings.warn(self.fit_message + " Using simplified variance.")
-            self._handle_low_variance_series(returns_np, std_dev) # Fallback for low variance
+            # warnings.warn(self.fit_message + " Using simplified variance.")
+            self._handle_low_variance_series(returns_np, std_dev) 
             return self
 
         clip_threshold = 7 * std_dev 
@@ -391,81 +402,74 @@ class GARCHModel:
         returns_centered = returns_np - self.mean
         if np.std(returns_centered) < 1e-7: 
             self.fit_message = "GARCH: Demeaned returns have very low variance."
-            warnings.warn(self.fit_message + " Using simplified variance.")
+            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series(returns_np, np.std(returns_centered))
             return self
 
-
-        initial_params = [self.omega_init, self.alpha_init, self.beta_init]
-        # Bounds: omega > 0, 0 <= alpha < 1, 0 <= beta < 1. Sum constraint is handled in likelihood.
-        bounds = [(1e-8, 0.1), (1e-8, 0.998), (1e-8, 0.998)] # omega, alpha, beta bounds
-
-        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9} # ftol for stricter convergence
+        # Use checked initial parameters
+        omega_i, alpha_i, beta_i, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init, context="initial_guess")
+        initial_params = [omega_i, alpha_i, beta_i]
         
-        methods_to_try = [method, 'SLSQP'] # L-BFGS-B often good for GARCH, SLSQP as robust fallback
-        final_result_obj = None # To store the result object for message
+        bounds = [(1e-8, 0.1), (0, 0.998), (0, 0.998)] # omega, alpha, beta bounds (alpha/beta can be 0)
 
+        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9, 'eps': 1e-8} # Added eps for L-BFGS-B
+        
+        methods_to_try = [method, 'SLSQP'] 
+        final_result_obj = None 
+        
         for opt_method in methods_to_try:
             try:
-                current_bounds = bounds if opt_method != 'Nelder-Mead' else None # Nelder-Mead doesn't use bounds
+                current_bounds = bounds if opt_method != 'Nelder-Mead' else None
                 result = minimize(self._neg_log_likelihood, initial_params, args=(returns_centered,),
                                   method=opt_method, bounds=current_bounds, options=optimizer_options)
                 
-                final_result_obj = result # Store the result of the last attempted method
-
+                final_result_obj = result 
                 if result.success:
                     omega_fit, alpha_fit, beta_fit = result.x
-                    # Check parameters again after fit, especially stationarity
                     _, _, _, params_valid = self._check_parameters(omega_fit, alpha_fit, beta_fit, context="fit_check")
-                    if params_valid and (alpha_fit + beta_fit < 0.9999): # Ensure stationarity
+                    if params_valid and (alpha_fit + beta_fit < 0.9999): 
                         self.omega, self.alpha, self.beta = omega_fit, alpha_fit, beta_fit
                         self.fit_success = True
                         self.fit_message = f"Optimization successful with {opt_method}."
-                        break # Exit loop on successful fit
-                # If not successful, message will be from the last attempt below
-            except Exception as e: # Catches errors within minimize too
+                        break 
+                self.fit_message = result.message # Store message from optimizer
+            except Exception as e: 
                 self.fit_message = f"Exception during {opt_method}: {str(e)}"
-                final_result_obj = None # No result object if exception
-                continue # Try next method
+                final_result_obj = None
+                continue 
         
         if not self.fit_success:
-            # Use message from the last result object if available
             msg_detail = final_result_obj.message if final_result_obj and hasattr(final_result_obj, 'message') else self.fit_message
-            warnings.warn(f"GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
-            # Fallback to robust initial parameters
-            self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
+            # warnings.warn(f"GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
+            self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init) # Re-check defaults
 
-        self._finalize_fit(returns_centered) # Calculate variance history with final/fallback params
+        self._finalize_fit(returns_centered) 
         return self
 
     def _handle_low_variance_series(self, returns_np_original, actual_std_dev):
-        """Helper to set history for low/zero variance series."""
         self.mean = np.mean(returns_np_original)
-        var_to_use = max(1e-8, actual_std_dev**2 if pd.notna(actual_std_dev) else 1e-8)
+        var_to_use = max(1e-8, actual_std_dev**2 if pd.notna(actual_std_dev) and actual_std_dev > 0 else 1e-8)
         self.variance_history = np.full(len(returns_np_original), var_to_use)
         self.residuals_history = returns_np_original - self.mean
         self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-7
-        self.is_fitted = True; self.fit_success = True # Mark as "fitted" with this simplified approach
+        self.is_fitted = True; self.fit_success = True 
         
-        # Ensure omega, alpha, beta are consistent with this simplified variance
         self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
         if (1-self.alpha-self.beta) > 1e-7 : 
             self.omega = max(1e-8, var_to_use * (1 - self.alpha - self.beta))
-        else: # If alpha+beta too high from init, omega must be small
+        else: 
             self.omega = 1e-7 
 
 
     def _use_initial_params_for_history(self, returns_np):
-        """Helper to set history when using initial parameters (e.g. insufficient data)."""
         self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init)
         self.mean = np.mean(returns_np) if len(returns_np) > 0 else 0.0
         returns_centered = returns_np - self.mean
-        self._finalize_fit(returns_centered, use_empirical_var_for_sigma2_0=True) # Force empirical for this fallback
+        self._finalize_fit(returns_centered, use_empirical_var_for_sigma2_0=True) 
 
     def _finalize_fit(self, returns_centered, use_empirical_var_for_sigma2_0=False):
-        """Calculates variance history based on current parameters."""
         T = len(returns_centered)
-        if T == 0: # Should be caught by len(returns_np) < 20 earlier
+        if T == 0: 
             self.variance_history = np.array([])
             self.residuals_history = np.array([])
             uncond_denom = (1-self.alpha-self.beta)
@@ -475,17 +479,17 @@ class GARCHModel:
 
         sigma2 = np.zeros(T)
         var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7
+        if var_ret_centered <= 1e-9: var_ret_centered = 1e-8 # Ensure it's positive
 
-        # Determine initial sigma2[0]
-        if use_empirical_var_for_sigma2_0 or (1 - self.alpha - self.beta) <= 1e-7: # If fallback or non-stationary
+        if use_empirical_var_for_sigma2_0 or (1 - self.alpha - self.beta) <= 1e-7: 
              sigma2[0] = max(1e-8, var_ret_centered)
-        else: # Use unconditional variance if stationary and not forced empirical
+        else: 
              sigma2[0] = max(1e-8, self.omega / (1 - self.alpha - self.beta))
-        if sigma2[0] <= 1e-9 : sigma2[0] = 1e-8 # Final safety floor
+        if sigma2[0] <= 1e-9 : sigma2[0] = 1e-8 
 
         for t in range(1, T):
             sigma2[t] = self.omega + self.alpha * returns_centered[t-1]**2 + self.beta * sigma2[t-1]
-            sigma2[t] = max(1e-8, sigma2[t]) # Floor variance
+            sigma2[t] = max(1e-8, sigma2[t]) 
         
         self.variance_history = sigma2
         self.residuals_history = returns_centered
@@ -493,95 +497,77 @@ class GARCHModel:
         self.is_fitted = True
     
     def predict(self, n_steps: int = 1) -> np.ndarray:
-        if not self.is_fitted: raise RuntimeError("Model must be fitted before prediction")
+        if not self.is_fitted: raise RuntimeError("Model must be fitted")
         if self.residuals_history is None or len(self.residuals_history) == 0 or self.sigma2_t is None:
-            # This case should ideally be handled by _finalize_fit ensuring sigma2_t is set
-            warnings.warn("GARCH model has insufficient history for prediction. Returning unconditional variance.")
             uncond_var_denom = (1 - self.alpha - self.beta)
-            uncond_var = self.omega / uncond_var_denom if uncond_var_denom > 1e-7 else 1e-7 # Default if non-stationary
+            uncond_var = self.omega / uncond_var_denom if uncond_var_denom > 1e-7 else 1e-7
             return np.full(n_steps, max(1e-8, uncond_var))
 
         forecasts = np.zeros(n_steps)
         last_resid_sq = self.residuals_history[-1]**2
         current_sigma2 = self.sigma2_t
-        
         for h in range(n_steps):
-            if h == 0:
-                forecasts[h] = self.omega + self.alpha * last_resid_sq + self.beta * current_sigma2
-            else:
-                # For multi-step, E[resid^2_t+h-1] = forecasts[h-1] as E[z^2]=1 and z is unpredictable
-                forecasts[h] = self.omega + (self.alpha + self.beta) * forecasts[h-1]
-            forecasts[h] = max(1e-8, forecasts[h]) # Ensure positivity
-        
+            forecasts[h] = self.omega + self.alpha * last_resid_sq + self.beta * current_sigma2 if h == 0 else \
+                           self.omega + (self.alpha + self.beta) * forecasts[h-1]
+            forecasts[h] = max(1e-8, forecasts[h])
         return forecasts
-    
+
     def conditional_volatility(self) -> np.ndarray:
-        if not self.is_fitted or self.variance_history is None: raise RuntimeError("Model must be fitted before accessing volatility")
+        if not self.is_fitted or self.variance_history is None: raise RuntimeError("Model not fitted")
         return np.sqrt(self.variance_history)
-    
+
     def volatility_innovations(self) -> np.ndarray:
-        if not self.is_fitted or self.variance_history is None or len(self.variance_history) <= 1: 
-            return np.array([]) # Not enough data
-        
+        if not self.is_fitted or self.variance_history is None or len(self.variance_history) <= 1: return np.array([])
         T = len(self.variance_history)
-        innovations = np.zeros(T-1) # Innovations are for t=1 to T-1
-        
-        for t in range(1, T): # Start from the second observation
-            # Expected variance for period t, using info from t-1
+        innovations = np.zeros(T-1) 
+        for t in range(1, T): 
             expected_var_t = self.omega + self.alpha * self.residuals_history[t-1]**2 + self.beta * self.variance_history[t-1]
-            realized_var_t = self.variance_history[t] # Realized (fitted) variance for period t
+            realized_var_t = self.variance_history[t] 
             innovations[t-1] = realized_var_t - expected_var_t
-        
-        # Add small noise if innovations are all zero or have tiny variance (for numerical stability in regressions)
         if len(innovations) > 0 and (np.allclose(innovations,0, atol=1e-9) or np.var(innovations) < 1e-12):
-            # warnings.warn("GARCH Volatility innovations had near-zero variance. Adding small random noise.")
-            innovations = innovations + np.random.normal(0, 1e-7, size=len(innovations)) # Even smaller noise
-        
+            innovations = innovations + np.random.normal(0, 1e-7, size=len(innovations)) 
         return innovations
 
 
 class GJRGARCHModel(GARCHModel):
     def __init__(self, omega: float = 1e-6, alpha: float = 0.08, beta: float = 0.85, gamma: float = 0.05):
-        super().__init__(omega, alpha, beta) # Calls GARCHModel's init
-        self.gamma_init = gamma 
-        self.gamma = gamma
-        # self.fit_success and self.fit_message will be inherited and reset in GJR's fit
+        super().__init__(omega, alpha, beta)
+        self.gamma_init = max(0, gamma) # Ensure init gamma is non-negative
+        self.gamma = self.gamma_init
+        # self.fit_success and self.fit_message inherited, will be reset in GJR's fit
 
     def _check_gjr_parameters(self, omega, alpha, beta, gamma, context="final"):
-        omega, alpha, beta, garch_valid = self._check_parameters(omega, alpha, beta, context) # Validate GARCH part first
-        valid = garch_valid # Start with GARCH validity
+        omega, alpha, beta, garch_valid = self._check_parameters(omega, alpha, beta, context) 
+        valid = garch_valid
 
-        if not (isinstance(gamma, (int,float)) and pd.notna(gamma) and gamma >= 0): # Gamma can be 0
-            if context=="final": warnings.warn(f"GJR gamma invalid or negative ({gamma}). Resetting to 0.01.")
-            gamma = 0.01 # Small positive default if invalid
+        if not (isinstance(gamma, (int,float)) and pd.notna(gamma) and gamma >= 0): 
+            if context=="final": warnings.warn(f"GJR gamma invalid ({gamma}). Correcting.")
+            gamma = 0.01 
             valid = False
         
-        # Stationarity for GJR: alpha + beta + 0.5*gamma < 1
         stationarity_val = alpha + beta + 0.5 * gamma
         if stationarity_val >= 0.99999:
-            if context=="final": warnings.warn(f"GJR sum condition ({stationarity_val:.4f}) violates stationarity. Adjusting.")
-            # Heuristic to adjust:
-            # If alpha + beta itself is already too high, gamma must be near zero
+            if context=="final": warnings.warn(f"GJR sum condition ({stationarity_val:.4f}) too high. Adjusting for stationarity.")
             target_sum_overall = 0.9998
-            if alpha + beta >= target_sum_overall:
-                gamma = max(0, gamma * 0.1) # Drastically reduce gamma if alpha+beta is the issue
-                # Re-check GARCH part for alpha, beta with new (possibly zero) gamma contribution
+            if alpha + beta >= target_sum_overall : 
+                gamma = max(0, gamma * 0.01) # Drastically reduce gamma if alpha+beta is the issue
                 current_sum_alpha_beta = alpha + beta
                 required_sum_alpha_beta_for_gjr = target_sum_overall - 0.5 * gamma
                 if current_sum_alpha_beta > required_sum_alpha_beta_for_gjr and current_sum_alpha_beta > 1e-7:
-                    alpha = (alpha / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
-                    beta = (beta / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
-                elif current_sum_alpha_beta <= 1e-7 : # if alpha, beta were effectively zero
-                     alpha = 0.05; beta = 0.85 # reset alpha, beta too
-            else: # alpha+beta is fine, gamma is pushing it over
-                # Ensure gamma is non-negative after adjustment
+                    alpha_new = (alpha / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
+                    beta_new = (beta / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
+                    alpha = max(0, alpha_new); beta = max(0, beta_new)
+                    if alpha + beta + 0.5 * gamma >= 0.99999: # Final attempt to fix
+                        beta = target_sum_overall - alpha - 0.5*gamma if (target_sum_overall - 0.5*gamma) > alpha else 0.0
+                elif current_sum_alpha_beta <= 1e-7 : 
+                     alpha = 0.03; beta = 0.80; gamma = 0.02 # Reset all to typical GJR stationary
+            else: 
                 gamma = max(0, (target_sum_overall - (alpha + beta)) * 2 * 0.99 ) 
             valid = False
         return omega, alpha, beta, gamma, valid
 
-    def _neg_log_likelihood(self, params, returns_centered): # Override for GJR
+    def _neg_log_likelihood(self, params, returns_centered): 
         omega, alpha, beta, gamma = params
-        # Stricter check for optimizer exploration
         if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and gamma >= 0 and \
                 alpha + beta + 0.5 * gamma < 0.99999):
             return np.inf
@@ -604,8 +590,11 @@ class GJRGARCHModel(GARCHModel):
                          beta * sigma2[t-1] + gamma * I_tm1 * returns_centered[t-1]**2)
             sigma2[t] = max(1e-8, sigma2[t])
 
-        if np.any(sigma2 <= 1e-9): return np.inf
-        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + np.log(sigma2) + returns_centered**2 / sigma2)
+        if np.any(sigma2 <= 1e-9) or np.any(np.isnan(sigma2)) or np.any(np.isinf(sigma2)): return np.inf
+        log_terms = np.log(sigma2) + returns_centered**2 / sigma2
+        if np.any(np.isnan(log_terms)) or np.any(np.isinf(log_terms)): return np.inf
+        
+        log_likelihood = -0.5 * np.sum(np.log(2 * np.pi) + log_terms)
         return -log_likelihood if np.isfinite(log_likelihood) else np.inf
 
     def fit(self, returns: Union[np.ndarray, pl.Series, pl.DataFrame], 
@@ -621,14 +610,14 @@ class GJRGARCHModel(GARCHModel):
         
         if len(returns_np) < 20:
             self.fit_message = f"GJR: Not enough data points ({len(returns_np)})."
-            warnings.warn(self.fit_message + " Using initial parameters.")
+            # warnings.warn(self.fit_message + " Using initial parameters.")
             self._use_initial_params_for_history_gjr(returns_np)
             return self
 
         std_dev = np.std(returns_np)
         if std_dev < 1e-7:
             self.fit_message = "GJR: Return series has very low variance."
-            warnings.warn(self.fit_message + " Using simplified variance.")
+            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series_gjr(returns_np, std_dev)
             return self
             
@@ -638,14 +627,16 @@ class GJRGARCHModel(GARCHModel):
         returns_centered = returns_np - self.mean
         if np.std(returns_centered) < 1e-7:
             self.fit_message = "GJR: Demeaned returns have very low variance."
-            warnings.warn(self.fit_message + " Using simplified variance.")
+            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series_gjr(returns_np, np.std(returns_centered))
             return self
 
-        initial_params = [self.omega_init, self.alpha_init, self.beta_init, self.gamma_init]
-        bounds = [(1e-8, 0.1), (1e-8, 0.998), (1e-8, 0.998), (0, 0.998)] # omega, alpha, beta, gamma
+        omega_i, alpha_i, beta_i, gamma_i, _ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init, context="initial_guess")
+        initial_params = [omega_i, alpha_i, beta_i, gamma_i]
+        
+        bounds = [(1e-8, 0.1), (0, 0.998), (0, 0.998), (0, 0.998)] 
 
-        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9}
+        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9, 'eps': 1e-8}
         methods_to_try = [method, 'SLSQP'] 
         final_result_obj = None
         
@@ -670,16 +661,15 @@ class GJRGARCHModel(GARCHModel):
         
         if not self.fit_success:
             msg_detail = final_result_obj.message if final_result_obj and hasattr(final_result_obj, 'message') else self.fit_message
-            warnings.warn(f"GJR-GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
+            # warnings.warn(f"GJR-GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
             self.omega,self.alpha,self.beta,self.gamma,_ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
 
         self._finalize_fit_gjr(returns_centered) 
         return self
 
     def _handle_low_variance_series_gjr(self, returns_np_original, actual_std_dev):
-        """Helper for GJR low variance series."""
         self.mean = np.mean(returns_np_original)
-        var_to_use = max(1e-8, actual_std_dev**2 if pd.notna(actual_std_dev) else 1e-8)
+        var_to_use = max(1e-8, actual_std_dev**2 if pd.notna(actual_std_dev) and actual_std_dev > 0 else 1e-8)
         self.variance_history = np.full(len(returns_np_original), var_to_use)
         self.residuals_history = returns_np_original - self.mean
         self.sigma2_t = self.variance_history[-1] if len(self.variance_history) > 0 else 1e-7
@@ -691,14 +681,12 @@ class GJRGARCHModel(GARCHModel):
         else: self.omega = 1e-7
 
     def _use_initial_params_for_history_gjr(self, returns_np):
-        """Helper for GJR when using initial params (e.g. insufficient data)."""
         self.omega,self.alpha,self.beta,self.gamma,_ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
         self.mean = np.mean(returns_np) if len(returns_np) > 0 else 0.0
         returns_centered = returns_np - self.mean
         self._finalize_fit_gjr(returns_centered, use_empirical_var_for_sigma2_0=True)
 
     def _finalize_fit_gjr(self, returns_centered, use_empirical_var_for_sigma2_0=False):
-        """Calculates GJR variance history based on current parameters."""
         T = len(returns_centered)
         if T == 0:
             self.variance_history = np.array([])
@@ -710,6 +698,7 @@ class GJRGARCHModel(GARCHModel):
 
         sigma2 = np.zeros(T)
         var_ret_centered = np.var(returns_centered) if T > 1 else 1e-7
+        if var_ret_centered <= 1e-9: var_ret_centered = 1e-8
         uncond_denom = (1 - self.alpha - self.beta - 0.5 * self.gamma)
 
         if use_empirical_var_for_sigma2_0 or uncond_denom <= 1e-7:
@@ -747,7 +736,6 @@ class GJRGARCHModel(GARCHModel):
                 forecasts[h] = self.omega + self.alpha * last_resid_sq + \
                                self.beta * current_sigma2 + self.gamma * I_last * last_resid_sq
             else: 
-                # E[I*resid^2] approx 0.5 * E[resid^2] = 0.5 * forecast[h-1] for multi-step
                 forecasts[h] = self.omega + (self.alpha + self.beta + 0.5 * self.gamma) * forecasts[h-1]
             forecasts[h] = max(1e-8, forecasts[h])
         return forecasts
@@ -764,7 +752,6 @@ class GJRGARCHModel(GARCHModel):
             realized_var_t = self.variance_history[t]
             innovations[t-1] = realized_var_t - expected_var_t
         if len(innovations) > 0 and (np.allclose(innovations,0, atol=1e-9) or np.var(innovations) < 1e-12):
-            # warnings.warn("GJR Volatility innovations had near-zero variance. Adding small random noise.")
             innovations = innovations + np.random.normal(0, 1e-7, size=len(innovations))
         return innovations
 
@@ -776,28 +763,35 @@ class ThreePhaseVolatilityModel:
         self.baseline_model = baseline_model
         self.k1 = k1
         self.k2 = k2
-        self.delta_t1 = delta_t1
-        self.delta_t2 = delta_t2
-        self.delta_t3 = delta_t3
+        self.delta_t1 = max(1e-3, delta_t1) # Ensure positive delta
+        self.delta_t2 = max(1e-3, delta_t2)
+        self.delta_t3 = max(1e-3, delta_t3)
         self.delta = delta
         
         if k1 <= 1: raise ValueError("k1 must be greater than 1")
         if k2 <= 1: raise ValueError("k2 must be greater than 1")
     
-    def phi1(self, t: int, t_event: int) -> float:
+    def phi1(self, t: float, t_event: float) -> float: # t can be float
         return (self.k1 - 1) * np.exp(-((t - t_event)**2) / (2 * self.delta_t1**2))
     
-    def phi2(self, t: int, t_event: int) -> float:
+    def phi2(self, t: float, t_event: float) -> float:
         time_diff = t - t_event
+        # Ensure delta_t2 is positive to prevent division by zero or issues with exp
         if self.delta_t2 <= 1e-6 : return (self.k2 - 1) if time_diff > 0 else 0.0 
-        return (self.k2 - 1) * (1 - np.exp(-time_diff / self.delta_t2))
+        # Prevent overflow if time_diff / self.delta_t2 is very large negative
+        exp_arg = -time_diff / self.delta_t2
+        if exp_arg < -700: # np.exp(-709) is approx 0
+            return self.k2 -1 
+        return (self.k2 - 1) * (1 - np.exp(exp_arg))
     
-    def phi3(self, t: int, t_event: int) -> float:
+    def phi3(self, t: float, t_event: float) -> float:
         time_diff = t - (t_event + self.delta)
         if self.delta_t3 <= 1e-6: return 0.0 
-        return (self.k2 - 1) * np.exp(-time_diff / self.delta_t3)
+        exp_arg = -time_diff / self.delta_t3
+        if exp_arg < -700: return 0.0
+        return (self.k2 - 1) * np.exp(exp_arg)
     
-    def calculate_volatility(self, t: int, t_event: int, sigma_e0: float) -> float:
+    def calculate_volatility(self, t: float, t_event: float, sigma_e0: float) -> float:
         if sigma_e0 < 1e-8: sigma_e0 = 1e-8 
         if t <= t_event:
             phi = self.phi1(t, t_event)
@@ -811,13 +805,15 @@ class ThreePhaseVolatilityModel:
                                    days_to_event: Union[List[int], np.ndarray], 
                                    baseline_conditional_vol_series: Optional[np.ndarray] = None) -> np.ndarray:
         if not isinstance(days_to_event, np.ndarray):
-            days_to_event = np.array(days_to_event, dtype=float) 
-        
+            days_to_event_np = np.array(days_to_event, dtype=float) 
+        else:
+            days_to_event_np = days_to_event.astype(float)
+
         if baseline_conditional_vol_series is not None:
-            if len(baseline_conditional_vol_series) != len(days_to_event):
+            if len(baseline_conditional_vol_series) != len(days_to_event_np):
                  raise ValueError(
                      f"Length of baseline_conditional_vol_series ({len(baseline_conditional_vol_series)}) "
-                     f"must match days_to_event ({len(days_to_event)}). "
+                     f"must match days_to_event ({len(days_to_event_np)}). "
                      "Alignment error in calling function."
                  )
             sigma_e0_series = np.maximum(baseline_conditional_vol_series, 1e-8)
@@ -831,21 +827,16 @@ class ThreePhaseVolatilityModel:
             else: 
                 denominator = (1 - bm.alpha - bm.beta)
             
-            if denominator <= 1e-7: 
-                if bm.variance_history is not None and len(bm.variance_history) > 0 and bm.variance_history[-1] > 1e-8 : 
-                    uncond_var = bm.variance_history[-1] 
-                else: 
-                    uncond_var = 1e-7 
-            else:
-                 uncond_var = bm.omega / denominator
+            uncond_var = 1e-7 # Default
+            if denominator > 1e-7: 
+                uncond_var = bm.omega / denominator
+            elif bm.variance_history is not None and len(bm.variance_history) > 0 and bm.variance_history[-1] > 1e-8 : 
+                uncond_var = bm.variance_history[-1] 
             
             sigma_e0_val = np.sqrt(max(uncond_var, 1e-8)) 
-            sigma_e0_series = np.full_like(days_to_event, sigma_e0_val, dtype=float)
+            sigma_e0_series = np.full_like(days_to_event_np, sigma_e0_val, dtype=float)
 
-        volatility_series = np.zeros_like(days_to_event, dtype=float)
-        t_event = 0.0 
-        
-        for i, t_rel in enumerate(days_to_event): 
-            volatility_series[i] = self.calculate_volatility(float(t_rel), t_event, sigma_e0_series[i])
+        volatility_series = np.array([self.calculate_volatility(t_rel, 0.0, sigma_e0_series[i]) 
+                                      for i, t_rel in enumerate(days_to_event_np)], dtype=float)
         
         return volatility_series
