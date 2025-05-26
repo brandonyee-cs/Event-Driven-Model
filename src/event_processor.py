@@ -248,7 +248,7 @@ class EventDataLoader:
                 try:
                     scan = pl.scan_parquet(stock_path)
                     # --- Standardization (Lazy) ---
-                    original_columns = list(scan.schema.keys())
+                    original_columns = list(scan.collect_schema().names()) # Use collect_schema for safety
                     col_map_lower = {col.lower(): col for col in original_columns}
                     standard_names = {  # Keep consistent
                         'date': ['date', 'trade_date', 'trading_date', 'tradedate', 'dt'],
@@ -278,8 +278,10 @@ class EventDataLoader:
                     if rename_dict: scan = scan.rename(rename_dict)
 
                     # --- Lazy Type Conversion (Corrected) ---
-                    date_dtype = scan.schema.get('date')
-                    ticker_dtype = scan.schema.get('ticker')
+                    current_schema = scan.collect_schema()
+                    date_dtype = current_schema.get('date')
+                    ticker_dtype = current_schema.get('ticker')
+
                     if date_dtype is None or ticker_dtype is None:
                          # print(f"    Warning: 'date' or 'ticker' column missing in {stock_path} schema after selection/rename. Skipping.")
                          continue
@@ -766,22 +768,43 @@ class EventAnalysis:
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
                 # print(f"Random split: Train {X_train.shape[0]}, Test {X_test.shape[0]}")
 
-            tsridge_model = TimeSeriesRidge(alpha=0.1, lambda2=0.5, feature_order=feature_names) # Pass feature_names for order
-            tsridge_model.fit(self.data.filter(pl.col('future_ret').is_not_null()).select(feature_names)[train_indices_in_X,:], 
-                              pl.Series(y_train))
+            # Create Polars DataFrames for fitting, as models expect them
+            # Need to ensure indices align if using time split
+            # If X_train, X_test are NumPy arrays from a split, we need to convert them back to Polars DF
+            # with correct feature names for the model's .fit() method.
+
+            # Get the Polars DataFrame corresponding to X_train and X_test
+            # This assumes that X and y were derived from self.data.filter(pl.col('future_ret').is_not_null())
+            # and that train_indices_in_X / test_indices_in_X are indices into THAT filtered, aligned X/y.
+            
+            data_for_models = self.data.filter(pl.col('future_ret').is_not_null())
+            if time_split_column in self.data.columns and len(dates_for_split) == X.shape[0]:
+                # Use the time-split indices to slice the Polars DataFrame
+                X_train_pl = data_for_models[train_indices_in_X].select(feature_names)
+                y_train_pl = data_for_models[train_indices_in_X].get_column('future_ret')
+            else: # Random split case, less direct to get Polars slices without original indices
+                  # For simplicity in this case, we might need to pass NumPy arrays if models supported it,
+                  # or reconstruct Polars DFs. TimeSeriesRidge expects Polars DF.
+                  # If random split, X_train, y_train (NumPy) are used.
+                  # For models expecting Polars DF:
+                  X_train_pl = pl.DataFrame(X_train, schema=feature_names)
+                  y_train_pl = pl.Series(y_train)
+
+
+            tsridge_model = TimeSeriesRidge(alpha=0.1, lambda2=0.5, feature_order=feature_names) 
+            tsridge_model.fit(X_train_pl, y_train_pl)
             self.models['TimeSeriesRidge'] = {
-                'model': tsridge_model, 'X_train': X_train, 'y_train': y_train,
+                'model': tsridge_model, 'X_train': X_train, 'y_train': y_train, # Keep NumPy for eval
                 'X_test': X_test, 'y_test': y_test, 'feature_names': feature_names
             }
-            xgb_params = {
+            xgb_params_config = {
                 'n_estimators': 100, 'max_depth': 5, 'learning_rate': 0.1,
                 'objective': 'reg:squarederror', 'random_state': 42
             }
-            xgb_model_instance = XGBoostDecileModel(weight=0.7, xgb_params=xgb_params, ts_ridge_feature_order=feature_names)
-            xgb_model_instance.fit(self.data.filter(pl.col('future_ret').is_not_null()).select(feature_names)[train_indices_in_X,:], 
-                                   pl.Series(y_train))
+            xgb_model_instance = XGBoostDecileModel(weight=0.7, xgb_params=xgb_params_config, ts_ridge_feature_order=feature_names)
+            xgb_model_instance.fit(X_train_pl, y_train_pl)
             self.models['XGBoostDecile'] = {
-                'model': xgb_model_instance, 'X_train': X_train, 'y_train': y_train,
+                'model': xgb_model_instance, 'X_train': X_train, 'y_train': y_train, # Keep NumPy for eval
                 'X_test': X_test, 'y_test': y_test, 'feature_names': feature_names
             }
             # print(f"Successfully trained {len(self.models)} models.")
@@ -803,13 +826,6 @@ class EventAnalysis:
                 X_test_np = model_info['X_test'] # This is already NumPy
                 y_test = model_info['y_test']
                 feature_names = model_info['feature_names']
-
-                # For prediction, models expect Polars DF. Need to convert X_test_np back or adapt.
-                # Easiest is to get the Polars test DF slice.
-                # This requires careful index handling from the split.
-                # Assuming X_test was derived from self.data, we need the corresponding Polars slice.
-                # For simplicity, if X_test is small, convert to Polars DF for predict.
-                # Otherwise, this part needs robust index tracking from train_test_split.
                 
                 # Create a Polars DataFrame from X_test_np for prediction
                 X_test_pl = pl.DataFrame(X_test_np, schema=feature_names)
@@ -894,22 +910,19 @@ class EventAnalysis:
             if event_data_pl.is_empty(): # print(f"Error: No data for event ID '{event_id}'."); 
                 return
 
-            # Get features for this event (Polars DF)
-            # Ensure only feature columns used in training are selected
             feature_names_fitted = self.models[model_name]['feature_names']
             X_event_pl = event_data_pl.select(feature_names_fitted)
             
-            # Target 'y' from original data, not from get_features_target for plotting all points
-            y_event_actual = event_data_pl.get_column('future_ret') # This will have NaNs for trailing window
+            y_event_actual = event_data_pl.get_column('future_ret') 
 
             if X_event_pl.is_empty(): # print(f"Error: No valid features for event ID '{event_id}'."); 
                 return
 
             model = self.models[model_name]['model']
-            y_pred = model.predict(X_event_pl) # predict expects Polars DF
+            y_pred = model.predict(X_event_pl) 
 
             days = event_data_pl.get_column('days_to_event').to_numpy()
-            actual_returns_pct = y_event_actual.fill_null(np.nan).to_numpy() * 100 # fill_null needed for to_numpy if NaNs present
+            actual_returns_pct = y_event_actual.fill_null(np.nan).to_numpy() * 100 
             predicted_returns_pct = y_pred * 100
 
             fig, ax = plt.subplots(figsize=(12, 7))
@@ -933,10 +946,6 @@ class EventAnalysis:
         except Exception as e: # print(f"Error plotting predictions: {e}"); traceback.print_exc(); 
             pass
             
-    # Other analysis methods (Sharpe, Volatility, Mean Returns, RVR) remain largely the same
-    # unless specific paper alignment is needed for their calculation logic beyond what's already there.
-    # The new H1/H2 methods will be more specific.
-
     def calculate_rolling_sharpe_timeseries(self,
         results_dir: str,
         file_prefix: str = "event",
@@ -968,7 +977,7 @@ class EventAnalysis:
 
         all_days = pl.DataFrame({'days_to_event': range(analysis_window[0], analysis_window[1] + 1)})
         sample_returns = analysis_data.select(pl.col(return_col)).sample(n=min(100, analysis_data.height))
-        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item(0,0) if sample_returns.height > 0 else 0.0
+        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item(0,0) if sample_returns.height > 0 and sample_returns.width > 0 else 0.0
 
 
         returns_in_pct = avg_abs_return > 0.05
@@ -1061,7 +1070,7 @@ class EventAnalysis:
         extended_start = analysis_window[0] - lookback_window
         temp_analysis_data = self.data.filter((pl.col('days_to_event') >= extended_start) & (pl.col('days_to_event') <= analysis_window[1]))
         sample_returns = temp_analysis_data.select(pl.col(return_col)).sample(n=min(100, temp_analysis_data.height))
-        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item(0,0) if sample_returns.height > 0 else 0.0
+        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item(0,0) if sample_returns.height > 0 and sample_returns.width > 0 else 0.0
         returns_in_pct = avg_abs_return > 0.05
         # print(f"Returns format: {'Percentage' if returns_in_pct else 'Decimal'} (avg abs: {avg_abs_return:.4f})")
         if returns_in_pct: # print("Converting returns to decimal for Sharpe calc"); 
@@ -1354,11 +1363,11 @@ class EventAnalysis:
             if analysis_data_rvr.is_empty(): # print(f"Error: No data found within extended analysis window [{extended_start_day}, {analysis_window[1]}]."); 
                 return rvr_daily_df
             sample_returns_rvr = analysis_data_rvr.select(pl.col('clipped_return')).sample(n=min(100, analysis_data_rvr.height))
-            avg_abs_return_rvr = sample_returns_rvr.select(pl.all().mean().abs()).item(0,0) if sample_returns_rvr.height > 0 else 0.0
+            avg_abs_return_rvr = sample_returns_rvr.select(pl.all().mean().abs()).item(0,0) if sample_returns_rvr.height > 0 and sample_returns_rvr.width > 0 else 0.0
 
             if adaptive_threshold:
-                pct_05_rvr = sample_returns_rvr.select(pl.col('clipped_return').quantile(0.05)).item(0,0) if sample_returns_rvr.height > 0 else 0.0
-                pct_95_rvr = sample_returns_rvr.select(pl.col('clipped_return').quantile(0.95)).item(0,0) if sample_returns_rvr.height > 0 else 0.0
+                pct_05_rvr = sample_returns_rvr.select(pl.col('clipped_return').quantile(0.05)).item(0,0) if sample_returns_rvr.height > 0 and sample_returns_rvr.width > 0 else 0.0
+                pct_95_rvr = sample_returns_rvr.select(pl.col('clipped_return').quantile(0.95)).item(0,0) if sample_returns_rvr.height > 0 and sample_returns_rvr.width > 0 else 0.0
                 range_check_rvr = (pct_95_rvr - pct_05_rvr) > 0.1
                 std_check_rvr = (sample_returns_rvr.select(pl.col('clipped_return').std()).item(0,0) or 0.0) > 0.02 # Ensure not None
                 returns_in_pct_rvr = range_check_rvr or std_check_rvr or (avg_abs_return_rvr > 0.05)
@@ -1450,7 +1459,7 @@ class EventAnalysis:
         if proc_analysis_data.is_empty(): # print(f"Error: No data in extended window {extended_window}"); 
             return None
 
-        event_ids = proc_analysis_data.select('event_id').unique().to_series().to_list()
+        event_ids = proc_analysis_data.get_column('event_id').unique().to_list()
         # print(f"Fitting GARCH models for {len(event_ids)} events...")
         
         sample_event_ids = np.random.choice(event_ids, size=min(5, len(event_ids)), replace=False) if len(event_ids) > 0 else []
@@ -1459,8 +1468,8 @@ class EventAnalysis:
 
         for event_id in event_ids:
             event_data_current = proc_analysis_data.filter(pl.col('event_id') == event_id)
-            event_days_current = event_data_current.select('days_to_event').to_series().to_numpy() # numpy for indexing
-            event_returns_current = event_data_current.select(return_col).to_series()
+            event_days_current = event_data_current.get_column('days_to_event').to_numpy() # numpy for indexing
+            event_returns_current = event_data_current.get_column(return_col).to_series()
             if len(event_returns_current) < 20: continue
             
             try:
@@ -1472,10 +1481,7 @@ class EventAnalysis:
                     delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3, delta=delta
                 )
 
-                # Get conditional baseline vol series from GARCH fit, aligned with event_days_current
                 baseline_cond_vol_sqrt_h_t = np.sqrt(garch_model_current.variance_history)
-                
-                # Map this to 'analysis_days_np' for the ThreePhaseVolatilityModel
                 day_to_baseline_vol_map = dict(zip(event_days_current, baseline_cond_vol_sqrt_h_t))
                 
                 bm = garch_model_current
@@ -1483,7 +1489,7 @@ class EventAnalysis:
                 else: denom_uncond = (1 - bm.alpha - bm.beta)
                 
                 if denom_uncond > 1e-7: fallback_uncond_vol = np.sqrt(max(bm.omega / denom_uncond, 1e-7))
-                else: fallback_uncond_vol = np.sqrt(bm.variance_history[-1]) if len(bm.variance_history) > 0 else np.sqrt(1e-6)
+                else: fallback_uncond_vol = np.sqrt(bm.variance_history[-1]) if bm.variance_history is not None and len(bm.variance_history) > 0 else np.sqrt(1e-6)
                 
                 aligned_baseline_cond_vol_series = np.array([day_to_baseline_vol_map.get(day, fallback_uncond_vol) for day in analysis_days_np])
                 
@@ -1492,14 +1498,22 @@ class EventAnalysis:
 
                 if event_id in sample_event_ids:
                     garch_vol_actual = np.sqrt(garch_model_current.variance_history)
-                    # For sample plot, use the baseline_cond_vol_sqrt_h_t directly for the days GARCH was fit
-                    sample_three_phase_vol = vol_model_current.calculate_volatility_series(event_days_current, baseline_cond_vol_sqrt_h_t)
+                    # Align GARCH conditional vol with its actual days for the sample plot
+                    aligned_garch_vol_for_sample = np.full_like(event_days_current, np.nan, dtype=float)
+                    if len(garch_vol_actual) == len(event_days_current): # Should usually be true
+                         aligned_garch_vol_for_sample = garch_vol_actual
+                    elif len(garch_vol_actual) > 0: # If lengths mismatch but GARCH has data
+                         common_len = min(len(garch_vol_actual), len(aligned_garch_vol_for_sample))
+                         aligned_garch_vol_for_sample[:common_len] = garch_vol_actual[:common_len]
+
+
+                    sample_three_phase_vol = vol_model_current.calculate_volatility_series(event_days_current, aligned_garch_vol_for_sample)
                     sample_events_data.append({
-                        'event_id': event_id, 'garch_days': event_days_current, 'garch_vol': garch_vol_actual,
-                        'three_phase_days': event_days_current, # Match GARCH days for sample plot
+                        'event_id': event_id, 'garch_days': event_days_current, 'garch_vol': aligned_garch_vol_for_sample,
+                        'three_phase_days': event_days_current, 
                         'three_phase_vol': sample_three_phase_vol, 
-                        'returns': event_returns_current.to_numpy()[:len(garch_vol_actual)],
-                        'ticker': event_data_current.select('ticker').head(1).item()
+                        'returns': event_returns_current.to_numpy()[:len(aligned_garch_vol_for_sample)],
+                        'ticker': event_data_current.get_column('ticker').head(1).item()
                     })
             except Exception as e: # print(f"Error processing event {event_id} for 3-phase vol: {e}"); 
                 pass # traceback.print_exc()
@@ -1507,22 +1521,25 @@ class EventAnalysis:
         if not all_events_results: # print("No valid 3-phase volatility results to analyze."); 
             return None
 
-        aggregated_data_dict = {}
+        # Construct DataFrame directly from list of dicts for aggregated_data_dict items
+        aggregated_rows = []
         for day_val in analysis_days_np:
-            day_vols = [res['predicted_volatility'][res['days_to_event'] == day_val][0] for res in all_events_results if day_val in res['days_to_event']]
-            if day_vols: aggregated_data_dict[day_val] = {'avg_volatility': np.mean(day_vols), 'median_volatility': np.median(day_vols), 'std_volatility': np.std(day_vols), 'count': len(day_vols)}
+            day_vols = [res['predicted_volatility'][res['days_to_event'] == day_val][0] 
+                        for res in all_events_results if day_val in res['days_to_event'] and len(res['predicted_volatility'][res['days_to_event'] == day_val]) > 0] # Ensure index exists
+            if day_vols:
+                aggregated_rows.append({
+                    'days_to_event': day_val,
+                    'avg_volatility': np.mean(day_vols),
+                    'median_volatility': np.median(day_vols),
+                    'std_volatility': np.std(day_vols),
+                    'count': len(day_vols)
+                })
         
-        volatility_df_agg = pl.DataFrame(aggregated_data_dict).transpose(include_header=True, header_column_name='days_to_event', column_names=list(aggregated_data_dict.keys()))
-        # Polars transpose behavior changed. Reconstruct DF:
-        if aggregated_data_dict:
-            volatility_df_agg = pl.DataFrame({
-                'days_to_event': list(aggregated_data_dict.keys()),
-                'avg_volatility': [d['avg_volatility'] for d in aggregated_data_dict.values()],
-                'median_volatility': [d['median_volatility'] for d in aggregated_data_dict.values()],
-                'std_volatility': [d['std_volatility'] for d in aggregated_data_dict.values()],
-                'event_count': [d['count'] for d in aggregated_data_dict.values()]
-            }).sort('days_to_event')
-        else: volatility_df_agg = pl.DataFrame()
+        volatility_df_agg = pl.DataFrame(aggregated_rows)
+        if not volatility_df_agg.is_empty():
+            volatility_df_agg = volatility_df_agg.sort('days_to_event')
+        else: # print("Aggregated volatility data is empty."); 
+            return None
 
 
         phases_def = {'pre_event': (analysis_window[0], -1), 'event_window': (0, 0), 'post_event_rising': (1, delta), 'post_event_decay': (delta+1, analysis_window[1])}
@@ -1549,13 +1566,14 @@ class EventAnalysis:
             plt.tight_layout(); plt.savefig(os.path.join(results_dir, f"{file_prefix}_three_phase_volatility.png"), dpi=200); plt.close()
 
             for sample_data_item in sample_events_data:
-                fig_s, ax_s = plt.subplots(figsize=(12, 7))
-                ax_s.plot(sample_data_item['garch_days'], sample_data_item['garch_vol'] * np.sqrt(252), color='blue', linewidth=1, alpha=0.7, label='GARCH Volatility (annualized)') # Annualize for plot
-                ax_s.plot(sample_data_item['three_phase_days'], sample_data_item['three_phase_vol'] * np.sqrt(252), color='red', linewidth=2, label='Three-Phase Model (annualized)') # Annualize
-                ax_s.axvline(x=0, color='black', linestyle='--', label='Event Day'); ax_s.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
-                ax_s.set_title(f"Volatility for {sample_data_item['ticker']} (Event ID: {sample_data_item['event_id']})")
-                ax_s.set_xlabel('Days Relative to Event'); ax_s.set_ylabel('Annualized Volatility'); ax_s.legend(loc='best'); ax_s.grid(True, linestyle=':', alpha=0.7)
-                plt.tight_layout(); plt.savefig(os.path.join(results_dir, f"{file_prefix}_volatility_sample_{sample_data_item['event_id']}.png"), dpi=200); plt.close()
+                if sample_data_item['garch_vol'] is not None and len(sample_data_item['garch_vol']) > 0: # Check if garch_vol exists
+                    fig_s, ax_s = plt.subplots(figsize=(12, 7))
+                    ax_s.plot(sample_data_item['garch_days'], sample_data_item['garch_vol'] * np.sqrt(252), color='blue', linewidth=1, alpha=0.7, label='GARCH Volatility (annualized)') # Annualize for plot
+                    ax_s.plot(sample_data_item['three_phase_days'], sample_data_item['three_phase_vol'] * np.sqrt(252), color='red', linewidth=2, label='Three-Phase Model (annualized)') # Annualize
+                    ax_s.axvline(x=0, color='black', linestyle='--', label='Event Day'); ax_s.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
+                    ax_s.set_title(f"Volatility for {sample_data_item['ticker']} (Event ID: {sample_data_item['event_id']})")
+                    ax_s.set_xlabel('Days Relative to Event'); ax_s.set_ylabel('Annualized Volatility'); ax_s.legend(loc='best'); ax_s.grid(True, linestyle=':', alpha=0.7)
+                    plt.tight_layout(); plt.savefig(os.path.join(results_dir, f"{file_prefix}_volatility_sample_{sample_data_item['event_id']}.png"), dpi=200); plt.close()
             # print(f"Saved 3-phase volatility plots to {results_dir}")
         except Exception as e: # print(f"Error plotting/saving 3-phase volatility: {e}"); traceback.print_exc(); 
             pass
@@ -1590,7 +1608,7 @@ class EventAnalysis:
             return None
 
         sample_returns = proc_analysis_data.select(pl.col(return_col)).sample(n=min(100, proc_analysis_data.height))
-        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item(0,0) if sample_returns.height > 0 else 0.0
+        avg_abs_return = sample_returns.select(pl.all().mean().abs()).item(0,0) if sample_returns.height > 0 and sample_returns.width > 0 else 0.0
         returns_in_pct = avg_abs_return > 0.05
         # print(f"Detected returns format: {'Percentage form' if returns_in_pct else 'Decimal form'} (avg abs: {avg_abs_return:.4f})")
         
@@ -1599,56 +1617,76 @@ class EventAnalysis:
             proc_analysis_data = proc_analysis_data.with_columns((pl.col(return_col) / 100).alias(return_col_for_calc))
             adj_bias = optimistic_bias / 100 # Ensure bias matches decimal returns
         else:
-            proc_analysis_data = proc_analysis_data.rename({return_col: return_col_for_calc}) # Use existing name if already decimal
+            # If already decimal, make sure the column name is consistently 'decimal_return' for later use
+            if return_col != return_col_for_calc:
+                 proc_analysis_data = proc_analysis_data.with_columns(pl.col(return_col).alias(return_col_for_calc))
             adj_bias = optimistic_bias
 
 
-        event_ids = proc_analysis_data.select('event_id').unique().to_series().to_list()
+        event_ids = proc_analysis_data.get_column('event_id').unique().to_list()
         # print(f"Processing {len(event_ids)} events for RVR analysis...")
         all_rvr_data_list = []
+        analysis_days_np_rvr = np.array(range(analysis_window[0], analysis_window[1] + 1))
+
 
         for event_id in event_ids:
             event_data_current = proc_analysis_data.filter(pl.col('event_id') == event_id)
-            event_days_np_current = event_data_current.select('days_to_event').to_series().to_numpy()
-            event_returns_np_current = event_data_current.select(return_col_for_calc).to_series().to_numpy()
-            if len(event_returns_np_current) < 20: continue # Min data for GARCH
+            # Ensure we only use days within the original -60 to +60 window for GARCH fitting
+            event_returns_for_garch_fit = event_data_current.get_column(return_col_for_calc).to_series()
+            
+            if len(event_returns_for_garch_fit) < 20: continue 
             
             try:
                 garch_model_current = GJRGARCHModel() if garch_type.lower() == 'gjr' else GARCHModel()
-                garch_model_current.fit(event_returns_np_current) # Fit on the already decimal returns
+                garch_model_current.fit(event_returns_for_garch_fit) 
                 
                 vol_model_current = ThreePhaseVolatilityModel(
                     baseline_model=garch_model_current, k1=k1, k2=k2, 
                     delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3, delta=delta
                 )
                 
-                # Baseline conditional vol from GARCH fit for this event
-                baseline_cond_vol_sqrt_h_t_series = np.sqrt(garch_model_current.variance_history)
+                # Map GARCH conditional vol to the days it was fit on
+                event_days_of_fit = event_data_current.get_column('days_to_event').to_numpy()
+                baseline_cond_vol_sqrt_h_t_series_fit = np.sqrt(garch_model_current.variance_history)
+                day_to_baseline_vol_map_fit = dict(zip(event_days_of_fit, baseline_cond_vol_sqrt_h_t_series_fit))
+
+                bm = garch_model_current
+                if isinstance(bm, GJRGARCHModel): denom_uncond = (1 - bm.alpha - bm.beta - 0.5 * bm.gamma)
+                else: denom_uncond = (1 - bm.alpha - bm.beta)
                 
-                # Expected returns: historical mean for the event + bias in rising phase
-                # Use returns *before* GARCH demeaning for historical mean, but GARCH was fit on demeaned.
-                # For simplicity, use mean of original (potentially decimalized) returns for this event.
-                mean_hist_return_event = np.mean(event_returns_np_current) 
+                if denom_uncond > 1e-7: fallback_uncond_vol_fit = np.sqrt(max(bm.omega / denom_uncond, 1e-7))
+                else: fallback_uncond_vol_fit = np.sqrt(bm.variance_history[-1]) if bm.variance_history is not None and len(bm.variance_history) > 0 else np.sqrt(1e-6)
                 
-                expected_returns_biased = np.array([
-                    mean_hist_return_event + adj_bias - risk_free_rate if phases['post_event_rising'][0] <= day_val <= phases['post_event_rising'][1] 
-                    else mean_hist_return_event - risk_free_rate
-                    for day_val in event_days_np_current
+                # Align baseline GARCH vol to the common analysis_days_np_rvr grid
+                aligned_baseline_cond_vol_for_analysis = np.array([day_to_baseline_vol_map_fit.get(day, fallback_uncond_vol_fit) for day in analysis_days_np_rvr])
+                
+                # Calculate three-phase volatility over the common analysis_days_np_rvr grid
+                volatility_series_for_rvr_analysis_days = vol_model_current.calculate_volatility_series(analysis_days_np_rvr, aligned_baseline_cond_vol_for_analysis)
+
+                # Calculate expected returns
+                # Use historical mean of returns *within the analysis_window* for this event
+                event_returns_in_analysis_window = event_data_current.filter(
+                    (pl.col('days_to_event') >= analysis_window[0]) & (pl.col('days_to_event') <= analysis_window[1])
+                ).get_column(return_col_for_calc).to_numpy()
+                
+                mean_hist_return_event_analysis_win = np.nanmean(event_returns_in_analysis_window) if len(event_returns_in_analysis_window) > 0 else 0.0
+
+
+                expected_returns_biased_analysis_days = np.array([
+                    mean_hist_return_event_analysis_win + adj_bias - risk_free_rate 
+                    if phases['post_event_rising'][0] <= day_val <= phases['post_event_rising'][1] 
+                    else mean_hist_return_event_analysis_win - risk_free_rate
+                    for day_val in analysis_days_np_rvr # Iterate over the common analysis grid
                 ])
                 
-                # Three-phase volatility using the event's GARCH conditional vol as baseline
-                # This needs to align with event_days_np_current
-                volatility_series_for_rvr = vol_model_current.calculate_volatility_series(event_days_np_current, baseline_cond_vol_sqrt_h_t_series)
+                rvr_values_analysis_days = expected_returns_biased_analysis_days / (volatility_series_for_rvr_analysis_days**2 + 1e-10)
                 
-                rvr_values = expected_returns_biased / (np.array(volatility_series_for_rvr)**2 + 1e-10)
-                
-                # Store per-day results for this event
-                for idx, day_val in enumerate(event_days_np_current):
+                for idx, day_val in enumerate(analysis_days_np_rvr):
                      all_rvr_data_list.append({
                          'event_id': event_id, 'days_to_event': day_val,
-                         'expected_return_biased': expected_returns_biased[idx],
-                         'three_phase_volatility': volatility_series_for_rvr[idx],
-                         'rvr': rvr_values[idx]
+                         'expected_return_biased': expected_returns_biased_analysis_days[idx],
+                         'three_phase_volatility': volatility_series_for_rvr_analysis_days[idx],
+                         'rvr': rvr_values_analysis_days[idx]
                      })
             except Exception as e: # print(f"Error processing event {event_id} for RVR: {e}"); 
                 pass # traceback.print_exc()
@@ -1662,7 +1700,7 @@ class EventAnalysis:
             pl.mean('three_phase_volatility').alias('mean_three_phase_volatility'),
             pl.mean('rvr').alias('mean_rvr'),
             pl.median('rvr').alias('median_rvr'),
-            pl.count().alias('event_count_rvr') # Count of events contributing to this day
+            pl.count().alias('event_count_rvr') 
         ]).sort('days_to_event')
 
         phase_stats_rvr_list = []
@@ -1681,17 +1719,15 @@ class EventAnalysis:
         # print("\nRVR by Phase (with Optimistic Bias):")
         phases_to_highlight = ['pre_event', 'post_event_rising', 'post_event_decay']
         h1_test_data = {}
-        for row in phase_stats_rvr_df.filter(pl.col('phase').is_in(phases_to_highlight)).iter_rows(named=True):
-            # print(f"  Phase: {row['phase']}, Avg RVR: {row['avg_rvr']:.4f}")
-            h1_test_data[row['phase']] = row['avg_rvr']
+        for row_dict in phase_stats_rvr_df.filter(pl.col('phase').is_in(phases_to_highlight)).to_dicts():
+            # print(f"  Phase: {row_dict['phase']}, Avg RVR: {row_dict['avg_rvr']:.4f}")
+            h1_test_data[row_dict['phase']] = row_dict['avg_rvr']
         
         h1_result = False
-        if 'post_event_rising' in h1_test_data and 'pre_event' in h1_test_data and 'post_event_decay' in h1_test_data:
-            if h1_test_data['post_event_rising'] is not None and \
-               h1_test_data['pre_event'] is not None and \
-               h1_test_data['post_event_decay'] is not None:
-                h1_result = (h1_test_data['post_event_rising'] > h1_test_data['pre_event'] and 
-                             h1_test_data['post_event_rising'] > h1_test_data['post_event_decay'])
+        # Check if all necessary keys exist and are not None before comparison
+        if all(k in h1_test_data and h1_test_data[k] is not None for k in ['post_event_rising', 'pre_event', 'post_event_decay']):
+            h1_result = (h1_test_data['post_event_rising'] > h1_test_data['pre_event'] and 
+                         h1_test_data['post_event_rising'] > h1_test_data['post_event_decay'])
         # print(f"\nHypothesis 1 (RVR peaks in post_event_rising): {'SUPPORTED' if h1_result else 'NOT SUPPORTED'}")
 
         try:
@@ -1709,7 +1745,8 @@ class EventAnalysis:
             ax.plot(rvr_pd_plot['days_to_event'], rvr_pd_plot['mean_rvr'], color='blue', linewidth=2, label='Mean RVR (Optimistic Bias)')
             ax.axvline(x=0, color='red', linestyle='--', label='Event Day'); ax.axvline(x=delta, color='green', linestyle=':', label=f'End Rising Phase (t+{delta})')
             ax.axvspan(phases['post_event_rising'][0], phases['post_event_rising'][1], color='yellow', alpha=0.2, label='Post-Event Rising Phase')
-            ax.set_title(f'RVR with Optimistic Bias ({optimistic_bias*100 if returns_in_pct else optimistic_bias*100:.2f}%)')
+            # Use adj_bias in title, which is already in decimal form
+            ax.set_title(f'RVR with Optimistic Bias ({adj_bias*100:.2f}%)')
             ax.set_xlabel('Days Relative to Event'); ax.set_ylabel('Return-to-Variance Ratio'); ax.legend(loc='best'); ax.grid(True, linestyle=':', alpha=0.7)
             plt.tight_layout(); plt.savefig(os.path.join(results_dir, f"{file_prefix}_rvr_bias_timeseries.png"), dpi=200); plt.close()
             # print(f"Saved RVR (bias) plots to {results_dir}")
