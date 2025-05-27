@@ -1,4 +1,4 @@
-# --- START OF FILE models.py ---
+# --- START OF FILE models.py - COMPLETE FIXED VERSION ---
 import numpy as np
 import polars as pl
 from sklearn.linear_model import Ridge
@@ -12,7 +12,6 @@ from typing import Tuple, List, Dict, Optional, Union
 pl.Config.set_engine_affinity(engine="streaming")
 
 class TimeSeriesRidge(Ridge):
-    # ... (No changes from previous correct version) ...
     """
     Ridge regression with temporal smoothing penalty.
     The model minimizes: ||y - Xβ||² + α||β||² + λ₂||Dβ||²
@@ -127,7 +126,6 @@ class TimeSeriesRidge(Ridge):
 
 
 class XGBoostDecileModel:
-    # ... (No changes from previous correct version) ...
     def __init__(self, weight=0.5, momentum_feature='momentum_5', n_deciles=10,
                  alpha=0.1, lambda_smooth=0.1, xgb_params=None, ts_ridge_feature_order=None):
         if not 0 <= weight <= 1:
@@ -323,10 +321,11 @@ class GARCHModel:
             beta = 0.01
             valid = False
         
-        if alpha + beta >= 0.99999:
+        # FIXED: Relaxed stationarity condition from 0.99999 to 0.995
+        if alpha + beta >= 0.995:
             if context=="final": warnings.warn(f"GARCH alpha+beta ({alpha+beta:.4f}) too high. Adjusting for stationarity.")
             current_sum = alpha + beta
-            target_sum = 0.9998 
+            target_sum = 0.99 
             if current_sum > 1e-7:
                 alpha_new = (alpha / current_sum) * target_sum
                 beta_new = (beta / current_sum) * target_sum
@@ -334,7 +333,7 @@ class GARCHModel:
                 alpha = max(0, alpha_new)
                 beta = max(0, beta_new)
                 # If sum is still off due to flooring at 0, adjust one (e.g. beta)
-                if alpha + beta >= 0.99999 :
+                if alpha + beta >= 0.995 :
                     beta = target_sum - alpha if target_sum > alpha else 0.0
             else: 
                 alpha = 0.05 
@@ -345,7 +344,8 @@ class GARCHModel:
 
     def _neg_log_likelihood(self, params, returns_centered):
         omega, alpha, beta = params
-        if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and alpha + beta < 0.99999):
+        # FIXED: Relaxed bound checking to match new bounds
+        if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and alpha + beta < 0.995):
             return np.inf
 
         T = len(returns_centered)
@@ -385,14 +385,12 @@ class GARCHModel:
         
         if len(returns_np) < 20:
             self.fit_message = f"GARCH: Not enough data points ({len(returns_np)})."
-            # warnings.warn(self.fit_message + " Using initial parameters.")
             self._use_initial_params_for_history(returns_np)
             return self
 
         std_dev = np.std(returns_np)
         if std_dev < 1e-7: 
             self.fit_message = "GARCH: Return series has very low variance."
-            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series(returns_np, std_dev) 
             return self
 
@@ -402,7 +400,6 @@ class GARCHModel:
         returns_centered = returns_np - self.mean
         if np.std(returns_centered) < 1e-7: 
             self.fit_message = "GARCH: Demeaned returns have very low variance."
-            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series(returns_np, np.std(returns_centered))
             return self
 
@@ -410,9 +407,11 @@ class GARCHModel:
         omega_i, alpha_i, beta_i, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init, context="initial_guess")
         initial_params = [omega_i, alpha_i, beta_i]
         
-        bounds = [(1e-8, 0.1), (0, 0.998), (0, 0.998)] # omega, alpha, beta bounds (alpha/beta can be 0)
+        # FIXED: Relaxed bounds to prevent optimization issues
+        bounds = [(1e-9, 0.2), (1e-6, 0.99), (1e-6, 0.99)] # omega, alpha, beta bounds
 
-        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9, 'eps': 1e-8} # Added eps for L-BFGS-B
+        # FIXED: Removed 'eps' option that was causing warnings
+        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9}
         
         methods_to_try = [method, 'SLSQP'] 
         final_result_obj = None 
@@ -427,7 +426,7 @@ class GARCHModel:
                 if result.success:
                     omega_fit, alpha_fit, beta_fit = result.x
                     _, _, _, params_valid = self._check_parameters(omega_fit, alpha_fit, beta_fit, context="fit_check")
-                    if params_valid and (alpha_fit + beta_fit < 0.9999): 
+                    if params_valid and (alpha_fit + beta_fit < 0.995): 
                         self.omega, self.alpha, self.beta = omega_fit, alpha_fit, beta_fit
                         self.fit_success = True
                         self.fit_message = f"Optimization successful with {opt_method}."
@@ -440,7 +439,6 @@ class GARCHModel:
         
         if not self.fit_success:
             msg_detail = final_result_obj.message if final_result_obj and hasattr(final_result_obj, 'message') else self.fit_message
-            # warnings.warn(f"GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
             self.omega, self.alpha, self.beta, _ = self._check_parameters(self.omega_init, self.alpha_init, self.beta_init) # Re-check defaults
 
         self._finalize_fit(returns_centered) 
@@ -546,10 +544,11 @@ class GJRGARCHModel(GARCHModel):
             valid = False
         
         stationarity_val = alpha + beta + 0.5 * gamma
-        if stationarity_val >= 0.99999:
+        # FIXED: Relaxed stationarity condition from 0.99999 to 0.995
+        if stationarity_val >= 0.995:
             if context=="final": warnings.warn(f"GJR sum condition ({stationarity_val:.4f}) too high. Adjusting for stationarity.")
-            target_sum_overall = 0.9998
-            if alpha + beta >= target_sum_overall : 
+            target_sum_overall = 0.99
+            if alpha + beta >= target_sum_overall - 0.001: # FIXED: Added small buffer
                 gamma = max(0, gamma * 0.01) # Drastically reduce gamma if alpha+beta is the issue
                 current_sum_alpha_beta = alpha + beta
                 required_sum_alpha_beta_for_gjr = target_sum_overall - 0.5 * gamma
@@ -557,7 +556,7 @@ class GJRGARCHModel(GARCHModel):
                     alpha_new = (alpha / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
                     beta_new = (beta / current_sum_alpha_beta) * required_sum_alpha_beta_for_gjr
                     alpha = max(0, alpha_new); beta = max(0, beta_new)
-                    if alpha + beta + 0.5 * gamma >= 0.99999: # Final attempt to fix
+                    if alpha + beta + 0.5 * gamma >= 0.995: # Final attempt to fix
                         beta = target_sum_overall - alpha - 0.5*gamma if (target_sum_overall - 0.5*gamma) > alpha else 0.0
                 elif current_sum_alpha_beta <= 1e-7 : 
                      alpha = 0.03; beta = 0.80; gamma = 0.02 # Reset all to typical GJR stationary
@@ -568,8 +567,9 @@ class GJRGARCHModel(GARCHModel):
 
     def _neg_log_likelihood(self, params, returns_centered): 
         omega, alpha, beta, gamma = params
+        # FIXED: Relaxed bound checking to match new bounds
         if not (omega > 1e-9 and alpha >= 0 and beta >= 0 and gamma >= 0 and \
-                alpha + beta + 0.5 * gamma < 0.99999):
+                alpha + beta + 0.5 * gamma < 0.995):
             return np.inf
 
         T = len(returns_centered)
@@ -610,14 +610,12 @@ class GJRGARCHModel(GARCHModel):
         
         if len(returns_np) < 20:
             self.fit_message = f"GJR: Not enough data points ({len(returns_np)})."
-            # warnings.warn(self.fit_message + " Using initial parameters.")
             self._use_initial_params_for_history_gjr(returns_np)
             return self
 
         std_dev = np.std(returns_np)
         if std_dev < 1e-7:
             self.fit_message = "GJR: Return series has very low variance."
-            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series_gjr(returns_np, std_dev)
             return self
             
@@ -627,16 +625,17 @@ class GJRGARCHModel(GARCHModel):
         returns_centered = returns_np - self.mean
         if np.std(returns_centered) < 1e-7:
             self.fit_message = "GJR: Demeaned returns have very low variance."
-            # warnings.warn(self.fit_message + " Using simplified variance.")
             self._handle_low_variance_series_gjr(returns_np, np.std(returns_centered))
             return self
 
         omega_i, alpha_i, beta_i, gamma_i, _ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init, context="initial_guess")
         initial_params = [omega_i, alpha_i, beta_i, gamma_i]
         
-        bounds = [(1e-8, 0.1), (0, 0.998), (0, 0.998), (0, 0.998)] 
+        # FIXED: Relaxed bounds to prevent optimization issues
+        bounds = [(1e-9, 0.2), (1e-6, 0.99), (1e-6, 0.99), (1e-6, 0.99)] 
 
-        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9, 'eps': 1e-8}
+        # FIXED: Removed 'eps' option that was causing warnings
+        optimizer_options = {'maxiter': max_iter, 'disp': False, 'ftol': 1e-9}
         methods_to_try = [method, 'SLSQP'] 
         final_result_obj = None
         
@@ -649,7 +648,7 @@ class GJRGARCHModel(GARCHModel):
                 if result.success:
                     o, a, b, g = result.x
                     _, _, _, _, params_valid = self._check_gjr_parameters(o, a, b, g, context="fit_check")
-                    if params_valid and (a + b + 0.5 * g < 0.9999):
+                    if params_valid and (a + b + 0.5 * g < 0.995):
                         self.omega, self.alpha, self.beta, self.gamma = o,a,b,g
                         self.fit_success = True
                         self.fit_message = f"Optimization successful with {opt_method}."
@@ -661,7 +660,6 @@ class GJRGARCHModel(GARCHModel):
         
         if not self.fit_success:
             msg_detail = final_result_obj.message if final_result_obj and hasattr(final_result_obj, 'message') else self.fit_message
-            # warnings.warn(f"GJR-GARCH optimization failed ({msg_detail}). Using robust initial parameters.")
             self.omega,self.alpha,self.beta,self.gamma,_ = self._check_gjr_parameters(self.omega_init, self.alpha_init, self.beta_init, self.gamma_init)
 
         self._finalize_fit_gjr(returns_centered) 
