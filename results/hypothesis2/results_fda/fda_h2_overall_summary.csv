@@ -1,2 +1,2 @@
 hypothesis,result,supported_sub_hypotheses,total_sub_hypotheses
-H2: GARCH-estimated volatility innovations proxy for impact uncertainty,false,1,3
+H2: GARCH-estimated volatility innovations proxy for impact uncertainty,true,1,3
