@@ -238,18 +238,19 @@ class Hypothesis2Analyzer:
         event_data_sorted = event_data.sort('days_to_event')
         
         for window in self.prediction_windows:
-            future_prices = event_data_sorted.get_column('prc').shift(-window)
-            current_prices = event_data_sorted.get_column('prc')
-            
-            # Calculate returns only where both prices are valid and non-zero
-            future_ret_series = pl.when(
-                (current_prices.is_not_null()) & 
-                (future_prices.is_not_null()) & 
-                (current_prices != 0) & 
-                (future_prices != 0)
+            # FIXED: Apply the expression to get an actual Series
+            future_ret_expr = pl.when(
+                (pl.col('prc').is_not_null()) & 
+                (pl.col('prc').shift(-window).is_not_null()) & 
+                (pl.col('prc') != 0) & 
+                (pl.col('prc').shift(-window) != 0)
             ).then(
-                (future_prices / current_prices) - 1
-            ).otherwise(None)
+                (pl.col('prc').shift(-window) / pl.col('prc')) - 1
+            ).otherwise(None).alias(f'future_ret_{window}')
+            
+            # Apply the expression and extract the Series
+            result_df = event_data_sorted.with_columns(future_ret_expr)
+            future_ret_series = result_df.get_column(f'future_ret_{window}')
             
             future_returns_dict[window] = future_ret_series.fill_null(np.nan).to_numpy()
         
