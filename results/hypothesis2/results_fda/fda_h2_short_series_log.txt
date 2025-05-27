@@ -1,0 +1,3 @@
+Event EYPT_20180209, Ticker EYPT, Non-NaN Returns: 6
+Event MRK_20120202, Ticker MRK, Non-NaN Returns: 19
+Event BMY_20151130, Ticker BMY, Non-NaN Returns: 19

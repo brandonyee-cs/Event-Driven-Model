@@ -1,0 +1,2 @@
+Event AQNT_20030204, Ticker AQNT, Non-NaN Returns: 10
+Event FTEK_20151105, Ticker FTEK, Non-NaN Returns: 1

@@ -1,0 +1,7 @@
+model_type,prediction_window,p_value,hypothesis_supported,significant,direction_correct,n_samples,slope,r_squared
+garch,1,NaN,false,false,false,0,NaN,NaN
+garch,3,NaN,false,false,false,0,NaN,NaN
+garch,5,NaN,false,false,false,0,NaN,NaN
+gjr,1,NaN,false,false,false,0,NaN,NaN
+gjr,3,NaN,false,false,false,0,NaN,NaN
+gjr,5,NaN,false,false,false,0,NaN,NaN
