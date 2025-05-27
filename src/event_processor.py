@@ -1637,7 +1637,7 @@ class EventAnalysis:
                 garch_model_current.fit(event_returns_for_garch_fit) 
                 
                 vol_model_current = ThreePhaseVolatilityModel(
-                    baseline_model=garch_model_current, k1=k1, k2=K2, 
+                    baseline_model=garch_model_current, k1=k1, k2=k2, 
                     delta_t1=delta_t1, delta_t2=delta_t2, delta_t3=delta_t3, delta=delta
                 )
                 
