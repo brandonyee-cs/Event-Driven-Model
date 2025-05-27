@@ -260,6 +260,7 @@ def compare_results():
         
         # print("Successfully loaded H1 result files for comparison.") # Less verbose
         
+        # FIXED: Make sure all columns have the same length (2 elements each)
         comparison_data = {
             'Event Type': ['FDA Approvals', 'Earnings Announcements'],
             'Hypothesis 1 Supported': [
@@ -269,8 +270,7 @@ def compare_results():
             'Pre-Event RVR': [fda_h1_test["pre_event_rvr"][0], earnings_h1_test["pre_event_rvr"][0]],
             'Post-Rising RVR': [fda_h1_test["post_rising_rvr"][0], earnings_h1_test["post_rising_rvr"][0]],
             'Post-Decay RVR': [fda_h1_test["post_decay_rvr"][0], earnings_h1_test["post_decay_rvr"][0]],
-            'Details FDA': [fda_h1_summary['details'][0]],
-            'Details Earnings': [earnings_h1_summary['details'][0]]
+            'Details': [fda_h1_summary['details'][0], earnings_h1_summary['details'][0]]
         }
         
         comparison_df = pl.DataFrame(comparison_data)
