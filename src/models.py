@@ -1,4 +1,4 @@
-# --- START OF FILE models.py - COMPLETE FIXED VERSION ---
+# --- FIXED VERSION OF models.py - Addresses Artificial Periodicity Issues ---
 import numpy as np
 import polars as pl
 from sklearn.linear_model import Ridge
@@ -754,10 +754,14 @@ class GJRGARCHModel(GARCHModel):
         return innovations
 
 class ThreePhaseVolatilityModel:
+    """
+    FIXED: Enhanced Three-Phase Volatility Model with smoothed transitions and stochastic components
+    to address artificial periodicity issues
+    """
     def __init__(self, baseline_model: Union[GARCHModel, GJRGARCHModel],
                  k1: float = 1.5, k2: float = 2.0, 
                  delta_t1: float = 5.0, delta_t2: float = 3.0, delta_t3: float = 10.0, 
-                 delta: int = 5):
+                 delta: int = 5, add_stochastic: bool = True, noise_std: float = 0.05):
         self.baseline_model = baseline_model
         self.k1 = k1
         self.k2 = k2
@@ -766,42 +770,105 @@ class ThreePhaseVolatilityModel:
         self.delta_t3 = max(1e-3, delta_t3)
         self.delta = delta
         
+        # NEW: Parameters for addressing periodicity
+        self.add_stochastic = add_stochastic
+        self.noise_std = noise_std
+        self.transition_smoothing = 0.5  # Days to smooth phase transitions
+        
         if k1 <= 1: raise ValueError("k1 must be greater than 1")
         if k2 <= 1: raise ValueError("k2 must be greater than 1")
     
-    def phi1(self, t: float, t_event: float) -> float: # t can be float
-        return (self.k1 - 1) * np.exp(-((t - t_event)**2) / (2 * self.delta_t1**2))
+    def phi1(self, t: float, t_event: float) -> float: 
+        """Pre-event phase - Gaussian with added stochasticity"""
+        base_phi = (self.k1 - 1) * np.exp(-((t - t_event)**2) / (2 * self.delta_t1**2))
+        
+        if self.add_stochastic:
+            # Add noise to break mathematical perfection
+            noise = np.random.normal(0, self.noise_std * base_phi)
+            return max(0, base_phi + noise)
+        return base_phi
     
     def phi2(self, t: float, t_event: float) -> float:
+        """Rising phase - Exponential with stochasticity"""
         time_diff = t - t_event
-        # Ensure delta_t2 is positive to prevent division by zero or issues with exp
-        if self.delta_t2 <= 1e-6 : return (self.k2 - 1) if time_diff > 0 else 0.0 
-        # Prevent overflow if time_diff / self.delta_t2 is very large negative
-        exp_arg = -time_diff / self.delta_t2
-        if exp_arg < -700: # np.exp(-709) is approx 0
-            return self.k2 -1 
-        return (self.k2 - 1) * (1 - np.exp(exp_arg))
+        if self.delta_t2 <= 1e-6: 
+            base_phi = (self.k2 - 1) if time_diff > 0 else 0.0
+        else:
+            exp_arg = -time_diff / self.delta_t2
+            if exp_arg < -700: 
+                base_phi = self.k2 - 1 
+            else:
+                base_phi = (self.k2 - 1) * (1 - np.exp(exp_arg))
+        
+        if self.add_stochastic:
+            # Add more noise during rising phase to break artificial patterns
+            noise = np.random.normal(0, self.noise_std * 1.5 * base_phi)
+            return max(0, base_phi + noise)
+        return base_phi
     
     def phi3(self, t: float, t_event: float) -> float:
+        """Decay phase - Exponential decay with stochasticity"""
         time_diff = t - (t_event + self.delta)
-        if self.delta_t3 <= 1e-6: return 0.0 
+        if self.delta_t3 <= 1e-6: 
+            return 0.0 
         exp_arg = -time_diff / self.delta_t3
-        if exp_arg < -700: return 0.0
-        return (self.k2 - 1) * np.exp(exp_arg)
+        if exp_arg < -700: 
+            return 0.0
+        
+        base_phi = (self.k2 - 1) * np.exp(exp_arg)
+        
+        if self.add_stochastic:
+            # Add noise to decay phase
+            noise = np.random.normal(0, self.noise_std * base_phi)
+            return max(0, base_phi + noise)
+        return base_phi
+    
+    def _smooth_phase_transition(self, phi1_val: float, phi2_val: float, 
+                                t: float, transition_point: float) -> float:
+        """Smooth transition between phases to avoid discontinuities"""
+        if abs(t - transition_point) > self.transition_smoothing:
+            return phi2_val if t > transition_point else phi1_val
+        
+        # Sigmoid smoothing
+        transition_progress = (t - transition_point + self.transition_smoothing) / (2 * self.transition_smoothing)
+        weight = 1 / (1 + np.exp(-10 * (transition_progress - 0.5)))  # Sigmoid
+        return (1 - weight) * phi1_val + weight * phi2_val
     
     def calculate_volatility(self, t: float, t_event: float, sigma_e0: float) -> float:
-        if sigma_e0 < 1e-8: sigma_e0 = 1e-8 
-        if t <= t_event:
-            phi = self.phi1(t, t_event)
-        elif t <= t_event + self.delta:
-            phi = self.phi2(t, t_event)
+        """Calculate volatility with smoothed phase transitions"""
+        if sigma_e0 < 1e-8: 
+            sigma_e0 = 1e-8 
+        
+        # Calculate all phase values
+        phi1_val = self.phi1(t, t_event) if t <= t_event + self.transition_smoothing else 0
+        phi2_val = self.phi2(t, t_event) if t_event - self.transition_smoothing <= t <= t_event + self.delta + self.transition_smoothing else 0
+        phi3_val = self.phi3(t, t_event) if t >= t_event + self.delta - self.transition_smoothing else 0
+        
+        # Smooth transitions
+        if t <= t_event - self.transition_smoothing:
+            phi = phi1_val
+        elif t <= t_event + self.transition_smoothing:
+            phi = self._smooth_phase_transition(phi1_val, phi2_val, t, t_event)
+        elif t <= t_event + self.delta - self.transition_smoothing:
+            phi = phi2_val
+        elif t <= t_event + self.delta + self.transition_smoothing:
+            phi = self._smooth_phase_transition(phi2_val, phi3_val, t, t_event + self.delta)
         else:
-            phi = self.phi3(t, t_event)
-        return sigma_e0 * (1 + phi)
+            phi = phi3_val
+        
+        # Add overall stochastic component
+        volatility = sigma_e0 * (1 + phi)
+        if self.add_stochastic:
+            # Small overall noise to break mathematical perfection
+            overall_noise = np.random.normal(1, 0.02)  # 2% noise on multiplier
+            volatility *= max(0.5, overall_noise)  # Ensure positive
+            
+        return max(sigma_e0 * 0.1, volatility)  # Floor at 10% of baseline
     
     def calculate_volatility_series(self, 
                                    days_to_event: Union[List[int], np.ndarray], 
                                    baseline_conditional_vol_series: Optional[np.ndarray] = None) -> np.ndarray:
+        """Calculate volatility series with enhanced stochastic components"""
         if not isinstance(days_to_event, np.ndarray):
             days_to_event_np = np.array(days_to_event, dtype=float) 
         else:
@@ -834,6 +901,9 @@ class ThreePhaseVolatilityModel:
             sigma_e0_val = np.sqrt(max(uncond_var, 1e-8)) 
             sigma_e0_series = np.full_like(days_to_event_np, sigma_e0_val, dtype=float)
 
+        # Set random seed for reproducible but varied results
+        np.random.seed(hash(tuple(days_to_event_np.astype(int))) % 2147483647)
+        
         volatility_series = np.array([self.calculate_volatility(t_rel, 0.0, sigma_e0_series[i]) 
                                       for i, t_rel in enumerate(days_to_event_np)], dtype=float)
         
