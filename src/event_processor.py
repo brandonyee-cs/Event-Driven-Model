@@ -1587,7 +1587,7 @@ class EventAnalysis:
             if not phase_data_df.is_empty():
                 phase_stats_list.append({'phase': phase_name, 'start_day': start_day, 'end_day': end_day,
                                      'avg_volatility': phase_data_df['avg_volatility'].mean(), 'median_volatility': phase_data_df['median_volatility'].mean(),
-                                     'avg_event_count': phase_data_df['event_count'].mean()})
+                                     'avg_event_count': phase_data_df['count'].mean()})
         phase_stats_df_agg = pl.DataFrame(phase_stats_list)
         
         try:
