@@ -10,7 +10,7 @@ import warnings
 import os
 import traceback  # Keep this import
 import gc  # Keep this import
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 import datetime
 import pandas as pd  # Required for plotting/CSV saving of some outputs
 
@@ -1774,7 +1774,7 @@ class EventAnalysis:
                 pl.col('rvr_final_simple').median().alias('median_rvr'),
                 pl.col('expected_return_rvr_simple').mean().alias('avg_expected_return'), 
                 pl.col('variance_rvr_simple').mean().alias('avg_variance'),
-                pl.col('rvr_final_simple').is_not_null().sum().alias('event_count') # Count non-null RVRs
+                (pl.col('rvr_final_simple').is_not_null()).sum().alias('event_count') # Count non-null RVRs
             ]).sort('days_to_event')
             
             # Summarize RVR by defined phases
@@ -1790,7 +1790,7 @@ class EventAnalysis:
                         pl.median('rvr_final_simple').alias('median_rvr'),
                         pl.mean('expected_return_rvr_simple').alias('avg_expected_return'),
                         pl.mean('variance_rvr_simple').alias('avg_variance'),
-                        pl.sum(pl.col('rvr_final_simple').is_not_null()).alias('event_count')
+                        (pl.col('rvr_final_simple').is_not_null()).sum().alias('event_count')
                     ).row(0, named=True) # Get as dict
 
                     phase_stats_dict = {'phase': phase_name_str, 'start_day': start_day_val, 'end_day': end_day_val, **phase_rvr_stats}
@@ -2292,7 +2292,7 @@ class EventAnalysis:
             pl.mean('three_phase_volatility').alias('mean_three_phase_volatility'), # Avg sigma_e_t
             pl.mean('rvr').alias('mean_rvr'),
             pl.median('rvr').alias('median_rvr'),
-            pl.sum(pl.col('rvr').is_not_null()).alias('event_count_rvr') # Count non-null RVRs
+            (pl.col('rvr').is_not_null()).sum().alias('event_count_rvr') # Count non-null RVRs
         ]).sort('days_to_event')
 
         # Calculate H1 phase statistics from the aggregated daily RVRs
