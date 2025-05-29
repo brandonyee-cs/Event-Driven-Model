@@ -1,0 +1,3 @@
+Event Type,Hypothesis 1 Supported,Pre-Event RVR,Post-Rising RVR,Post-Decay RVR,Details
+FDA Approvals,true,25.677054913035523,113.20425057049503,13.52064195620225,"Pre-RVR: 25.677, Rising-RVR: 113.204, Decay-RVR: 13.521"
+Earnings Announcements,true,8.971902653425275,85.05128523211513,4.981528636896209,"Pre-RVR: 8.972, Rising-RVR: 85.051, Decay-RVR: 4.982"
