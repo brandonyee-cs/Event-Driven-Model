@@ -1,4 +1,0 @@
-sub_hypothesis_short,sub_hypothesis_full,fda_result,fda_details,sub_hypothesis_short_right,sub_hypothesis_full_right,earn_result,earn_details
-H2.1,H2.1: Pre-event volatility innovations predict returns,false,0/6 tests,H2.1,H2.1: Pre-event volatility innovations predict returns,false,0/6 tests
-H2.3,H2.3: Asymmetric volatility response correlates with price adjustment,false,0/1 tests,H2.3,H2.3: Asymmetric volatility response correlates with price adjustment,false,0/1 tests
-H2.2,H2.2: Post-event volatility persistence extends elevated returns,true,2/2 tests,H2.2,H2.2: Post-event volatility persistence extends elevated returns,false,0/2 tests

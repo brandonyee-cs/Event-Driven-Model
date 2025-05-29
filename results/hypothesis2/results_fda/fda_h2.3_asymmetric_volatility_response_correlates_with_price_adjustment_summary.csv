@@ -1,2 +1,0 @@
-test_case,metric1_name,metric1_value,metric2_name,metric2_value,p_value,n_samples_neg,n_samples_pos,significant,direction_correct,hypothesis_supported
-Asymmetric Response (GJR vs GARCH),Diff of Mean Vol Diffs,-0.0001657517358447159,t-statistic,-2.0545077266309075,0.039940034488352955,9944,9944,1,0,0

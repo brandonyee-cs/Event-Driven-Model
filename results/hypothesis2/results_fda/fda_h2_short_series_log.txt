@@ -1,9 +1,0 @@
-Event MNK_20220914, Ticker MNK, Non-NaN Returns: 11
-Event SNDX_20241115, Ticker SNDX, Non-NaN Returns: 11
-Event LLY_20151124, Ticker LLY, Non-NaN Returns: 14
-Event CORT_20120217, Ticker CORT, Non-NaN Returns: 9
-Event VRX_20120203, Ticker VRX, Non-NaN Returns: 19
-Event BBIO_20241122, Ticker BBIO, Non-NaN Returns: 6
-Event JNJ_20151116, Ticker JNJ, Non-NaN Returns: 10
-Event MRK_20120202, Ticker MRK, Non-NaN Returns: 19
-Event EYPT_20180209, Ticker EYPT, Non-NaN Returns: 6
