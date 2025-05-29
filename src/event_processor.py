@@ -2292,7 +2292,7 @@ class EventAnalysis:
             pl.mean('three_phase_volatility').alias('mean_three_phase_volatility'), # Avg sigma_e_t
             pl.mean('rvr').alias('mean_rvr'),
             pl.median('rvr').alias('median_rvr'),
-            pl.sum(pl.col('rvr').is_not_null()).alias('event_count_rvr') # Count non-null RVRs
+            pl.col('rvr').is_not_null().sum().alias('event_count_rvr')
         ]).sort('days_to_event')
 
         # Calculate H1 phase statistics from the aggregated daily RVRs
