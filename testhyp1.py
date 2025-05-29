@@ -258,8 +258,6 @@ def compare_results():
         fda_h1_test = pl.read_csv(fda_h1_test_file)
         earnings_h1_test = pl.read_csv(earnings_h1_test_file)
         
-        # print("Successfully loaded H1 result files for comparison.") # Less verbose
-        
         # FIXED: Make sure all columns have the same length (2 elements each)
         comparison_data = {
             'Event Type': ['FDA Approvals', 'Earnings Announcements'],
@@ -307,7 +305,7 @@ def compare_results():
             rects2 = ax.bar(x_indices + bar_width/2, data_earnings.fillna(0), bar_width, label=event_types_unique[1], color='salmon', alpha=0.85, edgecolor='black')
 
             ax.set_ylabel('Average RVR', fontsize=12)
-            ax.set_title('Hypothesis 1: RVR by Phase and Event Type', fontsize=14, fontweight='bold')
+            ax.set_title(f'Hypothesis 1: RVR by Phase and Event Type (Window: {ANALYSIS_WINDOW[0]} to {ANALYSIS_WINDOW[1]} days)', fontsize=14, fontweight='bold')
             ax.set_xticks(x_indices)
             ax.set_xticklabels(phases_order, fontsize=11)
             ax.legend(fontsize=10, loc='upper right')
