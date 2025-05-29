@@ -135,6 +135,15 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
                     ha='center', transform=ax.transAxes,
                     bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.8))
 
+            # Add phase window information
+            phase_windows = {
+                'Pre-Event': f'({ANALYSIS_WINDOW[0]} to -1)',
+                'Post-Event Rising': '(0 to 5)',
+                'Post-Event Decay': '(6 to 15)'
+            }
+            phase_labels = [f"{phase}\n{phase_windows[phase]}" for phase in phases_pd['phase']]
+            ax.set_xticklabels(phase_labels, fontsize=10)
+
             plt.tight_layout(rect=[0, 0.05, 1, 0.95])
             plt.savefig(os.path.join(results_dir, f"{file_prefix}_h1_rvr_phase_plot.png"), dpi=150)
             plt.close(fig)
@@ -326,6 +335,15 @@ def compare_results():
             support_text_comp = f"H1 Support: FDA {fda_supported_text_comp} | Earnings {earn_supported_text_comp}"
             fig.text(0.5, 0.01, support_text_comp, ha='center', va='bottom', fontsize=10, 
                      bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.7))
+
+            # Add phase window information
+            phase_windows = {
+                'Pre-Event': f'({ANALYSIS_WINDOW[0]} to -1)',
+                'Post-Event Rising': '(0 to 5)',
+                'Post-Event Decay': '(6 to 15)'
+            }
+            phase_labels = [f"{phase}\n{phase_windows[phase]}" for phase in phases_order]
+            ax.set_xticklabels(phase_labels, fontsize=10)
 
             plt.tight_layout(rect=[0, 0.05, 1, 0.95]) 
             plt.savefig(os.path.join(comparison_dir, "hypothesis1_rvr_phase_comparison.png"), dpi=200)
