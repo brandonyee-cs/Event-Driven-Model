@@ -55,7 +55,7 @@ DELTA_T1 = 5.0
 DELTA_T2 = 3.0  
 DELTA_T3 = 10.0  
 DELTA = 5  
-OPTIMISTIC_BIAS = 0.01  
+OPTIMISTIC_BIAS = 0.00
 RISK_FREE_RATE = 0.0  
 
 def generate_h1_summary_report(results_dir: str, file_prefix: str):
