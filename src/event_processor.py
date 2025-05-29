@@ -32,7 +32,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
 class EventDataLoader:
-    def __init__(self, event_path: str, stock_paths: List[str], window_days: int = 30,
+    def __init__(self, event_path: str, stock_paths: List[str], window_days: int = 15,
                  event_date_col: str = 'Event Date', ticker_col: str = 'ticker'):
         """
         Initialize DataLoader for events using Polars.
@@ -944,7 +944,7 @@ class EventAnalysis:
         results_dir: str,
         file_prefix: str = "event",
         return_col: str = 'ret',
-        analysis_window: Tuple[int, int] = (-60, 60),
+        analysis_window: Tuple[int, int] = (-15, 15),
         sharpe_window: int = 5,
         annualize: bool = True,
         risk_free_rate: float = 0.0
@@ -1052,7 +1052,7 @@ class EventAnalysis:
 
     def calculate_sharpe_quantiles(self, results_dir: str, file_prefix: str = "event",
                           return_col: str = 'ret',
-                          analysis_window: Tuple[int, int] = (-60, 60),
+                          analysis_window: Tuple[int, int] = (-15, 15),
                           lookback_window: int = 10,
                           quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
                           annualize: bool = True,
@@ -1175,7 +1175,7 @@ class EventAnalysis:
                                      results_dir: str,
                                      file_prefix: str = "event",
                                      return_col: str = 'ret',
-                                     analysis_window: Tuple[int, int] = (-60, 60),
+                                     analysis_window: Tuple[int, int] = (-15, 15),
                                      lookback_window: int = 10,
                                      quantiles: List[float] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]):
         # print(f"\n--- Calculating Volatility Quantiles (Lookback: {lookback_window}) ---")
@@ -1622,7 +1622,7 @@ class EventAnalysis:
                                        results_dir: str,
                                        file_prefix: str = "event",
                                        return_col: str = 'ret',
-                                       analysis_window: Tuple[int, int] = (-30, 30),
+                                       analysis_window: Tuple[int, int] = (-15, 15),
                                        garch_type: str = 'gjr',
                                        k1: float = 1.5,
                                        k2: float = 2.0,
