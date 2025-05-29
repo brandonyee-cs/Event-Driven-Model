@@ -1,7 +1,7 @@
 model_type,prediction_window,slope,r_squared,p_value,n_samples,significant,direction_correct,hypothesis_supported
-garch,1,0,0,1.0,478,false,false,false
-garch,3,0,0,1.0,479,false,false,false
-garch,5,0,0,1.0,479,false,false,false
-gjr,1,0,0,1.0,478,false,false,false
-gjr,3,0,0,1.0,479,false,false,false
-gjr,5,0,0,1.0,479,false,false,false
+garch,1,0,0,1.0,475,false,false,false
+garch,3,0,0,1.0,477,false,false,false
+garch,5,0,0,1.0,477,false,false,false
+gjr,1,0,0,1.0,475,false,false,false
+gjr,3,0,0,1.0,477,false,false,false
+gjr,5,0,0,1.0,477,false,false,false
