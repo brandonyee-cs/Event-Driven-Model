@@ -46,7 +46,6 @@ EARNINGS_RESULTS_DIR = "results/hypothesis1/results_earnings/"
 EARNINGS_FILE_PREFIX = "earnings"
 EARNINGS_EVENT_DATE_COL = "ANNDATS"
 EARNINGS_TICKER_COL = "ticker"
-
 WINDOW_DAYS = 60 
 ANALYSIS_WINDOW = (-30, 30) 
 GARCH_TYPE = 'gjr' 
@@ -55,14 +54,9 @@ K2 = 2.0
 DELTA_T1 = 5.0  
 DELTA_T2 = 3.0  
 DELTA_T3 = 10.0  
-DELTA = 5   # Duration of rising phase for ThreePhaseModel and bias calculation
-
-# --- NEW Parameters for Endogenous Bias ---
-B0 = 0.01  # Baseline bias (1%, decimal form)
-KAPPA = 2.0  # Bias sensitivity parameter
-RISK_FREE_RATE = 0.02 / 252  # Daily risk-free rate (e.g., 2% annual, decimal form)
-TAU_B = 0.001  # Transaction cost for buying (0.1%, decimal form)
-TAU_S = 0.0005  # Transaction cost for selling (0.05%, decimal form)
+DELTA = 5  
+OPTIMISTIC_BIAS = 0.01  
+RISK_FREE_RATE = 0.0  
 
 def generate_h1_summary_report(results_dir: str, file_prefix: str):
     """
@@ -73,6 +67,7 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
     
     if not os.path.exists(h1_test_file):
         print(f"  Warning: H1 test result file not found: {h1_test_file}")
+        # Create a default "not supported" summary if file is missing
         summary_df = pl.DataFrame({
             'hypothesis': ["H1: RVR peaks during post-event rising phase"],
             'result': [False],
@@ -80,6 +75,7 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
         })
         summary_df.write_csv(os.path.join(results_dir, f"{file_prefix}_h1_overall_summary.csv"))
         print(f"  Hypothesis 1 for {file_prefix.upper()}: NOT SUPPORTED (result file missing).")
+        # No plot can be generated
         return
 
     try:
@@ -95,15 +91,10 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
             print(f"  Hypothesis 1 for {file_prefix.upper()}: NOT SUPPORTED (result file empty).")
             return
 
-        h1_supported = h1_df['result'][0] if 'result' in h1_df.columns and not h1_df['result'].is_null()[0] else False
-        
-        pre_rvr = h1_df['pre_event_rvr'][0] if 'pre_event_rvr' in h1_df.columns and not h1_df['pre_event_rvr'].is_null()[0] else float('nan')
-        rising_rvr = h1_df['post_rising_rvr'][0] if 'post_rising_rvr' in h1_df.columns and not h1_df['post_rising_rvr'].is_null()[0] else float('nan')
-        decay_rvr = h1_df['post_decay_rvr'][0] if 'post_decay_rvr' in h1_df.columns and not h1_df['post_decay_rvr'].is_null()[0] else float('nan')
-
-        details = (f"Pre-RVR: {pre_rvr:.3f}, "
-                   f"Rising-RVR: {rising_rvr:.3f}, "
-                   f"Decay-RVR: {decay_rvr:.3f}")
+        h1_supported = h1_df['result'][0]
+        details = (f"Pre-RVR: {h1_df['pre_event_rvr'][0]:.3f}, "
+                   f"Rising-RVR: {h1_df['post_rising_rvr'][0]:.3f}, "
+                   f"Decay-RVR: {h1_df['post_decay_rvr'][0]:.3f}")
 
         summary_df = pl.DataFrame({
             'hypothesis': [h1_df['hypothesis'][0]],
@@ -114,14 +105,15 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
         print(f"  Hypothesis 1 for {file_prefix.upper()}: {'SUPPORTED' if h1_supported else 'NOT SUPPORTED'}")
         print(f"  Details: {details}")
 
+        # Generate plot for H1 phases
         try:
             import matplotlib.pyplot as plt
             phases_data = [
-                {'phase': 'Pre-Event', 'rvr': pre_rvr},
-                {'phase': 'Post-Event Rising', 'rvr': rising_rvr},
-                {'phase': 'Post-Event Decay', 'rvr': decay_rvr}
+                {'phase': 'Pre-Event', 'rvr': h1_df['pre_event_rvr'][0]},
+                {'phase': 'Post-Event Rising', 'rvr': h1_df['post_rising_rvr'][0]},
+                {'phase': 'Post-Event Decay', 'rvr': h1_df['post_decay_rvr'][0]}
             ]
-            phases_pd = pd.DataFrame(phases_data)
+            phases_pd = pd.DataFrame(phases_data) # Matplotlib works well with pandas
             
             fig, ax = plt.subplots(figsize=(8, 5))
             bars = ax.bar(phases_pd['phase'], phases_pd['rvr'], 
@@ -134,9 +126,10 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
 
             for bar in bars:
                 height = bar.get_height()
-                if pd.notna(height): ax.text(bar.get_x() + bar.get_width()/2., height, f'{height:.3f}', ha='center', va='bottom' if height >=0 else 'top')
-                else: ax.text(bar.get_x() + bar.get_width()/2., 0,'N/A', ha='center', va='bottom')
-
+                if pd.notna(height):
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{height:.3f}', ha='center', va='bottom' if height >=0 else 'top')
+            
             status_text = "SUPPORTED" if h1_supported else "NOT SUPPORTED"
             ax.text(0.5, -0.15, f"Overall H1 Status: {status_text}", 
                     ha='center', transform=ax.transAxes,
@@ -145,11 +138,16 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
             plt.tight_layout(rect=[0, 0.05, 1, 0.95])
             plt.savefig(os.path.join(results_dir, f"{file_prefix}_h1_rvr_phase_plot.png"), dpi=150)
             plt.close(fig)
+            # print(f"  Saved H1 RVR phase plot to {results_dir}")
+
         except Exception as e:
             print(f"  Error generating H1 plot for {file_prefix}: {e}")
+            # traceback.print_exc()
 
     except Exception as e:
         print(f"  Error generating H1 summary for {file_prefix}: {e}")
+        # traceback.print_exc()
+
 
 def run_fda_analysis():
     print("\n=== Starting FDA Approval Event Analysis for Hypothesis 1 ===")
@@ -183,9 +181,9 @@ def run_fda_analysis():
             results_dir=FDA_RESULTS_DIR, file_prefix=FDA_FILE_PREFIX, return_col='ret',
             analysis_window=ANALYSIS_WINDOW, garch_type=GARCH_TYPE,
             k1=K1, k2=K2, delta_t1=DELTA_T1, delta_t2=DELTA_T2, delta_t3=DELTA_T3, delta=DELTA,
-            b0=B0, kappa=KAPPA, risk_free_rate=RISK_FREE_RATE, tau_b=TAU_B, tau_s=TAU_S
+            optimistic_bias=OPTIMISTIC_BIAS, risk_free_rate=RISK_FREE_RATE
         )
-        generate_h1_summary_report(FDA_RESULTS_DIR, FDA_FILE_PREFIX)
+        generate_h1_summary_report(FDA_RESULTS_DIR, FDA_FILE_PREFIX) # ADDED
         print(f"\n--- FDA Event Analysis for Hypothesis 1 Finished (Results in '{FDA_RESULTS_DIR}') ---")
         return True
     except Exception as e: 
@@ -225,9 +223,9 @@ def run_earnings_analysis():
             results_dir=EARNINGS_RESULTS_DIR, file_prefix=EARNINGS_FILE_PREFIX, return_col='ret',
             analysis_window=ANALYSIS_WINDOW, garch_type=GARCH_TYPE,
             k1=K1, k2=K2, delta_t1=DELTA_T1, delta_t2=DELTA_T2, delta_t3=DELTA_T3, delta=DELTA,
-            b0=B0, kappa=KAPPA, risk_free_rate=RISK_FREE_RATE, tau_b=TAU_B, tau_s=TAU_S
+            optimistic_bias=OPTIMISTIC_BIAS, risk_free_rate=RISK_FREE_RATE
         )
-        generate_h1_summary_report(EARNINGS_RESULTS_DIR, EARNINGS_FILE_PREFIX)
+        generate_h1_summary_report(EARNINGS_RESULTS_DIR, EARNINGS_FILE_PREFIX) # ADDED
         print(f"\n--- Earnings Event Analysis for Hypothesis 1 Finished (Results in '{EARNINGS_RESULTS_DIR}') ---")
         return True
     except Exception as e: 
@@ -241,10 +239,14 @@ def compare_results():
     comparison_dir = "results/hypothesis1/comparison/"
     os.makedirs(comparison_dir, exist_ok=True)
     
+    # Now we use the overall summary files created by generate_h1_summary_report
     fda_h1_summary_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_h1_overall_summary.csv")
     earnings_h1_summary_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_h1_overall_summary.csv")
+    
+    # Also need the _hypothesis1_test.csv files for the RVR values for the plot
     fda_h1_test_file = os.path.join(FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_hypothesis1_test.csv")
     earnings_h1_test_file = os.path.join(EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_hypothesis1_test.csv")
+
     
     missing_files = [fp for fp in [fda_h1_summary_file, earnings_h1_summary_file, fda_h1_test_file, earnings_h1_test_file] if not os.path.exists(fp)]
     if missing_files:
@@ -256,28 +258,19 @@ def compare_results():
         fda_h1_test = pl.read_csv(fda_h1_test_file)
         earnings_h1_test = pl.read_csv(earnings_h1_test_file)
         
+        # print("Successfully loaded H1 result files for comparison.") # Less verbose
+        
+        # FIXED: Make sure all columns have the same length (2 elements each)
         comparison_data = {
             'Event Type': ['FDA Approvals', 'Earnings Announcements'],
             'Hypothesis 1 Supported': [
-                fda_h1_summary['result'][0] if 'result' in fda_h1_summary.columns and not fda_h1_summary['result'].is_null()[0] else False,
-                earnings_h1_summary['result'][0] if 'result' in earnings_h1_summary.columns and not earnings_h1_summary['result'].is_null()[0] else False
+                fda_h1_summary['result'][0],
+                earnings_h1_summary['result'][0]
             ],
-            'Pre-Event RVR': [
-                fda_h1_test["pre_event_rvr"][0] if 'pre_event_rvr' in fda_h1_test.columns and not fda_h1_test['pre_event_rvr'].is_null()[0] else np.nan, 
-                earnings_h1_test["pre_event_rvr"][0] if 'pre_event_rvr' in earnings_h1_test.columns and not earnings_h1_test['pre_event_rvr'].is_null()[0] else np.nan
-            ],
-            'Post-Rising RVR': [
-                fda_h1_test["post_rising_rvr"][0] if 'post_rising_rvr' in fda_h1_test.columns and not fda_h1_test['post_rising_rvr'].is_null()[0] else np.nan, 
-                earnings_h1_test["post_rising_rvr"][0] if 'post_rising_rvr' in earnings_h1_test.columns and not earnings_h1_test['post_rising_rvr'].is_null()[0] else np.nan
-            ],
-            'Post-Decay RVR': [
-                fda_h1_test["post_decay_rvr"][0] if 'post_decay_rvr' in fda_h1_test.columns and not fda_h1_test['post_decay_rvr'].is_null()[0] else np.nan, 
-                earnings_h1_test["post_decay_rvr"][0] if 'post_decay_rvr' in earnings_h1_test.columns and not earnings_h1_test['post_decay_rvr'].is_null()[0] else np.nan
-            ],
-            'Details': [
-                fda_h1_summary['details'][0] if 'details' in fda_h1_summary.columns else "N/A", 
-                earnings_h1_summary['details'][0] if 'details' in earnings_h1_summary.columns else "N/A"
-            ]
+            'Pre-Event RVR': [fda_h1_test["pre_event_rvr"][0], earnings_h1_test["pre_event_rvr"][0]],
+            'Post-Rising RVR': [fda_h1_test["post_rising_rvr"][0], earnings_h1_test["post_rising_rvr"][0]],
+            'Post-Decay RVR': [fda_h1_test["post_decay_rvr"][0], earnings_h1_test["post_decay_rvr"][0]],
+            'Details': [fda_h1_summary['details'][0], earnings_h1_summary['details'][0]]
         }
         
         comparison_df = pl.DataFrame(comparison_data)
@@ -286,14 +279,12 @@ def compare_results():
         print("\nHypothesis 1 Comparison Summary:")
         print(comparison_df)
         
+        # Create plot comparing RVR phases for both event types
         phases_plot_data = []
         for event_type, df_test in [("FDA Approvals", fda_h1_test), ("Earnings Announcements", earnings_h1_test)]:
-            phases_plot_data.append({'event_type': event_type, 'phase': 'Pre-Event', 
-                                     'rvr': df_test['pre_event_rvr'][0] if 'pre_event_rvr' in df_test.columns and not df_test['pre_event_rvr'].is_null()[0] else np.nan})
-            phases_plot_data.append({'event_type': event_type, 'phase': 'Post-Event Rising', 
-                                     'rvr': df_test['post_rising_rvr'][0] if 'post_rising_rvr' in df_test.columns and not df_test['post_rising_rvr'].is_null()[0] else np.nan})
-            phases_plot_data.append({'event_type': event_type, 'phase': 'Post-Event Decay', 
-                                     'rvr': df_test['post_decay_rvr'][0] if 'post_decay_rvr' in df_test.columns and not df_test['post_decay_rvr'].is_null()[0] else np.nan})
+            phases_plot_data.append({'event_type': event_type, 'phase': 'Pre-Event', 'rvr': df_test['pre_event_rvr'][0]})
+            phases_plot_data.append({'event_type': event_type, 'phase': 'Post-Event Rising', 'rvr': df_test['post_rising_rvr'][0]})
+            phases_plot_data.append({'event_type': event_type, 'phase': 'Post-Event Decay', 'rvr': df_test['post_decay_rvr'][0]})
         
         phases_plot_df = pl.from_dicts(phases_plot_data)
         
@@ -329,11 +320,11 @@ def compare_results():
                     ax.annotate(f'{height:.3f}' if pd.notnull(height) else 'N/A',
                                 xy=(rect_item.get_x() + rect_item.get_width() / 2, height),
                                 xytext=(0, 3), textcoords="offset points",
-                                ha='center', va='bottom' if height >=0 else 'top', fontsize=9) # Adjusted va
+                                ha='center', va='bottom', fontsize=9)
             autolabel_bars(rects1); autolabel_bars(rects2)
             
-            fda_supported_text_comp = "SUPPORTED" if comparison_data['Hypothesis 1 Supported'][0] else "NOT SUPPORTED"
-            earn_supported_text_comp = "SUPPORTED" if comparison_data['Hypothesis 1 Supported'][1] else "NOT SUPPORTED"
+            fda_supported_text_comp = "SUPPORTED" if fda_h1_summary["result"][0] else "NOT SUPPORTED"
+            earn_supported_text_comp = "SUPPORTED" if earnings_h1_summary["result"][0] else "NOT SUPPORTED"
             support_text_comp = f"H1 Support: FDA {fda_supported_text_comp} | Earnings {earn_supported_text_comp}"
             fig.text(0.5, 0.01, support_text_comp, ha='center', va='bottom', fontsize=10, 
                      bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.7))
