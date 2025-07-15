@@ -280,15 +280,17 @@ class TwoRiskFramework:
         Fit the two-risk framework to data
         """
         print("Fitting Two-Risk Framework...")
-        
+
         # Fit individual components
         self.directional_risk.fit(data)
         self.impact_uncertainty.fit(data)
-        
+
+        # Mark as fitted before analyzing decomposition quality
+        self.is_fitted = True  # ← Move this line earlier
+
         # Analyze risk decomposition quality
         self._analyze_decomposition_quality(data)
-        
-        self.is_fitted = True
+
         print("Two-Risk Framework fitted successfully.")
         return self
     
@@ -317,26 +319,28 @@ class TwoRiskFramework:
         Analyze the quality of risk decomposition
         """
         try:
-            risks = self.extract_risks(data)
+            # Extract risks directly without calling extract_risks to avoid circular dependency
+            directional = self.directional_risk.extract(data)
+            impact = self.impact_uncertainty.extract(data)
+            total_risk_proxy = np.abs(data.get_column('ret').to_numpy())
             
             # Calculate correlation between risk components
-            valid_mask = (~np.isnan(risks['directional_news_risk']) & 
-                         ~np.isnan(risks['impact_uncertainty']))
+            valid_mask = (~np.isnan(directional) & ~np.isnan(impact))
             
             if np.sum(valid_mask) > 10:
                 self.risk_correlation = np.corrcoef(
-                    risks['directional_news_risk'][valid_mask],
-                    risks['impact_uncertainty'][valid_mask]
+                    directional[valid_mask],
+                    impact[valid_mask]
                 )[0, 1]
                 
                 # Calculate explained variance
                 from sklearn.linear_model import LinearRegression
                 
                 X = np.column_stack([
-                    risks['directional_news_risk'][valid_mask],
-                    risks['impact_uncertainty'][valid_mask]
+                    directional[valid_mask],
+                    impact[valid_mask]
                 ])
-                y = risks['total_risk'][valid_mask]
+                y = total_risk_proxy[valid_mask]
                 
                 reg = LinearRegression().fit(X, y)
                 explained_var = reg.score(X, y)
@@ -347,11 +351,18 @@ class TwoRiskFramework:
                     'directional_contribution': np.abs(reg.coef_[0]),
                     'impact_contribution': np.abs(reg.coef_[1])
                 }
+            else:
+                self.decomposition_quality = {
+                    'risk_correlation': 0.0,
+                    'explained_variance': 0.0,
+                    'directional_contribution': 0.0,
+                    'impact_contribution': 0.0
+                }
                 
         except Exception as e:
             warnings.warn(f"Could not analyze decomposition quality: {e}")
             self.decomposition_quality = {}
-    
+        
     def get_phase_analysis(self, data: pl.DataFrame) -> Dict:
         """
         Analyze risk components by event phases

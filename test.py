@@ -100,7 +100,8 @@ def test_basic_functionality():
     """Test basic functionality of key components"""
     print("\nTesting basic functionality...")
     
-    test_results = {"passed": 0, "total": 5}
+    passed_tests = 0
+    total_tests = 5
     
     try:
         import polars as pl
@@ -120,7 +121,7 @@ def test_basic_functionality():
         
         print("✓ Sample data created successfully")
         
-        # Test two-risk framework
+        # Test 1: Two-risk framework
         try:
             from src.two_risk_framework import TwoRiskFramework
             
@@ -131,25 +132,21 @@ def test_basic_functionality():
             print("✓ Two-risk framework basic test passed")
             print(f"  - Directional risk shape: {np.array(risk_components['directional_news_risk']).shape}")
             print(f"  - Impact uncertainty shape: {np.array(risk_components['impact_uncertainty']).shape}")
-            test_results["passed"] += 1
+            passed_tests += 1
         except Exception as e:
             print(f"✗ Two-risk framework test failed: {e}")
         
-        test_results["total"] = test_results.get("total", 0) + 1
-        
-        # Test heterogeneous investors (simplified)
+        # Test 2: Heterogeneous investors (simplified)
         try:
             from src.investor_heterogeneity import HeterogeneousInvestorMarket
             
             investor_market = HeterogeneousInvestorMarket()
             print("✓ Heterogeneous investor framework basic test passed")
-            test_results["passed"] += 1
+            passed_tests += 1
         except Exception as e:
             print(f"✗ Heterogeneous investor test failed: {e}")
         
-        test_results["total"] += 1
-        
-        # Test statistical testing (basic)
+        # Test 3: Statistical testing (basic)
         try:
             from src.statistical_testing import RVRPeakTest
             
@@ -164,25 +161,21 @@ def test_basic_functionality():
             print("✓ Statistical testing basic test passed")
             print(f"  - Test result: {test_result.hypothesis_name}")
             print(f"  - P-value: {test_result.p_value:.4f}")
-            test_results["passed"] += 1
+            passed_tests += 1
         except Exception as e:
             print(f"✗ Statistical testing test failed: {e}")
         
-        test_results["total"] += 1
-        
-        # Test portfolio optimization (basic)
+        # Test 4: Portfolio optimization (basic)
         try:
             from src.portfolio_optimization import PortfolioOptimizationFramework
             
             portfolio_optimizer = PortfolioOptimizationFramework()
             print("✓ Portfolio optimization framework basic test passed")
-            test_results["passed"] += 1
+            passed_tests += 1
         except Exception as e:
             print(f"✗ Portfolio optimization test failed: {e}")
         
-        test_results["total"] += 1
-        
-        # Test models (basic)
+        # Test 5: Models (basic)
         try:
             from src.models import GARCHModel, GJRGARCHModel
             
@@ -190,13 +183,12 @@ def test_basic_functionality():
             garch_model = GARCHModel()
             gjr_model = GJRGARCHModel()
             print("✓ GARCH models basic test passed")
-            test_results["passed"] += 1
+            passed_tests += 1
         except Exception as e:
             print(f"✗ GARCH models test failed: {e}")
         
-        test_results["total"] += 1
-        
-        return test_results["passed"] >= test_results["total"] * 0.8  # 80% success rate
+        print(f"\nBasic functionality results: {passed_tests}/{total_tests} tests passed")
+        return passed_tests >= total_tests * 0.8  # 80% success rate
         
     except Exception as e:
         print(f"✗ Functionality test failed: {e}")
