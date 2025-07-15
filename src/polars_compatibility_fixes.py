@@ -46,15 +46,14 @@ def safe_apply(expr: pl.Expr, func, return_dtype: Optional[pl.DataType] = None) 
 def safe_interpolate(expr: pl.Expr, method: str = "linear") -> pl.Expr:
     """
     Safe implementation of interpolate that works across Polars versions
+    Note: This should only be called if interpolate doesn't exist
     """
+    # Try forward fill then backward fill as fallback
     try:
-        return expr.interpolate(method=method)
-    except (AttributeError, TypeError):
-        try:
-            return expr.interpolate()
-        except AttributeError:
-            # Fallback to forward fill then backward fill
-            return expr.forward_fill().backward_fill()
+        return expr.forward_fill().backward_fill()
+    except AttributeError:
+        # If even forward_fill doesn't exist, return the original expression
+        return expr
 
 def safe_rolling_mean(expr: pl.Expr, window_size: int, min_periods: Optional[int] = None, center: bool = False) -> pl.Expr:
     """
@@ -119,25 +118,31 @@ def safe_config_set_streaming_chunk_size(size: int):
         # Not available in this version - pass silently
         pass
 
-# Monkey patch for backwards compatibility if needed
 def patch_polars_methods():
     """
-    Apply compatibility patches to Polars expressions
+    Apply compatibility patches to Polars expressions and Config
     """
+    # Only patch Config methods if they don't exist
+    if not hasattr(pl.Config, 'set_engine_affinity'):
+        pl.Config.set_engine_affinity = safe_set_engine_affinity
+        
+    if not hasattr(pl.Config, 'set_streaming_chunk_size'):
+        pl.Config.set_streaming_chunk_size = safe_config_set_streaming_chunk_size
+    
+    # Only patch expression methods if they don't exist
     if not hasattr(pl.Expr, 'clip_quantile'):
         pl.Expr.clip_quantile = lambda self, lower, upper: safe_clip_quantile(self, lower, upper)
     
+    # Only patch apply methods if neither exists
     if not hasattr(pl.Expr, 'apply') and not hasattr(pl.Expr, 'map_elements'):
         pl.Expr.apply = lambda self, func: safe_apply(self, func)
     
-    # Additional patches as needed
-    original_interpolate = getattr(pl.Expr, 'interpolate', None)
-    if original_interpolate:
-        pl.Expr.interpolate = lambda self, method="linear": safe_interpolate(self, method)
-
-# Apply patches on import
-patch_polars_methods()
+    # Don't patch interpolate - it usually exists and works fine
+    # If it doesn't exist, users can call safe_interpolate directly
 
 # Configure Polars safely
 safe_set_engine_affinity("streaming")
 safe_config_set_streaming_chunk_size(1000000)
+
+# Apply conservative patches on import
+patch_polars_methods()
