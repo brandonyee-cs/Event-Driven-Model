@@ -13,6 +13,26 @@ from scipy import stats
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
+# Import compatibility fixes
+try:
+    from src.polars_compatibility_fixes import safe_clip_quantile, safe_apply, safe_interpolate
+except ImportError:
+    # Fallback implementations
+    def safe_clip_quantile(expr, lower, upper):
+        return expr.clip(expr.quantile(lower), expr.quantile(upper))
+    
+    def safe_apply(expr, func, return_dtype=None):
+        try:
+            return expr.map_elements(func, return_dtype=return_dtype) if return_dtype else expr.map_elements(func)
+        except AttributeError:
+            return expr.apply(func)
+    
+    def safe_interpolate(expr, method="linear"):
+        try:
+            return expr.interpolate()
+        except AttributeError:
+            return expr.forward_fill().backward_fill()
+
 class RiskComponent(ABC):
     """Abstract base class for risk components"""
     
@@ -121,8 +141,10 @@ class DirectionalNewsRisk(RiskComponent):
             .alias('directional_risk_raw')
         ]).with_columns([
             # Normalize by baseline volatility and apply sigmoid transformation
-            pl.col('directional_risk_raw').apply(
-                lambda x: 2 / (1 + np.exp(-x / self.baseline_volatility)) - 1
+            safe_apply(
+                pl.col('directional_risk_raw'),
+                lambda x: 2 / (1 + np.exp(-x / self.baseline_volatility)) - 1 if self.baseline_volatility > 0 else 0,
+                return_dtype=pl.Float64
             ).alias('directional_risk')
         ])
         
@@ -224,8 +246,10 @@ class ImpactUncertainty(RiskComponent):
             .alias('raw_impact_uncertainty')
         ]).with_columns([
             # Normalize and apply transformation
-            pl.col('raw_impact_uncertainty').apply(
-                lambda x: x / self.baseline_variance if self.baseline_variance > 0 else 0
+            safe_apply(
+                pl.col('raw_impact_uncertainty'),
+                lambda x: x / self.baseline_variance if self.baseline_variance > 0 else 0,
+                return_dtype=pl.Float64
             ).alias('impact_uncertainty')
         ])
         
