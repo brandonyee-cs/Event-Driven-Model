@@ -21,9 +21,9 @@ Note: The repository does not include the raw data files due to licensing restri
 
 If you use this code in your research, please cite:
 
-```
+``` bibtex
 @article{yee2025modeling,
-  title={Modeling Equilibrium Asset Pricing Around Events with Heterogeneous Beliefs, Dynamic Volatility, and a Two-Risk Uncertainty Framework},
+  title={Beyond the Event Horizon: Peak Risk-Adjusted Performance in Post-Event Markets},
   author={Yee, Brandon},
   year={2025}
 }
