@@ -33,6 +33,8 @@ except ImportError as e:
     print("Ensure 'event_processor.py' and 'models.py' are in the src directory.")
     sys.exit(1)
 
+pl.Config.set_engine_affinity(engine="streaming")
+
 # --- VM File Paths (from original_model.py) ---
 STOCK_FILES = [
     "/home/d87016661/crsp_dsf-2000-2001.parquet",
