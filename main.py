@@ -7,7 +7,7 @@ Based on original_model.py structure, this script runs the complete analysis pip
 using the VM file paths and generates hypothesis testing results.
 """
 
-import pandas as pd
+import polars as pl
 import numpy as np
 import os
 import sys
@@ -33,6 +33,11 @@ except ImportError as e:
     print("Ensure 'event_processor.py' and 'models.py' are in the src directory.")
     sys.exit(1)
 
+    
+
+# Configure Polars for optimal performance
+pl.Config.set_streaming_chunk_size(10000)
+pl.Config.set_tbl_rows(20)
 pl.Config.set_engine_affinity(engine="streaming")
 
 # --- VM File Paths (from original_model.py) ---
@@ -87,19 +92,20 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
         return
 
     try:
-        import polars as pl
         h1_df = pl.read_csv(h1_test_file)
         if h1_df.is_empty():
             print(f"  Warning: H1 test result file is empty: {h1_test_file}")
             return
 
-        h1_supported = h1_df['result'][0]
-        details = (f"Pre-RVR: {h1_df['pre_event_rvr'][0]:.3f}, "
-                   f"Rising-RVR: {h1_df['post_rising_rvr'][0]:.3f}, "
-                   f"Decay-RVR: {h1_df['post_decay_rvr'][0]:.3f}")
+        h1_supported = h1_df.item(0, 'result')
+        pre_rvr = h1_df.item(0, 'pre_event_rvr')
+        rising_rvr = h1_df.item(0, 'post_rising_rvr')
+        decay_rvr = h1_df.item(0, 'post_decay_rvr')
+        
+        details = f"Pre-RVR: {pre_rvr:.3f}, Rising-RVR: {rising_rvr:.3f}, Decay-RVR: {decay_rvr:.3f}"
 
         summary_df = pl.DataFrame({
-            'hypothesis': [h1_df['hypothesis'][0]],
+            'hypothesis': [h1_df.item(0, 'hypothesis')],
             'result': [h1_supported],
             'details': [details]
         })
@@ -110,12 +116,15 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
         # Generate visualization
         try:
             import matplotlib.pyplot as plt
-            phases_data = [
-                {'phase': 'Pre-Event', 'rvr': h1_df['pre_event_rvr'][0]},
-                {'phase': 'Post-Event Rising', 'rvr': h1_df['post_rising_rvr'][0]},
-                {'phase': 'Post-Event Decay', 'rvr': h1_df['post_decay_rvr'][0]}
-            ]
-            phases_pd = pd.DataFrame(phases_data)
+            
+            # Create data for plotting using Polars
+            phases_df = pl.DataFrame({
+                'phase': ['Pre-Event', 'Post-Event Rising', 'Post-Event Decay'],
+                'rvr': [pre_rvr, rising_rvr, decay_rvr]
+            })
+            
+            # Convert to pandas for matplotlib compatibility
+            phases_pd = phases_df.to_pandas()
             
             fig, ax = plt.subplots(figsize=(8, 5))
             bars = ax.bar(phases_pd['phase'], phases_pd['rvr'], 
@@ -129,7 +138,7 @@ def generate_h1_summary_report(results_dir: str, file_prefix: str):
 
             for bar in bars:
                 height = bar.get_height()
-                if pd.notna(height):
+                if not np.isnan(height):
                     ax.text(bar.get_x() + bar.get_width()/2., height,
                             f'{height:.3f}', ha='center', va='bottom' if height >= 0 else 'top')
             
@@ -318,27 +327,36 @@ def compare_results():
         return False
     
     try:
-        import polars as pl
-        
         fda_h1_summary = pl.read_csv(fda_h1_summary_file)
         earnings_h1_summary = pl.read_csv(earnings_h1_summary_file)
         fda_h1_test = pl.read_csv(fda_h1_test_file)
         earnings_h1_test = pl.read_csv(earnings_h1_test_file)
         
-        # Create comparison data
-        comparison_data = {
+        # Create comparison data using Polars
+        comparison_df = pl.DataFrame({
             'Event Type': ['FDA Approvals', 'Earnings Announcements'],
             'Hypothesis 1 Supported': [
-                fda_h1_summary['result'][0],
-                earnings_h1_summary['result'][0]
+                fda_h1_summary.item(0, 'result'),
+                earnings_h1_summary.item(0, 'result')
             ],
-            'Pre-Event RVR': [fda_h1_test["pre_event_rvr"][0], earnings_h1_test["pre_event_rvr"][0]],
-            'Post-Rising RVR': [fda_h1_test["post_rising_rvr"][0], earnings_h1_test["post_rising_rvr"][0]],
-            'Post-Decay RVR': [fda_h1_test["post_decay_rvr"][0], earnings_h1_test["post_decay_rvr"][0]],
-            'Details': [fda_h1_summary['details'][0], earnings_h1_summary['details'][0]]
-        }
+            'Pre-Event RVR': [
+                fda_h1_test.item(0, "pre_event_rvr"), 
+                earnings_h1_test.item(0, "pre_event_rvr")
+            ],
+            'Post-Rising RVR': [
+                fda_h1_test.item(0, "post_rising_rvr"), 
+                earnings_h1_test.item(0, "post_rising_rvr")
+            ],
+            'Post-Decay RVR': [
+                fda_h1_test.item(0, "post_decay_rvr"), 
+                earnings_h1_test.item(0, "post_decay_rvr")
+            ],
+            'Details': [
+                fda_h1_summary.item(0, 'details'), 
+                earnings_h1_summary.item(0, 'details')
+            ]
+        })
         
-        comparison_df = pl.DataFrame(comparison_data)
         comparison_df.write_csv(os.path.join(comparison_dir, "hypothesis1_overall_comparison.csv"))
         
         print("\nHypothesis 1 Comparison Summary:")
@@ -348,13 +366,17 @@ def compare_results():
         try:
             import matplotlib.pyplot as plt
             
+            # Create phases plot data using Polars
             phases_plot_data = []
             for event_type, df_test in [("FDA Approvals", fda_h1_test), ("Earnings Announcements", earnings_h1_test)]:
-                phases_plot_data.append({'event_type': event_type, 'phase': 'Pre-Event', 'rvr': df_test['pre_event_rvr'][0]})
-                phases_plot_data.append({'event_type': event_type, 'phase': 'Post-Event Rising', 'rvr': df_test['post_rising_rvr'][0]})
-                phases_plot_data.append({'event_type': event_type, 'phase': 'Post-Event Decay', 'rvr': df_test['post_decay_rvr'][0]})
+                phases_plot_data.extend([
+                    {'event_type': event_type, 'phase': 'Pre-Event', 'rvr': df_test.item(0, 'pre_event_rvr')},
+                    {'event_type': event_type, 'phase': 'Post-Event Rising', 'rvr': df_test.item(0, 'post_rising_rvr')},
+                    {'event_type': event_type, 'phase': 'Post-Event Decay', 'rvr': df_test.item(0, 'post_decay_rvr')}
+                ])
             
-            phases_plot_df = pl.from_dicts(phases_plot_data)
+            phases_plot_df = pl.DataFrame(phases_plot_data)
+            # Convert to pandas for matplotlib compatibility
             phases_pd = phases_plot_df.to_pandas()
             
             fig, ax = plt.subplots(figsize=(12, 7))
@@ -386,7 +408,7 @@ def compare_results():
             def autolabel_bars(rects_group):
                 for rect_item in rects_group:
                     height = rect_item.get_height()
-                    ax.annotate(f'{height:.3f}' if pd.notnull(height) else 'N/A',
+                    ax.annotate(f'{height:.3f}' if not np.isnan(height) else 'N/A',
                                 xy=(rect_item.get_x() + rect_item.get_width() / 2, height),
                                 xytext=(0, 3), textcoords="offset points",
                                 ha='center', va='bottom', fontsize=9)
@@ -395,8 +417,8 @@ def compare_results():
             autolabel_bars(rects2)
             
             # Add support status
-            fda_supported_text = "SUPPORTED" if fda_h1_summary["result"][0] else "NOT SUPPORTED"
-            earn_supported_text = "SUPPORTED" if earnings_h1_summary["result"][0] else "NOT SUPPORTED"
+            fda_supported_text = "SUPPORTED" if fda_h1_summary.item(0, "result") else "NOT SUPPORTED"
+            earn_supported_text = "SUPPORTED" if earnings_h1_summary.item(0, "result") else "NOT SUPPORTED"
             support_text = f"H1 Support: FDA {fda_supported_text} | Earnings {earn_supported_text}"
             fig.text(0.5, 0.01, support_text, ha='center', va='bottom', fontsize=10, 
                      bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.7))
