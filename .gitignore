@@ -201,3 +201,37 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Pro
+ject-specific ignores
+# Development and testing artifacts
+test_*.py
+*_test.py
+*_SUMMARY.md
+validation_report.html
+examples/
+docs/
+demo_results/
+test_results/
+logs/
+
+# Analysis output files
+*.png
+*.jpg
+*.jpeg
+*.pdf
+results/
+output/
+analysis_output/
+
+# Data files (add specific patterns as needed)
+data/
+*.csv
+*.xlsx
+*.json
+*.parquet
+
+# Temporary files
+temp/
+tmp/
+.tmp/
+.kiro/

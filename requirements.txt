@@ -12,5 +12,11 @@ scikit-learn>=1.2.2,<1.4.0  # Using an upper bound for stability
 xgboost>=1.7.6,<2.0.0
 statsmodels
 
+# Deep learning and advanced ML
+tensorflow>=2.13.0,<3.0.0
+hmmlearn>=0.3.0  # Hidden Markov Models
+joblib>=1.3.0  # Model serialization
+
 # Data reading/processing
 pyarrow>=12.0.0  # For Parquet file support
+pyyaml>=6.0  # For YAML configuration files
