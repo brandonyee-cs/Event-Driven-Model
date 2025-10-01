@@ -619,7 +619,7 @@ def run_comprehensive_hypothesis_tests(
         # Calculate variances using rolling window
         analysis_data_with_var = analysis_data.with_columns(
             pl.col("ret")
-            .rolling_var(window_size=5, min_periods=3)
+            .rolling_var(window_size=5, min_samples=3)
             .over("event_id")
             .alias("variance")
         )
@@ -635,7 +635,7 @@ def run_comprehensive_hypothesis_tests(
             )
             if not event_day_data.is_empty():
                 event_day_return = (
-                    event_day_data["ret"].item(0, 0) if event_day_data.height > 0 else 0
+                    event_day_data["ret"].item() if event_day_data.height > 0 else 0
                 )
                 if event_day_return > 0.01:  # Positive event
                     event_outcomes.append(1)
@@ -659,7 +659,7 @@ def run_comprehensive_hypothesis_tests(
         informed_trader_proxy = (
             analysis_data.with_columns(
                 pl.col("ret")
-                .rolling_mean(window_size=5, min_periods=3)
+                .rolling_mean(window_size=5, min_samples=3)
                 .over("event_id")
                 .alias("momentum")
             )["momentum"]
