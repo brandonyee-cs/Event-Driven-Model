@@ -740,6 +740,10 @@ def run_comprehensive_hypothesis_tests(
                 event_day_return = (
                     event_day_data["ret"].item() if event_day_data.height > 0 else 0
                 )
+                # Handle None values from null returns
+                if event_day_return is None:
+                    event_day_return = 0
+
                 if event_day_return > 0.01:  # Positive event
                     event_outcomes.append(1)
                 elif event_day_return < -0.01:  # Negative event
