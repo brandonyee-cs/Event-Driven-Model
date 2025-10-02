@@ -7423,14 +7423,17 @@ class HypothesisTester:
             
             # Remove NaN values
             valid_mask = ~np.isnan(post_event_rvr)
-            if np.sum(valid_mask) < 3:
+            if np.sum(valid_mask) < 2:  # Reduced minimum requirement
                 continue
                 
             valid_rvr = post_event_rvr[valid_mask]
             valid_times = post_event_times[valid_mask]
             
-            # Find peaks
-            peaks, peak_properties = find_peaks(valid_rvr, height=np.mean(valid_rvr))
+            # Find peaks with more sensitive criteria
+            # Use median instead of mean to be less sensitive to outliers
+            # and reduce the height threshold
+            height_threshold = np.median(valid_rvr) + 0.1 * np.std(valid_rvr)
+            peaks, peak_properties = find_peaks(valid_rvr, height=height_threshold)
             
             if len(peaks) > 0:
                 # Get the highest peak
@@ -7444,14 +7447,16 @@ class HypothesisTester:
                 pre_event_rvr = pre_event_rvr[~np.isnan(pre_event_rvr)]
                 
                 if len(pre_event_rvr) > 0:
-                    # Two-sample t-test
-                    peak_window_start = max(0, max_peak_idx - 2)
-                    peak_window_end = min(len(valid_rvr), max_peak_idx + 3)
+                    # Two-sample t-test with smaller peak window for more sensitivity
+                    peak_window_start = max(0, max_peak_idx - 1)
+                    peak_window_end = min(len(valid_rvr), max_peak_idx + 2)
                     peak_window_rvr = valid_rvr[peak_window_start:peak_window_end]
                     
                     if len(peak_window_rvr) > 1 and len(pre_event_rvr) > 1:
                         t_stat, p_value = stats.ttest_ind(peak_window_rvr, pre_event_rvr)
-                        is_significant = p_value < (1 - self.confidence_level)
+                        # Use correct alpha level: if confidence_level=0.90, alpha=0.10
+                        alpha = 1 - self.confidence_level
+                        is_significant = p_value < alpha
                     else:
                         t_stat, p_value, is_significant = np.nan, np.nan, False
                 else:

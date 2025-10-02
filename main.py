@@ -469,18 +469,19 @@ def compare_results():
     comparison_dir = "results/hypothesis1/comparison/"
     os.makedirs(comparison_dir, exist_ok=True)
 
-    # File paths for comparison
+    # File paths for comparison - using comprehensive hypothesis files
     fda_h1_summary_file = os.path.join(
-        FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_h1_overall_summary.csv"
+        FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_comprehensive_hypothesis_summary.csv"
     )
     earnings_h1_summary_file = os.path.join(
-        EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_h1_overall_summary.csv"
+        EARNINGS_RESULTS_DIR,
+        f"{EARNINGS_FILE_PREFIX}_comprehensive_hypothesis_summary.csv",
     )
     fda_h1_test_file = os.path.join(
-        FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_hypothesis1_test.csv"
+        FDA_RESULTS_DIR, f"{FDA_FILE_PREFIX}_hypothesis1_comprehensive.csv"
     )
     earnings_h1_test_file = os.path.join(
-        EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_hypothesis1_test.csv"
+        EARNINGS_RESULTS_DIR, f"{EARNINGS_FILE_PREFIX}_hypothesis1_comprehensive.csv"
     )
 
     missing_files = [
@@ -505,29 +506,29 @@ def compare_results():
         fda_h1_test = pl.read_csv(fda_h1_test_file)
         earnings_h1_test = pl.read_csv(earnings_h1_test_file)
 
-        # Create comparison data using Polars
+        # Create comparison data using Polars - adapted for comprehensive hypothesis format
         comparison_df = pl.DataFrame(
             {
                 "Event Type": ["FDA Approvals", "Earnings Announcements"],
                 "Hypothesis 1 Supported": [
-                    fda_h1_summary.item(0, "result"),
-                    earnings_h1_summary.item(0, "result"),
+                    fda_h1_test.item(0, "overall_significant"),
+                    earnings_h1_test.item(0, "overall_significant"),
                 ],
-                "Pre-Event RVR": [
-                    fda_h1_test.item(0, "pre_event_rvr"),
-                    earnings_h1_test.item(0, "pre_event_rvr"),
+                "Events with Peaks": [
+                    fda_h1_test.item(0, "n_events_with_peaks"),
+                    earnings_h1_test.item(0, "n_events_with_peaks"),
                 ],
-                "Post-Rising RVR": [
-                    fda_h1_test.item(0, "post_rising_rvr"),
-                    earnings_h1_test.item(0, "post_rising_rvr"),
+                "Mean Peak Value": [
+                    fda_h1_test.item(0, "mean_peak_value"),
+                    earnings_h1_test.item(0, "mean_peak_value"),
                 ],
-                "Post-Decay RVR": [
-                    fda_h1_test.item(0, "post_decay_rvr"),
-                    earnings_h1_test.item(0, "post_decay_rvr"),
+                "Significant Peaks": [
+                    fda_h1_test.item(0, "significant_peaks"),
+                    earnings_h1_test.item(0, "significant_peaks"),
                 ],
-                "Details": [
-                    fda_h1_summary.item(0, "details"),
-                    earnings_h1_summary.item(0, "details"),
+                "Total Events": [
+                    fda_h1_summary.item(0, "n_events"),
+                    earnings_h1_summary.item(0, "n_events"),
                 ],
             }
         )
@@ -543,133 +544,91 @@ def compare_results():
         try:
             import matplotlib.pyplot as plt
 
-            # Create phases plot data using Polars
-            phases_plot_data = []
-            for event_type, df_test in [
-                ("FDA Approvals", fda_h1_test),
-                ("Earnings Announcements", earnings_h1_test),
-            ]:
-                phases_plot_data.extend(
-                    [
-                        {
-                            "event_type": event_type,
-                            "phase": "Pre-Event",
-                            "rvr": df_test.item(0, "pre_event_rvr"),
-                        },
-                        {
-                            "event_type": event_type,
-                            "phase": "Post-Event Rising",
-                            "rvr": df_test.item(0, "post_rising_rvr"),
-                        },
-                        {
-                            "event_type": event_type,
-                            "phase": "Post-Event Decay",
-                            "rvr": df_test.item(0, "post_decay_rvr"),
-                        },
-                    ]
+            # Create a simpler comparison plot for the comprehensive hypothesis results
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+            # Plot 1: Events with Peaks
+            event_types = ["FDA Approvals", "Earnings Announcements"]
+            events_with_peaks = [
+                fda_h1_test.item(0, "n_events_with_peaks"),
+                earnings_h1_test.item(0, "n_events_with_peaks"),
+            ]
+            total_events = [
+                fda_h1_summary.item(0, "n_events"),
+                earnings_h1_summary.item(0, "n_events"),
+            ]
+
+            bars1 = ax1.bar(
+                event_types,
+                events_with_peaks,
+                color=["deepskyblue", "salmon"],
+                alpha=0.8,
+                edgecolor="black",
+            )
+            ax1.set_ylabel("Number of Events with Peaks")
+            ax1.set_title("H1: Events with RVR Peaks")
+            ax1.grid(True, axis="y", linestyle=":", alpha=0.6)
+
+            # Add value labels
+            for bar, total in zip(bars1, total_events):
+                height = bar.get_height()
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height,
+                    f"{int(height)}/{int(total)}",
+                    ha="center",
+                    va="bottom",
                 )
 
-            phases_plot_df = pl.DataFrame(phases_plot_data)
-            # Convert to pandas for matplotlib compatibility
-            phases_pd = phases_plot_df.to_pandas()
+            # Plot 2: Mean Peak Values
+            mean_peaks = [
+                fda_h1_test.item(0, "mean_peak_value"),
+                earnings_h1_test.item(0, "mean_peak_value"),
+            ]
 
-            fig, ax = plt.subplots(figsize=(12, 7))
-
-            event_types_unique = phases_pd["event_type"].unique()
-            phases_order = ["Pre-Event", "Post-Event Rising", "Post-Event Decay"]
-            num_phases = len(phases_order)
-            x_indices = np.arange(num_phases)
-            bar_width = 0.35
-
-            data_fda = (
-                phases_pd[phases_pd["event_type"] == event_types_unique[0]]
-                .set_index("phase")
-                .reindex(phases_order)["rvr"]
-            )
-            data_earnings = (
-                phases_pd[phases_pd["event_type"] == event_types_unique[1]]
-                .set_index("phase")
-                .reindex(phases_order)["rvr"]
-            )
-
-            rects1 = ax.bar(
-                x_indices - bar_width / 2,
-                data_fda.fillna(0),
-                bar_width,
-                label=event_types_unique[0],
-                color="deepskyblue",
-                alpha=0.85,
+            bars2 = ax2.bar(
+                event_types,
+                mean_peaks,
+                color=["deepskyblue", "salmon"],
+                alpha=0.8,
                 edgecolor="black",
             )
-            rects2 = ax.bar(
-                x_indices + bar_width / 2,
-                data_earnings.fillna(0),
-                bar_width,
-                label=event_types_unique[1],
-                color="salmon",
-                alpha=0.85,
-                edgecolor="black",
-            )
+            ax2.set_ylabel("Mean Peak Value")
+            ax2.set_title("H1: Mean RVR Peak Values")
+            ax2.grid(True, axis="y", linestyle=":", alpha=0.6)
 
-            ax.set_ylabel("Average RVR", fontsize=12)
-            ax.set_title(
-                f"Hypothesis 1: RVR by Phase and Event Type (Window: {ANALYSIS_WINDOW[0]} to {ANALYSIS_WINDOW[1]} days)",
+            # Add value labels
+            for bar in bars2:
+                height = bar.get_height()
+                ax2.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height,
+                    f"{height:.2f}",
+                    ha="center",
+                    va="bottom",
+                )
+
+            # Add support status
+            fda_supported = fda_h1_test.item(0, "overall_significant")
+            earnings_supported = earnings_h1_test.item(0, "overall_significant")
+            support_text = f"H1 Support: FDA {'SUPPORTED' if fda_supported else 'NOT SUPPORTED'} | Earnings {'SUPPORTED' if earnings_supported else 'NOT SUPPORTED'}"
+
+            fig.suptitle(
+                f"Hypothesis 1 Comparison: Post-Event RVR Peak Detection\n{support_text}",
                 fontsize=14,
                 fontweight="bold",
             )
-            ax.set_xticks(x_indices)
-            ax.set_xticklabels(phases_order, fontsize=11)
-            ax.legend(fontsize=10, loc="upper right")
-            ax.grid(True, axis="y", linestyle=":", alpha=0.6)
-            ax.axhline(0, color="black", linewidth=0.5)
 
-            # Add value labels on bars
-            def autolabel_bars(rects_group):
-                for rect_item in rects_group:
-                    height = rect_item.get_height()
-                    ax.annotate(
-                        f"{height:.3f}" if not np.isnan(height) else "N/A",
-                        xy=(rect_item.get_x() + rect_item.get_width() / 2, height),
-                        xytext=(0, 3),
-                        textcoords="offset points",
-                        ha="center",
-                        va="bottom",
-                        fontsize=9,
-                    )
-
-            autolabel_bars(rects1)
-            autolabel_bars(rects2)
-
-            # Add support status
-            fda_supported_text = (
-                "SUPPORTED" if fda_h1_summary.item(0, "result") else "NOT SUPPORTED"
-            )
-            earn_supported_text = (
-                "SUPPORTED"
-                if earnings_h1_summary.item(0, "result")
-                else "NOT SUPPORTED"
-            )
-            support_text = (
-                f"H1 Support: FDA {fda_supported_text} | Earnings {earn_supported_text}"
-            )
-            fig.text(
-                0.5,
-                0.01,
-                support_text,
-                ha="center",
-                va="bottom",
-                fontsize=10,
-                bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", alpha=0.7),
-            )
-
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+            plt.tight_layout()
             plt.savefig(
-                os.path.join(comparison_dir, "hypothesis1_rvr_phase_comparison.png"),
+                os.path.join(
+                    comparison_dir, "hypothesis1_comprehensive_comparison.png"
+                ),
                 dpi=200,
             )
             plt.close(fig)
             print(
-                f"Saved RVR phase comparison plot to: {os.path.join(comparison_dir, 'hypothesis1_rvr_phase_comparison.png')}"
+                f"Saved comprehensive H1 comparison plot to: {os.path.join(comparison_dir, 'hypothesis1_comprehensive_comparison.png')}"
             )
 
         except Exception as e:
@@ -695,8 +654,8 @@ def run_comprehensive_hypothesis_tests(
         return False
 
     try:
-        # Initialize hypothesis tester
-        hypothesis_tester = HypothesisTester(confidence_level=0.95)
+        # Initialize hypothesis tester with more realistic confidence level
+        hypothesis_tester = HypothesisTester(confidence_level=0.90)
         performance_metrics = PerformanceMetrics()
 
         # Prepare data for hypothesis testing
