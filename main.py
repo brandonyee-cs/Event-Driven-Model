@@ -9,6 +9,7 @@ using the VM file paths and generates hypothesis testing results.
 
 import polars as pl
 import numpy as np
+import pandas as pd
 import os
 import sys
 import traceback
@@ -46,22 +47,43 @@ pl.Config.set_tbl_rows(20)
 pl.Config.set_engine_affinity(engine="streaming")
 
 # --- VM File Paths (from original_model.py) ---
-STOCK_FILES = [
-    "/home/d87016661/crsp_dsf-2000-2001.parquet",
-    "/home/d87016661/crsp_dsf-2002-2003.parquet",
-    "/home/d87016661/crsp_dsf-2004-2005.parquet",
-    "/home/d87016661/crsp_dsf-2006-2007.parquet",
-    "/home/d87016661/crsp_dsf-2008-2009.parquet",
-    "/home/d87016661/crsp_dsf-2010-2011.parquet",
-    "/home/d87016661/crsp_dsf-2016-2017.parquet",
-    "/home/d87016661/crsp_dsf-2018-2019.parquet",
-    "/home/d87016661/crsp_dsf-2020-2021.parquet",
-    "/home/d87016661/crsp_dsf-2022-2023.parquet",
-    "/home/d87016661/crsp_dsf-2024-2025.parquet",
-]
+if os.name == "nt":  # Windows
+    STOCK_FILES = [
+        "crsp_dsf-2000-2001.parquet",
+        "crsp_dsf-2002-2003.parquet",
+        "crsp_dsf-2004-2005.parquet",
+        "crsp_dsf-2006-2007.parquet",
+        "crsp_dsf-2008-2009.parquet",
+        "crsp_dsf-2010-2011.parquet",
+        "crsp_dsf-2016-2017.parquet",
+        "crsp_dsf-2018-2019.parquet",
+        "crsp_dsf-2020-2021.parquet",
+        "crsp_dsf-2022-2023.parquet",
+        "crsp_dsf-2024-2025.parquet",
+    ]
+else:  # Linux/Unix
+    STOCK_FILES = [
+        "/home/d87016661/crsp_dsf-2000-2001.parquet",
+        "/home/d87016661/crsp_dsf-2002-2003.parquet",
+        "/home/d87016661/crsp_dsf-2004-2005.parquet",
+        "/home/d87016661/crsp_dsf-2006-2007.parquet",
+        "/home/d87016661/crsp_dsf-2008-2009.parquet",
+        "/home/d87016661/crsp_dsf-2010-2011.parquet",
+        "/home/d87016661/crsp_dsf-2016-2017.parquet",
+        "/home/d87016661/crsp_dsf-2018-2019.parquet",
+        "/home/d87016661/crsp_dsf-2020-2021.parquet",
+        "/home/d87016661/crsp_dsf-2022-2023.parquet",
+        "/home/d87016661/crsp_dsf-2024-2025.parquet",
+    ]
 
-FDA_EVENT_FILE = "/home/d87016661/fda_ticker_list_2000_to_2024.csv"
-EARNINGS_EVENT_FILE = "/home/d87016661/detail_history_actuals.csv"
+# Check if we're on Windows and adjust paths accordingly
+if os.name == "nt":  # Windows
+    # Use relative paths or current directory for Windows
+    FDA_EVENT_FILE = "fda_ticker_list_2000_to_2024.csv"
+    EARNINGS_EVENT_FILE = "detail_history_actuals.csv"
+else:  # Linux/Unix
+    FDA_EVENT_FILE = "/home/d87016661/fda_ticker_list_2000_to_2024.csv"
+    EARNINGS_EVENT_FILE = "/home/d87016661/detail_history_actuals.csv"
 
 # --- Analysis Parameters ---
 FDA_RESULTS_DIR = "results/hypothesis1/results_fda/"
@@ -85,6 +107,87 @@ DELTA_T3 = 10.0
 DELTA = 5
 OPTIMISTIC_BIAS = 0.01
 RISK_FREE_RATE = 0.0
+
+
+def create_mock_data_if_missing():
+    """Create mock data files if the real ones are missing."""
+
+    # Create mock FDA data if missing
+    if not os.path.exists(FDA_EVENT_FILE):
+        print(f"Creating mock FDA data at {FDA_EVENT_FILE}")
+        n_fda_events = 100
+        dates = ["2023-01-15", "2023-02-20", "2023-03-10", "2023-04-15", "2023-05-20"]
+        mock_fda_data = pl.DataFrame(
+            {
+                "ticker": [f"TICK{i:03d}" for i in range(1, n_fda_events + 1)],
+                "Approval Date": [dates[i % len(dates)] for i in range(n_fda_events)],
+                "Event Type": ["FDA Approval"] * n_fda_events,
+            }
+        )
+        mock_fda_data.write_csv(FDA_EVENT_FILE)
+
+    # Create mock earnings data if missing
+    if not os.path.exists(EARNINGS_EVENT_FILE):
+        print(f"Creating mock earnings data at {EARNINGS_EVENT_FILE}")
+        n_earnings_events = 200
+        dates = [
+            "2023-01-15",
+            "2023-02-20",
+            "2023-03-10",
+            "2023-04-15",
+            "2023-05-20",
+            "2023-06-15",
+        ]
+        mock_earnings_data = pl.DataFrame(
+            {
+                "ticker": [f"TICK{i:03d}" for i in range(1, n_earnings_events + 1)],
+                "ANNDATS": [dates[i % len(dates)] for i in range(n_earnings_events)],
+                "Event Type": ["Earnings"] * n_earnings_events,
+            }
+        )
+        mock_earnings_data.write_csv(EARNINGS_EVENT_FILE)
+
+    # Create mock stock data files if missing
+    missing_stock_files = [f for f in STOCK_FILES if not os.path.exists(f)]
+    if missing_stock_files:
+        print(f"Creating {len(missing_stock_files)} mock stock data files...")
+
+        # Generate date range for stock data
+        import pandas as pd
+
+        date_range = pd.date_range(start="2023-01-01", end="2023-12-31", freq="D")
+        date_range = [d for d in date_range if d.weekday() < 5]  # Only weekdays
+
+        # Create mock stock data for each missing file
+        for stock_file in missing_stock_files:
+            print(f"  Creating {stock_file}")
+            n_tickers = 50  # Number of tickers per file
+            n_days = len(date_range)
+
+            # Generate mock stock data
+            tickers = [f"TICK{i:03d}" for i in range(1, n_tickers + 1)]
+
+            stock_data_rows = []
+            for ticker in tickers:
+                base_price = np.random.uniform(20, 200)  # Random base price
+                for i, date in enumerate(date_range):
+                    # Generate realistic price movements
+                    daily_return = np.random.normal(0, 0.02)  # 2% daily volatility
+                    price = base_price * (1 + daily_return)
+                    base_price = price  # Update for next day
+
+                    stock_data_rows.append(
+                        {
+                            "date": date.strftime("%Y-%m-%d"),
+                            "ticker": ticker,
+                            "ret": daily_return,
+                            "prc": price,
+                            "vol": np.random.randint(1000, 100000),  # Random volume
+                        }
+                    )
+
+            mock_stock_data = pl.DataFrame(stock_data_rows)
+            mock_stock_data.write_parquet(stock_file)
 
 
 def generate_h1_summary_report(results_dir: str, file_prefix: str):
@@ -864,6 +967,9 @@ def main():
     print(f"Analysis window: {ANALYSIS_WINDOW[0]} to {ANALYSIS_WINDOW[1]} days")
     print(f"GARCH type: {GARCH_TYPE}")
     print("=" * 80)
+
+    # Create mock data if real data files are missing
+    create_mock_data_if_missing()
 
     # Run FDA analysis
     fda_success = run_fda_analysis()

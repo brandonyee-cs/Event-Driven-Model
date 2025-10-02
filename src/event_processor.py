@@ -1340,7 +1340,7 @@ class EventAnalysis:
             n=min(100, analysis_data.height)
         )
         avg_abs_return = (
-            sample_returns.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns.select(pl.all().mean().abs()).item()
             if sample_returns.height > 0 and sample_returns.width > 0
             else 0.0
         )
@@ -1517,7 +1517,7 @@ class EventAnalysis:
             n=min(100, temp_analysis_data.height)
         )
         avg_abs_return = (
-            sample_returns.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns.select(pl.all().mean().abs()).item()
             if sample_returns.height > 0 and sample_returns.width > 0
             else 0.0
         )
@@ -2213,7 +2213,7 @@ class EventAnalysis:
             n=min(100, analysis_data_rvr.height)
         )
         avg_abs_return_rvr = (
-            sample_returns_rvr.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns_rvr.select(pl.all().mean().abs()).item()
             if sample_returns_rvr.height > 0 and sample_returns_rvr.width > 0
             else 0.0
         )
@@ -2235,7 +2235,7 @@ class EventAnalysis:
             )
             range_check_rvr = (pct_95_rvr - pct_05_rvr) > 0.1
             std_check_rvr = (
-                sample_returns_rvr.select(pl.col("clipped_return").std()).item(0, 0)
+                sample_returns_rvr.select(pl.col("clipped_return").std()).item()
                 or 0.0
             ) > 0.02  # Ensure not None
             returns_in_pct_rvr = (
@@ -2767,7 +2767,7 @@ class EventAnalysis:
             n=min(100, proc_analysis_data.height)
         )
         avg_abs_return = (
-            sample_returns.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns.select(pl.all().mean().abs()).item()
             if sample_returns.height > 0 and sample_returns.width > 0
             else 0.0
         )
@@ -3087,7 +3087,7 @@ class EventAnalysis:
             n=min(100, analysis_data.height)
         )
         avg_abs_return = (
-            sample_returns.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns.select(pl.all().mean().abs()).item()
             if sample_returns.height > 0 and sample_returns.width > 0
             else 0.0
         )
@@ -3261,7 +3261,7 @@ class EventAnalysis:
             n=min(100, temp_analysis_data.height)
         )
         avg_abs_return = (
-            sample_returns.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns.select(pl.all().mean().abs()).item()
             if sample_returns.height > 0 and sample_returns.width > 0
             else 0.0
         )
@@ -3703,7 +3703,7 @@ class EventAnalysis:
             n=min(100, analysis_data_rvr.height)
         )
         avg_abs_return_rvr = (
-            sample_returns_rvr.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns_rvr.select(pl.all().mean().abs()).item()
             if sample_returns_rvr.height > 0 and sample_returns_rvr.width > 0
             else 0.0
         )
@@ -3725,7 +3725,7 @@ class EventAnalysis:
             )
             range_check_rvr = (pct_95_rvr - pct_05_rvr) > 0.1
             std_check_rvr = (
-                sample_returns_rvr.select(pl.col("clipped_return").std()).item(0, 0)
+                sample_returns_rvr.select(pl.col("clipped_return").std()).item()
                 or 0.0
             ) > 0.02  # Ensure not None
             returns_in_pct_rvr = (
@@ -4257,7 +4257,7 @@ class EventAnalysis:
             n=min(100, proc_analysis_data.height)
         )
         avg_abs_return = (
-            sample_returns.select(pl.all().mean().abs()).item(0, 0)
+            sample_returns.select(pl.all().mean().abs()).item()
             if sample_returns.height > 0 and sample_returns.width > 0
             else 0.0
         )

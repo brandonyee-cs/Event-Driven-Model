@@ -7238,6 +7238,7 @@ class PerformanceMetrics:
             else:
                 p_value = 0.0
                 test_stat = np.inf if sample_mean > null_hypothesis_value else -np.inf
+            critical_value = np.nan  # No meaningful critical value when std is 0
         else:
             # t-test
             test_stat = (sample_mean - null_hypothesis_value) / (sample_std / np.sqrt(n))
