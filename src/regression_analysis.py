@@ -80,13 +80,17 @@ class EventRegressionAnalyzer:
                 groups=cluster_groups
             )
         
+        # Get parameter names for indexing
+        param_names = model.model.exog_names
+        rising_idx = param_names.index('post_rising') if 'post_rising' in param_names else None
+        
         return {
             'model': model,
             'summary': model.summary(),
-            'coef_rising': model.params.get('post_rising'),
-            'se_rising': model.bse.get('post_rising'),
-            't_rising': model.tvalues.get('post_rising'),
-            'p_rising': model.pvalues.get('post_rising'),
+            'coef_rising': model.params[rising_idx] if rising_idx is not None else None,
+            'se_rising': model.bse[rising_idx] if rising_idx is not None else None,
+            't_rising': model.tvalues[rising_idx] if rising_idx is not None else None,
+            'p_rising': model.pvalues[rising_idx] if rising_idx is not None else None,
             'n_obs': int(model.nobs),
             'r_squared': model.rsquared
         }
