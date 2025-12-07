@@ -1,0 +1,5 @@
+test,t_stat,p_value,mean_diff,ci_95_lower,ci_95_upper
+Welch t-test: Pre vs Rising,65.00306662253215,0.0,23.489238782579292,22.780981593177096,24.19749597198149
+Welch t-test: Rising vs Decay,-66.39799376665259,0.0,-23.65345121807462,-24.351676304761376,-22.95522613138786
+Bootstrap CI: Pre vs Rising,,,NaN,NaN,NaN
+Mann-Whitney U: Pre vs Rising,2477438500491.0,0.0,8.219885447870753,,
