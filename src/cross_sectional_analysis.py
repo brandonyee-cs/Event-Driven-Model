@@ -76,6 +76,11 @@ class CrossSectionalAnalyzer:
         print("Loading market cap data...")
         market_cap = self.load_market_cap_data()
         
+        # Cast date column to match Event Date datetime type before join
+        market_cap = market_cap.with_columns(
+            pl.col('date').cast(pl.Datetime('us'))
+        )
+        
         # Join with events
         data_with_cap = self.data.join(
             market_cap,

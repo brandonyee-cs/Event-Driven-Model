@@ -1,4 +1,4 @@
-import polars as pl
+﻿import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -831,7 +831,7 @@ class EventAnalysis:
                 rmse = np.sqrt(mse)
                 r2 = r2_score(y_test, y_pred)
                 results[model_name] = {'mse': mse, 'rmse': rmse, 'r2': r2, 'y_pred': y_pred, 'y_test': y_test}
-                # print(f"Model: {model_name}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
+                # print(f"Model: {model_name}, RMSE: {rmse:.4f}, RÂ²: {r2:.4f}")
             return results
         except Exception as e:
             # print(f"Error evaluating models: {e}")
@@ -2440,6 +2440,16 @@ class EventAnalysis:
             return None
 
         combined_rvr_df = pl.DataFrame(all_rvr_data_list)
+        
+        # Merge rvr back into self.data for downstream analysis
+        rvr_to_merge = combined_rvr_df.select(['event_id', 'days_to_event', 'rvr'])
+        if 'rvr' in self.data.columns:
+            self.data = self.data.drop('rvr')
+        self.data = self.data.join(
+            rvr_to_merge,
+            on=['event_id', 'days_to_event'],
+            how='left'
+        )
         agg_rvr_df = combined_rvr_df.group_by('days_to_event').agg([
             pl.mean('expected_return_biased').alias('mean_expected_return_biased'),
             pl.mean('three_phase_volatility').alias('mean_three_phase_volatility'),
