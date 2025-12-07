@@ -62,12 +62,17 @@ class EventRegressionAnalyzer:
         
         formula = ''.join(formula_parts)
         
+        # Drop rows with NaN in dependent variable before regression
+        data = data.dropna(subset=[dependent_var])
+        
         # Run regression
         model = smf.ols(formula, data=data).fit()
         
         # Cluster standard errors
         if cluster_vars:
-            cluster_groups = data[cluster_vars].apply(
+            # Get the indices used in the regression (after dropping NaN)
+            used_indices = model.model.data.row_labels
+            cluster_groups = data.loc[used_indices, cluster_vars].apply(
                 lambda x: '_'.join(x.astype(str)), axis=1
             )
             model = model.get_robustcov_results(

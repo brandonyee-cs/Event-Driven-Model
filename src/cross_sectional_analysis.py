@@ -156,6 +156,11 @@ class CrossSectionalAnalyzer:
         
         sic_df = pl.concat(sic_data, how='vertical')
         
+        # Cast date column to match Event Date datetime type before join
+        sic_df = sic_df.with_columns(
+            pl.col('date').cast(pl.Datetime('us'))
+        )
+        
         # Join
         data_with_sic = self.data.join(
             sic_df,
