@@ -57,7 +57,7 @@ class EventRegressionAnalyzer:
             formula_parts.append(' + C(ticker)')
         
         if time_fe:
-            data['year_month'] = pd.to_datetime(data['Event Date']).dt.to_period('M')
+            data['year_month'] = pd.to_datetime(data['Event Date']).dt.strftime('%Y-%m')
             formula_parts.append(' + C(year_month)')
         
         formula = ''.join(formula_parts)
