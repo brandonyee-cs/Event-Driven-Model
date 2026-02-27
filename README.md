@@ -4,10 +4,10 @@ Code is associated with:
 
 #### Brandon Yee
 
-Working Paper: https://doi.org/10.20944/preprints202506.0079.v1
+Working Paper: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6041614
 
 [International Congress of Basic Sciences Research Excellence Award](https://mp.weixin.qq.com/s/5SZbZx87bvD7_pd4_l_i8)
-S.T. Yau High School Science Award Finalist
+[S.T. Yau High School Science Award Finalist](https://www.yau-science-awards.org/bulltin/show-2050.html)
 
 ## Data Sources
 
@@ -23,9 +23,13 @@ Note: The repository does not include the raw data files due to licensing restri
 If you use this code in your research, please cite:
 
 ``` bibtex
-@article{yee2025modeling,
-  title={Beyond the Event Horizon: Peak Risk-Adjusted Performance in Post-Event Markets},
-  author={Yee, Brandon},
-  year={2025}
+@article{yee2025beyond,
+  author  = {Yee, Brandon},
+  title   = {Beyond the Event Horizon: Post-Event Dynamics in Risk-Adjusted Returns},
+  journal = {SSRN Electronic Journal},
+  year    = {2025},
+  url     = {https://dx.doi.org/10.2139/ssrn.6041614},
+  doi     = {10.2139/ssrn.6041614},
+  note    = {Working Paper}
 }
 ```
